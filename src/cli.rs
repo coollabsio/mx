@@ -15,6 +15,8 @@ pub struct Cli {
 pub enum Commands {
     #[command(about = "manage server credentials in configuration file")]
     Alias(AliasArgs),
+    #[command(about = "list buckets and objects")]
+    Ls(LsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -56,4 +58,9 @@ pub struct AliasListArgs {
 #[derive(Debug, Args)]
 pub struct AliasRemoveArgs {
     pub alias: String,
+}
+
+#[derive(Debug, Args)]
+pub struct LsArgs {
+    pub target: String,
 }

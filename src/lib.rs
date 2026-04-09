@@ -1,6 +1,8 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod s3;
+pub mod target;
 
 use anyhow::Result;
 use clap::Parser;

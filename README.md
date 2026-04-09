@@ -8,6 +8,7 @@ Current focus: alias/config management.
 
 Implemented:
 
+- `mx ls`
 - `mx alias set` / `mx alias s`
 - `mx alias list` / `mx alias ls`
 - `mx alias remove` / `mx alias rm`
@@ -15,6 +16,7 @@ Implemented:
 
 In progress:
 
+- S3 listing parity with `mc ls`
 - `alias import`
 - `alias export`
 - full `mc` behavioral parity
@@ -67,6 +69,26 @@ mx alias list myminio
 mx alias remove myminio
 ```
 
+### List S3 buckets or objects
+
+List buckets on an alias:
+
+```bash
+mx ls myminio
+```
+
+List a bucket root:
+
+```bash
+mx ls myminio/mybucket/
+```
+
+List a prefix:
+
+```bash
+mx ls myminio/mybucket/photos/
+```
+
 ## JSON output
 
 Use `--json` globally:
@@ -76,6 +98,7 @@ mx --json alias list
 mx --json alias list myminio
 mx --json alias set myminio http://localhost:9000 minio minio123
 mx --json alias remove myminio
+mx --json ls myminio/mybucket/
 ```
 
 Example:
@@ -142,6 +165,7 @@ mx alias list demo
 
 # machine-readable output
 mx --json alias list demo
+mx --json ls demo/mybucket/
 
 # remove alias
 mx alias remove demo
