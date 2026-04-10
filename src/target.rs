@@ -4,7 +4,8 @@ use anyhow::{Result, bail};
 pub struct TargetRef {
     pub alias: String,
     pub bucket: Option<String>,
-    pub prefix: Option<String>,
+    pub key: Option<String>,
+    pub trailing_slash: bool,
 }
 
 impl TargetRef {
@@ -15,6 +16,7 @@ impl TargetRef {
         }
 
         let normalized = raw.replace('\\', "/");
+        let trailing_slash = normalized.ends_with('/');
         let trimmed = normalized.trim_matches('/');
         if trimmed.is_empty() {
             bail!("Target cannot be empty.");
@@ -25,7 +27,7 @@ impl TargetRef {
         validate_alias(&alias)?;
 
         let bucket = parts.next().map(str::to_string);
-        let prefix = parts
+        let key = parts
             .next()
             .map(str::to_string)
             .and_then(|value| if value.is_empty() { None } else { Some(value) });
@@ -33,19 +35,57 @@ impl TargetRef {
         Ok(Self {
             alias,
             bucket,
-            prefix,
+            key,
+            trailing_slash,
         })
+    }
+
+    pub fn is_alias_root(&self) -> bool {
+        self.bucket.is_none()
+    }
+
+    pub fn is_bucket_root(&self) -> bool {
+        self.bucket.is_some() && self.key.is_none()
+    }
+
+    pub fn key_with_trailing_slash(&self) -> Option<String> {
+        let mut key = self.key.clone()?;
+        if self.trailing_slash && !key.ends_with('/') {
+            key.push('/');
+        }
+        Some(key)
+    }
+
+    pub fn require_bucket(&self) -> Result<&str> {
+        self.bucket
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("Target `{}` is missing bucket name.", self.alias))
+    }
+
+    pub fn require_object_key(&self) -> Result<String> {
+        let bucket = self.require_bucket()?;
+        let key = self.key_with_trailing_slash().ok_or_else(|| {
+            anyhow::anyhow!("Target `{}/{}` is missing object key.", self.alias, bucket)
+        })?;
+
+        if key.is_empty() {
+            bail!("Target `{}/{}` is missing object key.", self.alias, bucket);
+        }
+
+        Ok(key)
     }
 }
 
-fn validate_alias(alias: &str) -> Result<()> {
-    let valid = !alias.is_empty()
+pub fn is_valid_alias(alias: &str) -> bool {
+    !alias.is_empty()
         && alias.chars().enumerate().all(|(idx, ch)| match idx {
             0 => ch.is_ascii_alphabetic(),
             _ => ch.is_ascii_alphanumeric() || ch == '-' || ch == '_',
-        });
+        })
+}
 
-    if !valid {
+fn validate_alias(alias: &str) -> Result<()> {
+    if !is_valid_alias(alias) {
         bail!("Invalid alias `{alias}`.");
     }
 
@@ -63,7 +103,8 @@ mod tests {
             TargetRef {
                 alias: "play".into(),
                 bucket: None,
-                prefix: None,
+                key: None,
+                trailing_slash: false,
             }
         );
     }
@@ -75,7 +116,8 @@ mod tests {
             TargetRef {
                 alias: "play".into(),
                 bucket: Some("mybucket".into()),
-                prefix: None,
+                key: None,
+                trailing_slash: true,
             }
         );
     }
@@ -87,9 +129,16 @@ mod tests {
             TargetRef {
                 alias: "play".into(),
                 bucket: Some("mybucket".into()),
-                prefix: Some("photos/2025".into()),
+                key: Some("photos/2025".into()),
+                trailing_slash: false,
             }
         );
+    }
+
+    #[test]
+    fn keeps_object_trailing_slash() {
+        let target = TargetRef::parse("play/mybucket/photos/").unwrap();
+        assert_eq!(target.key_with_trailing_slash().as_deref(), Some("photos/"));
     }
 
     #[test]

@@ -17,6 +17,22 @@ pub enum Commands {
     Alias(AliasArgs),
     #[command(about = "list buckets and objects")]
     Ls(LsArgs),
+    #[command(about = "make bucket")]
+    Mb(BucketTargetArgs),
+    #[command(about = "remove bucket")]
+    Rb(BucketTargetArgs),
+    #[command(about = "show object or bucket information")]
+    Stat(TargetArg),
+    #[command(about = "print object contents to stdout")]
+    Cat(TargetArg),
+    #[command(about = "remove object")]
+    Rm(TargetArg),
+    #[command(about = "copy objects and files")]
+    Cp(CopyArgs),
+    #[command(about = "move object")]
+    Mv(CopyArgs),
+    #[command(visible_alias = "out", about = "upload object")]
+    Put(CopyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -62,5 +78,21 @@ pub struct AliasRemoveArgs {
 
 #[derive(Debug, Args)]
 pub struct LsArgs {
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct BucketTargetArgs {
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct TargetArg {
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct CopyArgs {
+    pub source: String,
     pub target: String,
 }

@@ -1,8 +1,9 @@
 use crate::cli::LsArgs;
+use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::s3::S3ListItem;
 use crate::target::TargetRef;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::io::{self, Write};
@@ -11,14 +12,9 @@ use tabwriter::TabWriter;
 pub fn run(args: LsArgs, json: bool) -> Result<()> {
     let target = TargetRef::parse(&args.target)?;
     let store = ConfigStore::load_or_create()?;
-    let alias = store
-        .config()
-        .aliases
-        .get(&target.alias)
-        .cloned()
-        .ok_or_else(|| anyhow!("No such alias `{}` found.", target.alias))?;
+    let alias = alias_config(&store, &target.alias)?;
 
-    let runtime = tokio::runtime::Runtime::new()?;
+    let runtime = runtime()?;
     let mut items = runtime.block_on(crate::s3::list_target(&alias, &target))?;
     items.sort_by(compare_items);
 

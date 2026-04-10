@@ -9,10 +9,18 @@ Current focus: alias/config management.
 Implemented:
 
 - `mx ls`
+- `mx mb`
+- `mx rb`
+- `mx stat`
+- `mx cat`
+- `mx rm`
+- `mx cp`
+- `mx mv`
+- `mx put` / `mx out`
 - `mx alias set` / `mx alias s`
 - `mx alias list` / `mx alias ls`
 - `mx alias remove` / `mx alias rm`
-- `--json` output for alias commands
+- `--json` output for supported commands
 
 In progress:
 
@@ -69,6 +77,58 @@ mx alias list myminio
 mx alias remove myminio
 ```
 
+### Create a bucket
+
+```bash
+mx mb myminio/mybucket
+```
+
+### Remove a bucket
+
+```bash
+mx rb myminio/mybucket
+```
+
+### Show metadata
+
+```bash
+mx stat myminio/mybucket
+mx stat myminio/mybucket/path/file.txt
+```
+
+### Print an object
+
+```bash
+mx cat myminio/mybucket/path/file.txt
+```
+
+### Remove an object
+
+```bash
+mx rm myminio/mybucket/path/file.txt
+```
+
+### Copy objects and files
+
+```bash
+mx cp ./local.txt myminio/mybucket/
+mx cp myminio/mybucket/remote.txt ./downloaded.txt
+mx cp myminio/mybucket/a.txt myminio/mybucket/b.txt
+```
+
+### Move objects
+
+```bash
+mx mv myminio/mybucket/a.txt myminio/mybucket/archive/a.txt
+```
+
+### Upload objects
+
+```bash
+mx put ./local.txt myminio/mybucket/
+mx out ./local.txt myminio/mybucket/out.txt
+```
+
 ### List S3 buckets or objects
 
 List buckets on an alias:
@@ -99,6 +159,9 @@ mx --json alias list myminio
 mx --json alias set myminio http://localhost:9000 minio minio123
 mx --json alias remove myminio
 mx --json ls myminio/mybucket/
+mx --json mb myminio/mybucket
+mx --json stat myminio/mybucket/file.txt
+mx --json cp ./local.txt myminio/mybucket/
 ```
 
 Example:
@@ -183,4 +246,23 @@ Run tests:
 
 ```bash
 CARGO_HOME=$PWD/.cargo-home CARGO_TARGET_DIR=$PWD/target cargo test
+```
+
+Live S3/MinIO tests are opt-in:
+
+```bash
+MX_LIVE_TESTS=1 cargo test live_s3_workflow -- --nocapture
+```
+
+You can point live tests at any S3-compatible server:
+
+```bash
+MX_LIVE_TESTS=1 \
+MX_TEST_ALIAS=mytest \
+MX_TEST_URL=https://s3.example.com \
+MX_TEST_ACCESS_KEY=... \
+MX_TEST_SECRET_KEY=... \
+MX_TEST_API=S3v4 \
+MX_TEST_PATH=auto \
+cargo test live_s3_workflow -- --nocapture
 ```
