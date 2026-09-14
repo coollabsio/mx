@@ -4,6 +4,7 @@ pub mod config;
 pub mod location;
 pub mod s3;
 pub mod target;
+pub mod transfer;
 
 use anyhow::Result;
 use clap::Parser;

@@ -3,6 +3,7 @@ pub mod cat;
 pub mod cp;
 pub mod ls;
 pub mod mb;
+pub mod mirror;
 pub mod mv;
 pub mod put;
 pub mod rb;
@@ -42,5 +43,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Cp(args) => cp::run(args, json),
         Commands::Mv(args) => mv::run(args, json),
         Commands::Put(args) => put::run(args, json),
+        Commands::Mirror(args) => mirror::run(args, json),
     }
 }

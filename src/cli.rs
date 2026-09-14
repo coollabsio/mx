@@ -1,7 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "mx", bin_name = "mx")]
 #[command(about = "MaxIO Client", long_about = None)]
 pub struct Cli {
     #[arg(long, global = true)]
@@ -26,13 +25,15 @@ pub enum Commands {
     #[command(about = "print object contents to stdout")]
     Cat(TargetArg),
     #[command(about = "remove object")]
-    Rm(TargetArg),
+    Rm(RemoveArgs),
     #[command(about = "copy objects and files")]
     Cp(CopyArgs),
     #[command(about = "move object")]
     Mv(CopyArgs),
     #[command(visible_alias = "out", about = "upload object")]
-    Put(CopyArgs),
+    Put(PutArgs),
+    #[command(about = "mirror a directory tree")]
+    Mirror(MirrorArgs),
 }
 
 #[derive(Debug, Args)]
@@ -93,6 +94,29 @@ pub struct TargetArg {
 
 #[derive(Debug, Args)]
 pub struct CopyArgs {
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PutArgs {
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct MirrorArgs {
+    #[arg(long)]
+    pub remove: bool,
     pub source: String,
     pub target: String,
 }

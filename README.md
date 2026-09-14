@@ -1,8 +1,8 @@
 # mx
 
-`mx` is a Rust CLI aiming for compatibility with [`mc`](https://github.com/minio/mc).
+`mx` is an independent Apache-2.0 Rust CLI for common S3 workflows. It aims to replace the open-source [`mc`](https://github.com/minio/mc) client in scripts and containers. It is not a MinIO product.
 
-Current focus: alias/config management.
+Current focus: a public Linux container replacement for common `mc` commands. See [COMPATIBILITY.md](COMPATIBILITY.md) before migration.
 
 ## Status
 
@@ -17,6 +17,8 @@ Implemented:
 - `mx cp`
 - `mx mv`
 - `mx put` / `mx out`
+- recursive local-to-S3 `mx cp`
+- preview `mx mirror` for local-to-S3 trees
 - `mx alias set` / `mx alias s`
 - `mx alias list` / `mx alias ls`
 - `mx alias remove` / `mx alias rm`
@@ -28,6 +30,17 @@ In progress:
 - `alias import`
 - `alias export`
 - full `mc` behavioral parity
+
+## Container
+
+Build and run the compatibility image locally:
+
+```bash
+docker build -t mx:local .
+docker run --rm mx:local --help
+```
+
+The image runs the binary as `mc`. It also contains `/usr/local/bin/mx`. Linux amd64 and arm64 publication is defined in `.github/workflows/image.yml`.
 
 ## Build
 

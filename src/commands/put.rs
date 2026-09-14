@@ -1,4 +1,4 @@
-use crate::cli::CopyArgs;
+use crate::cli::PutArgs;
 use crate::commands::cp::{resolve_destination_key, source_name_from_local};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 use std::io::Read;
 
-pub fn run(args: CopyArgs, json: bool) -> Result<()> {
+pub fn run(args: PutArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let target = parse_location(&args.target, store.config());
 

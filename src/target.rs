@@ -30,7 +30,7 @@ impl TargetRef {
         let key = parts
             .next()
             .map(str::to_string)
-            .and_then(|value| if value.is_empty() { None } else { Some(value) });
+            .filter(|value| !value.is_empty());
 
         Ok(Self {
             alias,

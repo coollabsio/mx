@@ -11,6 +11,15 @@ pub fn run(args: CopyArgs, json: bool) -> Result<()> {
     let source = parse_location(&args.source, store.config());
     let target = parse_location(&args.target, store.config());
 
+    if let (Location::Local(src), Location::S3(dst)) = (&source, &target)
+        && src.is_dir()
+    {
+        if !args.recursive {
+            bail!("Source is a directory. Use `--recursive` to copy it.");
+        }
+        return copy_local_directory(src, dst, &store, json);
+    }
+
     let result = match (&source, &target) {
         (Location::Local(src), Location::S3(dst)) => {
             let alias = alias_config(&store, &dst.alias)?;
@@ -61,6 +70,41 @@ pub fn run(args: CopyArgs, json: bool) -> Result<()> {
     };
 
     print_result(&result, json)
+}
+
+fn copy_local_directory(
+    source: &Path,
+    target: &crate::target::TargetRef,
+    store: &ConfigStore,
+    json: bool,
+) -> Result<()> {
+    let alias = alias_config(store, &target.alias)?;
+    let bucket = target.require_bucket()?.to_string();
+    let prefix = target.key_with_trailing_slash();
+    let rt = runtime()?;
+    for entry in crate::transfer::local_inventory(source)? {
+        let key = crate::transfer::join_key(prefix.as_deref(), &entry.relative);
+        let bytes = rt.block_on(crate::s3::put_local_file(
+            &alias,
+            &bucket,
+            &key,
+            &entry.path,
+        ))?;
+        let result = CopyResult::new(
+            entry.path.display().to_string(),
+            format!("{}/{bucket}/{key}", target.alias),
+            Some(bytes),
+        );
+        if json {
+            println!("{}", serde_json::to_string(&result)?);
+        } else {
+            println!(
+                "Copied `{}` -> `{}` successfully.",
+                result.source, result.target
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn source_name_from_local(path: &Path) -> Result<String> {

@@ -1,11 +1,11 @@
-use crate::cli::TargetArg;
+use crate::cli::RemoveArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::target::TargetRef;
 use anyhow::Result;
 use serde::Serialize;
 
-pub fn run(args: TargetArg, json: bool) -> Result<()> {
+pub fn run(args: RemoveArgs, json: bool) -> Result<()> {
     let target = TargetRef::parse(&args.target)?;
     let store = ConfigStore::load_or_create()?;
     let alias = alias_config(&store, &target.alias)?;
