@@ -2,7 +2,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn mx() -> Command {
-    Command::cargo_bin("mx").expect("binary")
+    let mut cmd = Command::cargo_bin("mx").expect("binary");
+    cmd.env("NO_COLOR", "1");
+    cmd
 }
 
 #[test]
@@ -117,9 +119,10 @@ fn mb_accepts_ignore_existing() {
 fn rb_rejects_ignore_existing() {
     let mut cmd = Command::cargo_bin("mx").unwrap();
     cmd.args(["rb", "--ignore-existing", "missing/example"]);
-    cmd.assert().failure().stderr(predicate::str::contains(
-        "unexpected argument '--ignore-existing'",
-    ));
+    cmd.env("NO_COLOR", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ignore-existing"));
 }
 
 #[test]

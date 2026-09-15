@@ -43,8 +43,35 @@ docker run --rm mx:local --help
 
 The image runs the binary as `mc`. The Alpine-based image contains a static
 PIE binary at `/usr/bin/mc` and an
-`/usr/bin/mx` symlink. Linux amd64 and arm64 publication is defined in
-`.github/workflows/image.yml`.
+`/usr/bin/mx` symlink.
+
+## Publish
+
+Push a version tag. GitHub Actions then publishes a multi-arch GHCR image and
+static Linux binaries:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Workflow: `.github/workflows/release.yml`
+
+- Image: `ghcr.io/<owner>/mx:0.1.0` (also `:0.1` and `:latest`)
+- Platforms: `linux/amd64`, `linux/arm64`
+- GitHub Release assets: `mx-linux-amd64`, `mx-linux-arm64`, `mc-linux-amd64`,
+  `mc-linux-arm64`, `SHA256SUMS`
+
+The binaries are copied from `/usr/bin/mc` in that image, so the container and
+the release files are the same build.
+
+You can also run the **Release** workflow from the Actions tab
+(`workflow_dispatch`). That push updates GHCR. A GitHub Release is created only
+for `v*.*.*` tags.
+
+If the GHCR package is private after the first push, open the package settings
+and set visibility to public. Link the package to this repository. See
+[Connecting a repository to a package](https://docs.github.com/en/packages/learn-github-packages/connecting-a-repository-to-a-package).
 
 ## Build
 
@@ -283,19 +310,22 @@ mx alias remove demo
 
 ## Development
 
-Run tests:
+Run unit and CLI tests:
 
 ```bash
-CARGO_HOME=$PWD/.cargo-home CARGO_TARGET_DIR=$PWD/target cargo test
+CARGO_HOME=$PWD/.cargo-home CARGO_TARGET_DIR=$PWD/target cargo test --locked
 ```
 
-Live S3/MinIO tests are opt-in:
+Run live MinIO tests. The script starts a pinned MinIO container, runs
+`tests/live_s3_workflow.rs`, and removes the container:
 
 ```bash
-MX_LIVE_TESTS=1 cargo test live_s3_workflow -- --nocapture
+sh tests/live_minio.sh
 ```
 
-You can point live tests at any S3-compatible server:
+The MinIO image tag is in `tests/minio.image`. Docker must be available.
+
+You can still point live tests at any S3-compatible server:
 
 ```bash
 MX_LIVE_TESTS=1 \
@@ -305,5 +335,5 @@ MX_TEST_ACCESS_KEY=... \
 MX_TEST_SECRET_KEY=... \
 MX_TEST_API=S3v4 \
 MX_TEST_PATH=auto \
-cargo test live_s3_workflow -- --nocapture
+cargo test --locked --test live_s3_workflow -- --test-threads=1
 ```

@@ -2,6 +2,7 @@
 set -eu
 
 image="${1:-mx:test}"
+minio_image="$(tr -d '[:space:]' < "$(dirname "$0")/minio.image")"
 network="mx-smoke-$$"
 server="mx-smoke-minio-$$"
 volume="mx-smoke-config-$$"
@@ -18,7 +19,7 @@ docker volume create "$volume" >/dev/null
 docker run -d --name "$server" --network "$network" \
     -e MINIO_ROOT_USER=minioadmin \
     -e MINIO_ROOT_PASSWORD=minioadmin \
-    quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data >/dev/null
+    "$minio_image" server /data >/dev/null
 
 i=0
 until docker run --rm --network "$network" busybox:1.37 \
@@ -74,3 +75,20 @@ run_mc stat --json --resolve "$resolve" pinned/coolify/large.bin | grep '"size":
 run_mc rm --resolve "$resolve" pinned/coolify/large.bin
 run_mc rm --resolve "$resolve" pinned/coolify/archive.tar.gz
 run_mc rb --resolve "$resolve" pinned/coolify
+
+run_mc mb local/parity
+printf 'one\ntwo\nthree\n' | docker run --rm -i --network "$network" \
+    -v "$volume:/home/mx/.mx" "$image" pipe --quiet local/parity/nested/file.txt
+run_mc head --lines 2 local/parity/nested/file.txt | grep 'one'
+run_mc find local/parity --name '*.txt' | grep 'file.txt'
+run_mc du -r local/parity | grep objects
+run_mc tree --files local/parity | grep nested
+run_mc ready local | grep ready
+run_mc ping -c 1 local | grep pong
+run_mc tag set local/parity/nested/file.txt env=test
+run_mc tag list local/parity/nested/file.txt | grep 'env=test'
+run_mc version enable local/parity
+run_mc version info local/parity | grep Enabled
+run_mc ls -r local/parity | grep 'file.txt'
+run_mc rm -r --force local/parity/nested
+run_mc rb --force local/parity

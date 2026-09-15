@@ -2,7 +2,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn mx() -> Command {
-    Command::cargo_bin("mx").expect("binary")
+    let mut cmd = Command::cargo_bin("mx").expect("binary");
+    cmd.env("NO_COLOR", "1");
+    cmd
 }
 
 #[test]

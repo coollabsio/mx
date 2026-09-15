@@ -1,9 +1,12 @@
-use crate::cli::{AliasCommand, AliasListArgs, AliasRemoveArgs, AliasSetArgs};
+use crate::cli::{
+    AliasCommand, AliasExportArgs, AliasImportArgs, AliasListArgs, AliasRemoveArgs, AliasSetArgs,
+};
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
+use crate::output;
 use anyhow::{Result, bail};
-use serde::Serialize;
-use std::io::{self, BufRead, IsTerminal, Write};
+use serde::{Deserialize, Serialize};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use tabwriter::TabWriter;
 use url::Url;
 
@@ -12,6 +15,8 @@ pub fn run(command: AliasCommand, json: bool) -> Result<()> {
         AliasCommand::Set(args) => set(args, json),
         AliasCommand::List(args) => list(args, json),
         AliasCommand::Remove(args) => remove(args, json),
+        AliasCommand::Import(args) => import(args, json),
+        AliasCommand::Export(args) => export(args),
     }
 }
 
@@ -112,6 +117,53 @@ fn remove(args: AliasRemoveArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn import(args: AliasImportArgs, json: bool) -> Result<()> {
+    let mut raw = String::new();
+    io::stdin().read_to_string(&mut raw)?;
+    let document: AliasExportDocument = serde_json::from_str(&raw)?;
+    set(
+        AliasSetArgs {
+            alias: args.alias,
+            url: document.url,
+            access_key: Some(document.access_key),
+            secret_key: Some(document.secret_key),
+            api: document.api,
+            path: document.path,
+        },
+        json,
+    )
+}
+
+fn export(args: AliasExportArgs) -> Result<()> {
+    let alias = normalize_alias(&args.alias)?;
+    let store = ConfigStore::load_or_create()?;
+    let config = store
+        .config()
+        .aliases
+        .get(&alias)
+        .ok_or_else(|| anyhow::anyhow!("No such alias `{alias}` found."))?;
+    let document = AliasExportDocument {
+        url: config.url.clone(),
+        access_key: config.access_key.clone(),
+        secret_key: config.secret_key.clone(),
+        api: config.api.clone(),
+        path: config.path.clone(),
+    };
+    println!("{}", serde_json::to_string(&document)?);
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AliasExportDocument {
+    url: String,
+    #[serde(rename = "accessKey")]
+    access_key: String,
+    #[serde(rename = "secretKey")]
+    secret_key: String,
+    api: String,
+    path: String,
+}
+
 fn print_rows(rows: &[DisplayAlias], json: bool) -> Result<()> {
     if json {
         for row in rows {
@@ -137,7 +189,7 @@ fn print_message(message: &AliasMessage<'_>, plain: &str, json: bool) -> Result<
     if json {
         println!("{}", serde_json::to_string_pretty(message)?);
     } else if !plain.is_empty() {
-        println!("{plain}");
+        output::print_plain(plain);
     }
     Ok(())
 }

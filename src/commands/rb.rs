@@ -1,11 +1,12 @@
-use crate::cli::BucketTargetArgs;
+use crate::cli::RemoveBucketArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::output;
 use crate::target::TargetRef;
 use anyhow::{Result, bail};
 use serde::Serialize;
 
-pub fn run(args: BucketTargetArgs, json: bool) -> Result<()> {
+pub fn run(args: RemoveBucketArgs, json: bool) -> Result<()> {
     let target = TargetRef::parse(&args.target)?;
     if !target.is_bucket_root() {
         bail!("`rb` requires a bucket target like `alias/bucket`.");
@@ -15,7 +16,7 @@ pub fn run(args: BucketTargetArgs, json: bool) -> Result<()> {
     let alias = alias_config(&store, &target.alias)?;
     let bucket = target.require_bucket()?.to_string();
 
-    runtime()?.block_on(crate::s3::remove_bucket(&alias, &bucket))?;
+    runtime()?.block_on(crate::s3::remove_bucket(&alias, &bucket, args.force))?;
 
     if json {
         println!(
@@ -27,7 +28,7 @@ pub fn run(args: BucketTargetArgs, json: bool) -> Result<()> {
             })?
         );
     } else {
-        println!("Bucket `{bucket}` removed successfully.");
+        output::print_plain(&format!("Bucket `{bucket}` removed successfully."));
     }
 
     Ok(())

@@ -1,6 +1,9 @@
 use assert_cmd::Command;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static BUCKET_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn enabled() -> bool {
     std::env::var("MX_LIVE_TESTS").ok().as_deref() == Some("1")
@@ -18,8 +21,9 @@ pub fn unique_bucket_name() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
-    format!("{}-{now}", bucket_prefix())
+        .as_nanos();
+    let seq = BUCKET_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{now}-{seq}", bucket_prefix())
 }
 
 pub fn temp_home() -> tempfile::TempDir {

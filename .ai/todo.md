@@ -1,24 +1,19 @@
-# Coolify mc compatibility implementation
+# Publish Docker image and binaries from GitHub Actions
 
-- [x] Add tested global `--resolve HOST:PORT=IP` parsing and runtime DNS pinning.
-- [x] Add tested bounded-memory multipart `pipe` command with `--quiet`.
-- [x] Add tested `mb --ignore-existing` behavior.
-- [x] Make `stat --json` compact and compatible with Coolify size parsing.
-- [x] Build an Alpine-compatible amd64/arm64 image with `/usr/bin/mc` and `/usr/bin/mx`.
-- [x] Extend MinIO container smoke coverage for Coolify command forms and DNS pinning.
-- [x] Update compatibility and usage documentation.
-- [x] Run format, lint, unit/integration, image, and live MinIO verification.
+Sources:
+- https://docs.github.com/en/packages/learn-github-packages/connecting-a-repository-to-a-package
+- https://docs.docker.com/build/ci/github-actions/multi-platform/
+- https://github.com/softprops/action-gh-release (v3)
+
+- [x] Replace tag-only image workflow with a release workflow
+- [x] Push GHCR image for linux/amd64 and linux/arm64
+- [x] Extract static `/usr/bin/mc` binaries from that image
+- [x] Upload binaries and SHA256SUMS to a GitHub Release on `v*.*.*` tags
+- [x] Document how to publish in README
+- [x] Smoke-test binary extraction locally
 
 ## Review
 
-- Added repeatable global DNS pinning through the AWS Smithy HTTP resolver. Only mappings that match the alias endpoint host and port are used.
-- Added `pipe --quiet` with adaptive S3 multipart part sizes, abort-on-error cleanup, interrupted-read handling, and the S3 5 TiB size limit.
-- Changed local uploads and S3 downloads to bounded-memory streaming so Coolify database backup and restore files do not load fully into memory.
-- Added `mb --ignore-existing` without accepting the option on `rb`.
-- Changed `stat --json` to compact JSON for Coolify's `"size":NUMBER` parser.
-- Changed the image to Alpine and added a static PIE `/usr/bin/mc`; `/usr/bin/mx` is an alias. The build fails if the binary is not static.
-- Verified the current amd64 image with a real MinIO workflow, including a fake hostname pinned by `--resolve` and a two-part 9 MiB stream.
-- Built and ran the arm64 image under QEMU; the extracted arm64 executable was statically linked.
-- `cargo test --locked`, clippy with warnings denied, formatting, diff checks, the image build, and the container smoke test passed.
-- Opt-in provider tests were not enabled because no external S3 test credentials were configured. The real MinIO container test passed.
-- No GHCR package was published. Publication requires committing, pushing, tagging a version, and confirming that the package is public.
+- `.github/workflows/release.yml` publishes `ghcr.io/<owner>/mx` for `linux/amd64` and `linux/arm64`, then copies `/usr/bin/mc` out as `mx-linux-*` and `mc-linux-*`.
+- A GitHub Release is created only for `v*.*.*` tags. `workflow_dispatch` still pushes GHCR.
+- Local extract from `mx:test` produced a static-pie amd64 ELF. GitHub has not published yet because no tag was pushed.

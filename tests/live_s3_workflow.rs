@@ -202,3 +202,120 @@ fn live_coolify_pipe_json_and_ignore_existing_work() {
         .assert()
         .success();
 }
+
+#[test]
+fn live_parity_commands_work_against_s3() {
+    if !live::enabled() {
+        eprintln!("skipping live parity test; set MX_LIVE_TESTS=1");
+        return;
+    }
+
+    let home = live::temp_home();
+    live::configure_alias(home.path());
+    let alias = live::alias_name();
+    let bucket = live::unique_bucket_name();
+    let bucket_target = format!("{alias}/{bucket}");
+    let nested = format!("{alias}/{bucket}/nested/file.txt");
+    let download = home.path().join("got.txt");
+
+    live::mx()
+        .env("HOME", home.path())
+        .args(["mb", &bucket_target])
+        .assert()
+        .success();
+    live::mx()
+        .env("HOME", home.path())
+        .args(["pipe", "--quiet", &nested])
+        .write_stdin("one\ntwo\nthree\n")
+        .assert()
+        .success();
+
+    live::mx()
+        .env("HOME", home.path())
+        .args(["head", "--lines", "2", &nested])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one\ntwo\n"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["du", "-r", &bucket_target])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("objects"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["find", &bucket_target, "--name", "*.txt"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("file.txt"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["tree", "--files", &bucket_target])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nested"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["get", &nested, download.to_str().expect("utf8")])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(&download).expect("download"),
+        "one\ntwo\nthree\n"
+    );
+    live::mx()
+        .env("HOME", home.path())
+        .args(["ready", &alias])
+        .assert()
+        .success();
+    live::mx()
+        .env("HOME", home.path())
+        .args(["ping", "-c", "1", &alias])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pong"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["share", "download", "--expire", "1h", &nested])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("http"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["tag", "set", &nested, "env=test"])
+        .assert()
+        .success();
+    live::mx()
+        .env("HOME", home.path())
+        .args(["tag", "list", &nested])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("env=test"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["version", "enable", &bucket_target])
+        .assert()
+        .success();
+    live::mx()
+        .env("HOME", home.path())
+        .args(["version", "info", &bucket_target])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Enabled"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["ls", "-r", &bucket_target])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("file.txt"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["rm", "-r", "--force", &format!("{alias}/{bucket}/nested")])
+        .assert()
+        .success();
+    live::mx()
+        .env("HOME", home.path())
+        .args(["rb", "--force", &bucket_target])
+        .assert()
+        .success();
+}

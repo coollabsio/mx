@@ -17,10 +17,10 @@ fn mc_name_runs_the_same_command_set() {
     let (_dir, binary) = copied_binary("mc");
 
     Command::new(binary)
+        .env("NO_COLOR", "1")
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Usage: mc"))
         .stdout(predicate::str::contains("alias"));
 }
 

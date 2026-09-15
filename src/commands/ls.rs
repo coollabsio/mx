@@ -15,7 +15,7 @@ pub fn run(args: LsArgs, json: bool) -> Result<()> {
     let alias = alias_config(&store, &target.alias)?;
 
     let runtime = runtime()?;
-    let mut items = runtime.block_on(crate::s3::list_target(&alias, &target))?;
+    let mut items = runtime.block_on(crate::s3::list_target(&alias, &target, args.recursive))?;
     items.sort_by(compare_items);
 
     if json {

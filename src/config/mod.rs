@@ -6,7 +6,25 @@ use std::env;
 use std::fs;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 use tempfile::NamedTempFile;
+
+static CONFIG_DIR: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+
+pub fn configure_dir(dir: Option<PathBuf>) {
+    *CONFIG_DIR
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .expect("config dir lock poisoned") = dir;
+}
+
+fn configured_dir() -> Option<PathBuf> {
+    CONFIG_DIR
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .expect("config dir lock poisoned")
+        .clone()
+}
 
 pub const CONFIG_FILE_NAME: &str = "config.json";
 const MX_DIR_NAME: &str = ".mx";
@@ -20,6 +38,19 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn load_or_create() -> Result<Self> {
+        if let Some(dir) = configured_dir() {
+            let path = dir.join(CONFIG_FILE_NAME);
+            if path.exists() {
+                return Self::load_from_path(path);
+            }
+            let store = Self {
+                path,
+                config: ConfigV10::new_with_defaults(),
+            };
+            store.save()?;
+            return Ok(store);
+        }
+
         let home = home_dir()?;
         let mx_path = home.join(MX_DIR_NAME).join(CONFIG_FILE_NAME);
         let mc_path = home.join(MC_DIR_NAME).join(CONFIG_FILE_NAME);
