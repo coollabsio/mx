@@ -4,7 +4,14 @@ use anyhow::{Context, Result, bail};
 use aws_config::BehaviorVersion;
 use aws_credential_types::{Credentials, provider::SharedCredentialsProvider};
 use aws_sdk_s3::Client;
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use aws_smithy_http_client::{
+    Builder as HttpClientBuilder,
+    tls::{self, rustls_provider::CryptoMode},
+};
+use std::io::Read;
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -52,9 +59,17 @@ pub async fn list_target(alias: &AliasConfig, target: &TargetRef) -> Result<Vec<
     }
 }
 
-pub async fn make_bucket(alias: &AliasConfig, bucket: &str) -> Result<()> {
+pub async fn make_bucket(alias: &AliasConfig, bucket: &str, ignore_existing: bool) -> Result<()> {
     let client = build_client(alias).await?;
-    client.create_bucket().bucket(bucket).send().await?;
+    if let Err(error) = client.create_bucket().bucket(bucket).send().await {
+        let already_exists = error
+            .as_service_error()
+            .and_then(ProvideErrorMetadata::code)
+            .is_some_and(|code| matches!(code, "BucketAlreadyExists" | "BucketAlreadyOwnedByYou"));
+        if !(ignore_existing && already_exists) {
+            return Err(error.into());
+        }
+    }
     Ok(())
 }
 
@@ -119,16 +134,128 @@ pub async fn put_object_bytes(
     Ok(bytes.len() as i64)
 }
 
+pub async fn put_object_reader<R: Read>(
+    alias: &AliasConfig,
+    bucket: &str,
+    key: &str,
+    mut reader: R,
+) -> Result<i64> {
+    const MAX_OBJECT_SIZE: i64 = 5 * 1024 * 1024 * 1024 * 1024;
+    let client = build_client(alias).await?;
+    let mut buffer = vec![0; multipart_part_size(1)];
+    let first_len = read_part(&mut reader, &mut buffer)?;
+    if first_len == 0 {
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(ByteStream::from(Vec::new()))
+            .send()
+            .await?;
+        return Ok(0);
+    }
+
+    let created = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await?;
+    let upload_id = created
+        .upload_id()
+        .context("S3 did not return a multipart upload ID")?
+        .to_string();
+    let upload = async {
+        let mut parts = Vec::new();
+        let mut part_number = 1;
+        let mut total = 0_i64;
+        let mut length = first_len;
+        loop {
+            if part_number > 10_000 {
+                bail!("input exceeds the S3 multipart part limit");
+            }
+            if total + length as i64 > MAX_OBJECT_SIZE {
+                bail!("input exceeds the S3 object size limit");
+            }
+            buffer.truncate(length);
+            let response = client
+                .upload_part()
+                .bucket(bucket)
+                .key(key)
+                .upload_id(&upload_id)
+                .part_number(part_number)
+                .body(ByteStream::from(buffer))
+                .send()
+                .await?;
+            parts.push(
+                CompletedPart::builder()
+                    .part_number(part_number)
+                    .set_e_tag(response.e_tag().map(str::to_string))
+                    .build(),
+            );
+            total += length as i64;
+            part_number += 1;
+            buffer = vec![0; multipart_part_size(part_number)];
+            length = read_part(&mut reader, &mut buffer)?;
+            if length == 0 {
+                break;
+            }
+        }
+        client
+            .complete_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build(),
+            )
+            .send()
+            .await?;
+        Ok::<i64, anyhow::Error>(total)
+    }
+    .await;
+
+    if upload.is_err() {
+        let _ = client
+            .abort_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(&upload_id)
+            .send()
+            .await;
+    }
+    upload
+}
+
+fn multipart_part_size(part_number: i32) -> usize {
+    let growth = ((part_number.saturating_sub(1) as usize) / 1_000).min(9);
+    (8 * 1024 * 1024_usize) << growth
+}
+
+fn read_part(reader: &mut impl Read, buffer: &mut [u8]) -> Result<usize> {
+    let mut length = 0;
+    while length < buffer.len() {
+        match reader.read(&mut buffer[length..]) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+            Ok(0) => break,
+            Ok(count) => length += count,
+        }
+    }
+    Ok(length)
+}
+
 pub async fn put_local_file(
     alias: &AliasConfig,
     bucket: &str,
     key: &str,
     path: &Path,
 ) -> Result<i64> {
-    let bytes = tokio::fs::read(path)
-        .await
+    let file = std::fs::File::open(path)
         .with_context(|| format!("Unable to read local file `{}`.", path.display()))?;
-    put_object_bytes(alias, bucket, key, bytes, None).await
+    put_object_reader(alias, bucket, key, file).await
 }
 
 pub async fn download_object_to_path(
@@ -137,14 +264,17 @@ pub async fn download_object_to_path(
     key: &str,
     path: &Path,
 ) -> Result<i64> {
-    let bytes = get_object_bytes(alias, bucket, key).await?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
-    tokio::fs::write(path, &bytes)
+    let client = build_client(alias).await?;
+    let response = client.get_object().bucket(bucket).key(key).send().await?;
+    let mut source = response.body.into_async_read();
+    let mut destination = tokio::fs::File::create(path)
         .await
         .with_context(|| format!("Unable to write local file `{}`.", path.display()))?;
-    Ok(bytes.len() as i64)
+    let bytes = tokio::io::copy(&mut source, &mut destination).await?;
+    Ok(bytes as i64)
 }
 
 pub async fn delete_object(alias: &AliasConfig, bucket: &str, key: &str) -> Result<()> {
@@ -198,11 +328,26 @@ async fn build_client(alias: &AliasConfig) -> Result<Client> {
         "mx",
     );
 
-    let shared_config = aws_config::defaults(BehaviorVersion::latest())
+    let mut loader = aws_config::defaults(BehaviorVersion::latest())
         .region(aws_sdk_s3::config::Region::new("us-east-1"))
-        .credentials_provider(SharedCredentialsProvider::new(credentials))
-        .load()
-        .await;
+        .credentials_provider(SharedCredentialsProvider::new(credentials));
+    let endpoint = url::Url::parse(&alias.url)?;
+    let endpoint_host = endpoint.host_str().unwrap_or_default();
+    let endpoint_port = endpoint.port_or_known_default();
+    let mappings: Vec<_> = crate::resolve::configured()
+        .into_iter()
+        .filter(|mapping| {
+            mapping.host.eq_ignore_ascii_case(endpoint_host) && Some(mapping.port) == endpoint_port
+        })
+        .collect();
+    if !mappings.is_empty() {
+        let resolver = crate::resolve::PinnedDnsResolver::new(&mappings)?;
+        let http_client = HttpClientBuilder::new()
+            .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
+            .build_with_resolver(resolver);
+        loader = loader.http_client(http_client);
+    }
+    let shared_config = loader.load().await;
 
     let force_path_style = force_path_style(alias)?;
     let config = aws_sdk_s3::config::Builder::from(&shared_config)
@@ -315,8 +460,9 @@ fn same_endpoint_and_credentials(left: &AliasConfig, right: &AliasConfig) -> boo
 
 #[cfg(test)]
 mod tests {
-    use super::force_path_style;
+    use super::{force_path_style, multipart_part_size, read_part};
     use crate::config::model::AliasConfig;
+    use std::io::{self, Read};
 
     #[test]
     fn forces_path_style_for_minio_auto() {
@@ -338,5 +484,33 @@ mod tests {
         };
 
         assert!(!force_path_style(&alias).unwrap());
+    }
+
+    #[test]
+    fn retries_interrupted_reader() {
+        struct InterruptedOnce(bool);
+        impl Read for InterruptedOnce {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if !self.0 {
+                    self.0 = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                buffer[..4].copy_from_slice(b"data");
+                Ok(4)
+            }
+        }
+
+        let mut output = [0; 4];
+        let length = read_part(&mut InterruptedOnce(false), &mut output).unwrap();
+        assert_eq!(length, 4);
+        assert_eq!(&output, b"data");
+    }
+
+    #[test]
+    fn multipart_parts_grow_for_large_unknown_streams() {
+        assert_eq!(multipart_part_size(1), 8 * 1024 * 1024);
+        assert_eq!(multipart_part_size(1_000), 8 * 1024 * 1024);
+        assert_eq!(multipart_part_size(1_001), 16 * 1024 * 1024);
+        assert_eq!(multipart_part_size(9_001), 4 * 1024 * 1024 * 1024);
     }
 }

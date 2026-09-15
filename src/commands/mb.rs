@@ -1,11 +1,11 @@
-use crate::cli::BucketTargetArgs;
+use crate::cli::MakeBucketArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::target::TargetRef;
 use anyhow::{Result, bail};
 use serde::Serialize;
 
-pub fn run(args: BucketTargetArgs, json: bool) -> Result<()> {
+pub fn run(args: MakeBucketArgs, json: bool) -> Result<()> {
     let target = TargetRef::parse(&args.target)?;
     if !target.is_bucket_root() {
         bail!("`mb` requires a bucket target like `alias/bucket`.");
@@ -15,7 +15,11 @@ pub fn run(args: BucketTargetArgs, json: bool) -> Result<()> {
     let alias = alias_config(&store, &target.alias)?;
     let bucket = target.require_bucket()?.to_string();
 
-    runtime()?.block_on(crate::s3::make_bucket(&alias, &bucket))?;
+    runtime()?.block_on(crate::s3::make_bucket(
+        &alias,
+        &bucket,
+        args.ignore_existing,
+    ))?;
 
     if json {
         println!(

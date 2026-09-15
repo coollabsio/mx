@@ -1,3 +1,4 @@
+use crate::resolve::ResolveMapping;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -5,6 +6,9 @@ use clap::{Args, Parser, Subcommand};
 pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
+
+    #[arg(long, global = true, value_name = "HOST:PORT=IP")]
+    pub resolve: Vec<ResolveMapping>,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -17,7 +21,7 @@ pub enum Commands {
     #[command(about = "list buckets and objects")]
     Ls(LsArgs),
     #[command(about = "make bucket")]
-    Mb(BucketTargetArgs),
+    Mb(MakeBucketArgs),
     #[command(about = "remove bucket")]
     Rb(BucketTargetArgs),
     #[command(about = "show object or bucket information")]
@@ -34,6 +38,8 @@ pub enum Commands {
     Put(PutArgs),
     #[command(about = "mirror a directory tree")]
     Mirror(MirrorArgs),
+    #[command(about = "upload standard input to an object")]
+    Pipe(PipeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -88,6 +94,13 @@ pub struct BucketTargetArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct MakeBucketArgs {
+    #[arg(long)]
+    pub ignore_existing: bool,
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
 pub struct TargetArg {
     pub target: String,
 }
@@ -110,6 +123,13 @@ pub struct RemoveArgs {
 #[derive(Debug, Args)]
 pub struct PutArgs {
     pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PipeArgs {
+    #[arg(long)]
+    pub quiet: bool,
     pub target: String,
 }
 

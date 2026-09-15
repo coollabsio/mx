@@ -30,6 +30,17 @@ do
 done
 
 docker run --rm "$image" --help | grep 'Usage: mc'
+docker run --rm --entrypoint /bin/sh "$image" -c 'test -x /usr/bin/mc && test -x /usr/bin/mx && test -f /etc/alpine-release'
+container="$(docker create "$image")"
+binary="$(mktemp)"
+docker cp "$container:/usr/bin/mc" "$binary"
+docker rm "$container" >/dev/null
+if readelf -d "$binary" 2>/dev/null | grep -q NEEDED; then
+    echo 'mc binary must be statically linked' >&2
+    rm -f "$binary"
+    exit 1
+fi
+rm -f "$binary"
 set +e
 docker run --rm "$image" --not-supported >/dev/null 2>&1
 status=$?
@@ -48,3 +59,18 @@ run_mc cat local/smoke/probe.txt | grep 'real s3 smoke'
 run_mc ls local/smoke/ | grep 'probe.txt'
 run_mc rm local/smoke/probe.txt
 run_mc rb local/smoke
+
+server_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$server")"
+resolve="pinned.invalid:9000=$server_ip"
+run_mc alias set --resolve "$resolve" pinned http://pinned.invalid:9000 minioadmin minioadmin
+run_mc mb --resolve "$resolve" pinned/coolify
+run_mc mb --ignore-existing --resolve "$resolve" pinned/coolify
+printf 'streamed archive\n' | docker run --rm -i --network "$network" \
+    -v "$volume:/home/mx/.mx" "$image" pipe --quiet --resolve "$resolve" pinned/coolify/archive.tar.gz
+run_mc stat --json --resolve "$resolve" pinned/coolify/archive.tar.gz | grep '"size":17'
+dd if=/dev/zero bs=1048576 count=9 2>/dev/null | docker run --rm -i --network "$network" \
+    -v "$volume:/home/mx/.mx" "$image" pipe --quiet --resolve "$resolve" pinned/coolify/large.bin
+run_mc stat --json --resolve "$resolve" pinned/coolify/large.bin | grep '"size":9437184'
+run_mc rm --resolve "$resolve" pinned/coolify/large.bin
+run_mc rm --resolve "$resolve" pinned/coolify/archive.tar.gz
+run_mc rb --resolve "$resolve" pinned/coolify

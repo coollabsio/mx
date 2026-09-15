@@ -1,15 +1,17 @@
-FROM rust:1.97-bookworm AS build
+FROM rust:1.97-alpine AS build
+RUN apk add --no-cache build-base cmake perl
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --locked --release
+RUN cargo build --locked --release \
+    && file target/release/mx | grep -E 'static(-pie)? linked|statically linked'
 
-FROM debian:bookworm-slim
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 mx
-COPY --from=build /src/target/release/mx /usr/local/bin/mx
-RUN ln -s /usr/local/bin/mx /usr/local/bin/mc
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -u 10001 mx \
+    && mkdir /home/mx/.mx \
+    && chown mx:mx /home/mx/.mx
+COPY --from=build /src/target/release/mx /usr/bin/mc
+RUN ln -s /usr/bin/mc /usr/bin/mx
 USER mx
 ENTRYPOINT ["mc"]

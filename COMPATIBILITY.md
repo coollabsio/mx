@@ -12,6 +12,15 @@
 | `cp`, `mv` | Partial | Single objects work in three directions. Recursive local-to-S3 copy works. Other recursive directions are pending. |
 | `rm` | Partial | Single objects work. Recursive prefix removal is pending. |
 | `mirror` | Preview | Local directory to S3 works. Change detection and `--remove` are pending. |
+| `pipe` | Supported | Uses bounded-memory S3 multipart upload; supports `--quiet`. |
+
+## Coolify compatibility
+
+- `--resolve HOST:PORT=IP` is repeatable and supported as a global option.
+- `mb --ignore-existing` is supported.
+- `stat --json` emits compact JSON with an mc-compatible `size` field.
+- The container provides a static Linux binary at `/usr/bin/mc` and supports
+  amd64 and arm64 builds.
 
 Unsupported options fail. The client does not silently ignore them.
 

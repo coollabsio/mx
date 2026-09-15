@@ -153,3 +153,52 @@ fn live_put_and_out_alias_work() {
         .assert()
         .success();
 }
+
+#[test]
+fn live_coolify_pipe_json_and_ignore_existing_work() {
+    if !live::enabled() {
+        eprintln!("skipping live Coolify compatibility test; set MX_LIVE_TESTS=1");
+        return;
+    }
+
+    let home = live::temp_home();
+    live::configure_alias(home.path());
+    let alias = live::alias_name();
+    let bucket = live::unique_bucket_name();
+    let bucket_target = format!("{alias}/{bucket}");
+    let object = format!("{alias}/{bucket}/archive.tar.gz");
+
+    live::mx()
+        .env("HOME", home.path())
+        .args(["mb", &bucket_target])
+        .assert()
+        .success();
+    live::mx()
+        .env("HOME", home.path())
+        .args(["mb", "--ignore-existing", &bucket_target])
+        .assert()
+        .success();
+    live::mx()
+        .env("HOME", home.path())
+        .args(["pipe", "--quiet", &object])
+        .write_stdin("streamed archive")
+        .assert()
+        .success()
+        .stdout("");
+    live::mx()
+        .env("HOME", home.path())
+        .args(["stat", "--json", &object])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"size\":16"));
+    live::mx()
+        .env("HOME", home.path())
+        .args(["rm", &object])
+        .assert()
+        .success();
+    live::mx()
+        .env("HOME", home.path())
+        .args(["rb", &bucket_target])
+        .assert()
+        .success();
+}

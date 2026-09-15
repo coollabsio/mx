@@ -18,7 +18,7 @@ pub fn run(args: TargetArg, json: bool) -> Result<()> {
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&StatMessage::from_stat(&args.target, &stat))?
+            serde_json::to_string(&StatMessage::from_stat(&args.target, &stat))?
         );
     } else {
         print_plain(&stat)?;

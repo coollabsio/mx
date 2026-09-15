@@ -5,6 +5,7 @@ pub mod ls;
 pub mod mb;
 pub mod mirror;
 pub mod mv;
+pub mod pipe;
 pub mod put;
 pub mod rb;
 pub mod rm;
@@ -44,5 +45,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Mv(args) => mv::run(args, json),
         Commands::Put(args) => put::run(args, json),
         Commands::Mirror(args) => mirror::run(args, json),
+        Commands::Pipe(args) => pipe::run(args, json),
     }
 }

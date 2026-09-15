@@ -17,6 +17,7 @@ Implemented:
 - `mx cp`
 - `mx mv`
 - `mx put` / `mx out`
+- `mx pipe`
 - recursive local-to-S3 `mx cp`
 - preview `mx mirror` for local-to-S3 trees
 - `mx alias set` / `mx alias s`
@@ -40,7 +41,10 @@ docker build -t mx:local .
 docker run --rm mx:local --help
 ```
 
-The image runs the binary as `mc`. It also contains `/usr/local/bin/mx`. Linux amd64 and arm64 publication is defined in `.github/workflows/image.yml`.
+The image runs the binary as `mc`. The Alpine-based image contains a static
+PIE binary at `/usr/bin/mc` and an
+`/usr/bin/mx` symlink. Linux amd64 and arm64 publication is defined in
+`.github/workflows/image.yml`.
 
 ## Build
 
@@ -96,6 +100,12 @@ mx alias remove myminio
 mx mb myminio/mybucket
 ```
 
+Do not fail when the bucket already exists:
+
+```bash
+mx mb --ignore-existing myminio/mybucket
+```
+
 ### Remove a bucket
 
 ```bash
@@ -141,6 +151,24 @@ mx mv myminio/mybucket/a.txt myminio/mybucket/archive/a.txt
 mx put ./local.txt myminio/mybucket/
 mx out ./local.txt myminio/mybucket/out.txt
 ```
+
+Upload standard input with bounded memory:
+
+```bash
+tar czf - ./data | mx pipe --quiet myminio/mybucket/archive.tar.gz
+```
+
+### Pin an endpoint hostname
+
+`--resolve` is a repeatable global option and can occur after a subcommand. It
+uses the `HOST:PORT=IP` format:
+
+```bash
+mx stat --json --resolve s3.internal:9000=10.0.0.8 myminio/mybucket/object
+```
+
+Only a mapping whose host and port match the configured alias endpoint is
+used. TLS and request signing continue to use the endpoint hostname.
 
 ### List S3 buckets or objects
 
@@ -250,7 +278,7 @@ mx alias remove demo
 ## Compatibility notes
 
 - `mx` is not yet a full replacement for `mc`
-- current work is limited to alias management
+- Coolify backup and restore command forms are covered by the container smoke test
 - output is intentionally similar, but not yet byte-for-byte identical
 
 ## Development

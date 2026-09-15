@@ -2,6 +2,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod location;
+pub mod resolve;
 pub mod s3;
 pub mod target;
 pub mod transfer;
@@ -15,5 +16,6 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let cli = cli::Cli::parse_from(args);
+    resolve::configure(cli.resolve.clone());
     commands::run(cli)
 }
