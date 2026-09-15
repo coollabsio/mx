@@ -1,0 +1,13 @@
+# syntax=docker/dockerfile:1
+# Runtime image from a prebuilt static binary. Used by .github/workflows/release.yml.
+FROM alpine:3.21
+ARG TARGETARCH
+RUN apk add --no-cache ca-certificates \
+    && adduser -D -u 10001 mx \
+    && mkdir /home/mx/.mx \
+    && chown mx:mx /home/mx/.mx
+COPY mx-linux-${TARGETARCH} /usr/bin/mc
+RUN chmod 0755 /usr/bin/mc \
+    && ln -s /usr/bin/mc /usr/bin/mx
+USER mx
+ENTRYPOINT ["mc"]

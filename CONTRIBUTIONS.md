@@ -16,8 +16,9 @@ Workflow: `.github/workflows/release.yml`
 - Platforms: `linux/amd64`, `linux/arm64`
 - GitHub Release files: `mx-linux-amd64`, `mx-linux-arm64`, and `SHA256SUMS`
 
-The release binaries are copied from `/usr/bin/mc` in that image, so the
-container and the release files are the same build.
+The workflow compiles `linux/amd64` and `linux/arm64` on native GitHub
+runners in parallel (no QEMU). It then copies those static binaries into the
+Alpine image. The GitHub Release files are the same binaries.
 
 You can also run the **Release** workflow from the Actions tab
 (`workflow_dispatch`). That push updates GHCR. A GitHub Release is created only

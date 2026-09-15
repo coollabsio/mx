@@ -14,20 +14,69 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: build
+          load: true
+          tags: mx-build:local
+          cache-from: type=gha,scope=mx-build-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=mx-build-${{ matrix.arch }}
+      - name: Copy static binary
+        run: |
+          set -eu
+          mkdir -p dist
+          cid="$(docker create mx-build:local)"
+          docker cp "$cid:/mx" "dist/mx-linux-${{ matrix.arch }}"
+          docker rm "$cid" >/dev/null
+          chmod +x "dist/mx-linux-${{ matrix.arch }}"
+          if command -v readelf >/dev/null && readelf -d "dist/mx-linux-${{ matrix.arch }}" 2>/dev/null | grep -q NEEDED; then
+            echo "mx-linux-${{ matrix.arch }} must be statically linked" >&2
+            exit 1
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mx-linux-${{ matrix.arch }}
+          path: dist/mx-linux-${{ matrix.arch }}
+
   publish:
+    needs: binary
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          set -eu
+          cp Dockerfile.release dist/Dockerfile
+          cd dist
+          ls -l
+          sha256sum mx-linux-amd64 mx-linux-arm64 > SHA256SUMS
+          chmod +x mx-linux-amd64 mx-linux-arm64
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-
       - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: docker/metadata-action@v5
         id: meta
         with:
@@ -37,50 +86,22 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha,prefix=sha-
-
-      - id: image
-        run: echo "name=$(echo '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
       - uses: docker/build-push-action@v6
-        id: build
         with:
-          context: .
+          context: dist
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
 
-      - name: Extract static binaries from the published image
-        env:
-          IMAGE: ${{ steps.image.outputs.name }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          set -eu
-          mkdir -p dist
-          ref="$IMAGE@$DIGEST"
-          for spec in 'linux/amd64 amd64' 'linux/arm64 arm64'; do
-            platform="${spec% *}"
-            arch="${spec#* }"
-            docker pull --platform "$platform" "$ref"
-            cid="$(docker create --platform "$platform" "$ref")"
-            docker cp "$cid:/usr/bin/mc" "dist/mx-linux-${arch}"
-            docker rm "$cid" >/dev/null
-            chmod +x "dist/mx-linux-${arch}"
-            cp "dist/mx-linux-${arch}" "dist/mc-linux-${arch}"
-            if command -v readelf >/dev/null && readelf -d "dist/mx-linux-${arch}" 2>/dev/null | grep -q NEEDED; then
-              echo "mx-linux-${arch} must be statically linked" >&2
-              exit 1
-            fi
-          done
-          (cd dist && sha256sum mx-linux-amd64 mx-linux-arm64 mc-linux-amd64 mc-linux-arm64 > SHA256SUMS)
-          ls -l dist
-
       - uses: actions/upload-artifact@v4
         with:
           name: mx-linux-binaries
-          path: dist/*
-
+          path: |
+            dist/mx-linux-amd64
+            dist/mx-linux-arm64
+            dist/SHA256SUMS
       - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/v')
         with:
@@ -88,6 +109,4 @@ jobs:
           files: |
             dist/mx-linux-amd64
             dist/mx-linux-arm64
-            dist/mc-linux-amd64
-            dist/mc-linux-arm64
             dist/SHA256SUMS
