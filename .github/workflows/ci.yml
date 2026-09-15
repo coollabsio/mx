@@ -16,5 +16,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      - run: sh tests/live_minio.sh
       - run: docker build --tag mx:test .
       - run: sh tests/container_smoke.sh mx:test
