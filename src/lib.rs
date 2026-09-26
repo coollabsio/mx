@@ -5,6 +5,7 @@ pub mod flags;
 pub mod globals;
 pub mod location;
 pub mod output;
+pub mod progress;
 pub mod resolve;
 pub mod s3;
 pub mod target;

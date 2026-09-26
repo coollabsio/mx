@@ -30,8 +30,8 @@ pub fn run(args: MirrorArgs, json: bool) -> Result<()> {
     super::cp::run(
         CopyArgs {
             recursive: true,
-            source: args.source,
-            target: args.target,
+            paths: vec![args.source, args.target],
+            ..Default::default()
         },
         json,
     )
