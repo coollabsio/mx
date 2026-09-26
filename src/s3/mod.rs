@@ -46,6 +46,7 @@ pub mod multipart;
 pub mod notify;
 pub mod objects;
 pub mod replication;
+pub mod select;
 pub mod stat;
 
 pub use bucket::*;

@@ -77,21 +77,3 @@ fn assert_stubs(rows: &[&[&str]]) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// JOBS
-// ---------------------------------------------------------------------------
-
-const JOBS: &[&[&str]] = &[
-    &["batch", "generate", "a", "a"],
-    &["batch", "start", "a", "a"],
-    &["batch", "list", "a"],
-    &["batch", "status", "a", "a"],
-    &["batch", "describe", "a", "a"],
-    &["batch", "cancel", "a"],
-    &["sql", "a"],
-];
-
-#[test]
-fn jobs_stubs() {
-    assert_stubs(JOBS);
-}
