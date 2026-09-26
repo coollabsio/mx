@@ -69,7 +69,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Cp(args) => cp::run(args, json),
         Commands::Mv(args) => mv::run(args, json),
         Commands::Put(args) => put::run(args, json),
-        Commands::Mirror(args) => mirror::run(args, json),
+        Commands::Mirror(args) => mirror::run(*args, json),
         Commands::Pipe(args) => pipe::run(args, json),
         Commands::Get(args) => get::run(args, json),
         Commands::Head(args) => head::run(args, json),

@@ -4,6 +4,7 @@ pub mod config;
 pub mod flags;
 pub mod globals;
 pub mod location;
+pub mod mirror;
 pub mod output;
 pub mod resolve;
 pub mod s3;

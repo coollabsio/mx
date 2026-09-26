@@ -54,7 +54,7 @@ pub enum Commands {
     #[command(visible_alias = "out", about = "upload object")]
     Put(put::PutArgs),
     #[command(about = "mirror a directory tree")]
-    Mirror(mirror::MirrorArgs),
+    Mirror(Box<mirror::MirrorArgs>),
     #[command(about = "upload standard input to an object")]
     Pipe(pipe::PipeArgs),
     #[command(about = "download an object to the local filesystem")]
