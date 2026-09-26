@@ -2,7 +2,10 @@
 
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
-use anyhow::{Context, Result, bail};
+use crate::error::McError;
+use crate::s3::admin::AdminClient;
+use crate::s3::admin_info::server_info;
+use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -23,13 +26,9 @@ pub struct PingArgs {
     #[arg(short = 'i', long, default_value_t = 1)]
     pub interval: u64,
     /// ping all the servers in the cluster, use it when you have direct access to nodes/pods
-    ///
-    /// requires the MinIO admin API; not supported by mx
     #[arg(short = 'a', long)]
     pub distributed: bool,
     /// ping the specified node
-    ///
-    /// requires the MinIO admin API; not supported by mx
     #[arg(long)]
     pub node: Option<String>,
     pub target: String,
@@ -50,12 +49,36 @@ pub struct ServerStats {
     pub counter: u64,
 }
 
+/// Go `*url.URL` as `encoding/json` renders it (mc prints the struct verbatim).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "PascalCase")]
 pub struct Endpoint {
-    #[serde(rename = "Scheme")]
     pub scheme: String,
-    #[serde(rename = "Host")]
+    pub opaque: String,
+    pub user: Option<String>,
     pub host: String,
+    pub path: String,
+    pub raw_path: String,
+    pub omit_host: bool,
+    pub force_query: bool,
+    pub raw_query: String,
+    pub fragment: String,
+    pub raw_fragment: String,
+}
+
+impl Endpoint {
+    /// `scheme://host[:port]` as Go keeps it (`Host` holds the port only when given).
+    pub fn new(scheme: &str, host: &str) -> Self {
+        Self {
+            scheme: scheme.to_string(),
+            host: host.to_string(),
+            ..Default::default()
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("{}://{}", self.scheme, self.host)
+    }
 }
 
 impl ServerStats {
@@ -121,14 +144,6 @@ struct PingSummary<'a> {
 }
 
 pub fn run(args: PingArgs, json: bool) -> Result<()> {
-    if args.distributed || args.node.is_some() {
-        bail!(
-            "`--distributed` and `--node` need the MinIO admin API (server info), which mx does not support yet"
-        );
-    }
-    if args.count == Some(0) {
-        bail!("ping count cannot be less than 1");
-    }
     let store = ConfigStore::load_or_create()?;
     let alias_name = args.target.split('/').next().unwrap_or_default();
     let alias = alias_config(&store, alias_name)
@@ -138,60 +153,120 @@ pub fn run(args: PingArgs, json: bool) -> Result<()> {
         Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
         None => url.host_str().unwrap_or_default().to_string(),
     };
-    let endpoint = Endpoint {
-        scheme: url.scheme().to_string(),
-        host: host.clone(),
-    };
     let rt = runtime()?;
+    // `-a` pings every node the cluster reports, `--node` just that one (mc `filterAdminInfo`).
+    let endpoints = if args.distributed || args.node.is_some() {
+        let client = AdminClient::new(&alias)
+            .with_context(|| format!("Unable to initialize admin client for `{}`.", args.target))?;
+        let servers = rt
+            .block_on(server_info(&client))
+            .context("Unable to get server info")?;
+        let servers = match &args.node {
+            Some(node) if !servers.is_empty() => {
+                let Some(server) = servers.into_iter().find(|s| &s.endpoint == node) else {
+                    return Err(McError::invalid_argument())
+                        .context(format!("Node {node} not exist"));
+                };
+                vec![server]
+            }
+            _ => servers,
+        };
+        let mut endpoints: Vec<Endpoint> = servers
+            .iter()
+            .map(|server| {
+                let scheme = if server.scheme.is_empty() {
+                    url.scheme()
+                } else {
+                    &server.scheme
+                };
+                Endpoint::new(scheme, &server.endpoint)
+            })
+            .collect();
+        endpoints.sort_by(|a, b| a.host.cmp(&b.host));
+        endpoints
+    } else {
+        Vec::new()
+    };
+    let endpoints = if endpoints.is_empty() {
+        vec![Endpoint::new(url.scheme(), &host)]
+    } else {
+        endpoints
+    };
+    if args.count.is_some_and(|count| count < 1) {
+        return Err(McError::invalid_argument()).context("ping count cannot be less than 1");
+    }
+
     let mut summary: BTreeMap<String, ServerStats> = BTreeMap::new();
     let mut index: u64 = 1;
     loop {
-        let started = Instant::now();
-        let result = rt.block_on(crate::s3::health_request(
-            &alias,
-            "/minio/health/live",
-            None,
-        ));
-        let elapsed = started.elapsed();
-        let (online, error) = match result {
-            Ok(response) => (
-                response.status == 200
-                    && response.header("x-minio-server-status") != Some("offline"),
-                None,
-            ),
-            Err(error) => (false, Some(format!("{error:#}"))),
-        };
-        let stats = summary.entry(host.clone()).or_insert_with(|| ServerStats {
-            endpoint: endpoint.clone(),
-            ..Default::default()
-        });
-        stats.record(elapsed, error.clone());
-        let status = if online { "ok " } else { "failed " };
-        let time = format_time(elapsed);
+        let mut all_ok = true;
+        let mut stop = false;
+        let mut lines = Vec::new();
+        for endpoint in &endpoints {
+            let node = crate::config::model::AliasConfig {
+                url: endpoint.url(),
+                ..alias.clone()
+            };
+            let started = Instant::now();
+            let result = rt.block_on(crate::s3::health_request(&node, "/minio/health/live", None));
+            let elapsed = started.elapsed();
+            let (online, error) = match result {
+                Ok(response) => (
+                    response.status == 200
+                        && response.header("x-minio-server-status") != Some("offline"),
+                    None,
+                ),
+                Err(error) => (false, Some(format!("{error:#}"))),
+            };
+            all_ok &= online;
+            let stats = summary
+                .entry(endpoint.host.clone())
+                .or_insert_with(|| ServerStats {
+                    endpoint: endpoint.clone(),
+                    ..Default::default()
+                });
+            stats.record(elapsed, error.clone());
+            stop |= args
+                .error_count
+                .is_some_and(|limit| stats.error_count >= limit);
+            lines.push((
+                endpoint,
+                if online { "ok " } else { "failed " },
+                error.unwrap_or_default(),
+                format_time(elapsed),
+            ));
+        }
         let counter = format!("{index:>3}");
         if json {
             crate::output::print_json(&PingResult {
                 status: "success",
                 counter: &counter,
-                servers: vec![EndpointStat {
-                    endpoint: &endpoint,
-                    dns: "0s",
-                    status,
-                    error: error.as_deref().unwrap_or_default(),
-                    time: &time,
-                }],
+                servers: lines
+                    .iter()
+                    .map(|(endpoint, status, error, time)| EndpointStat {
+                        endpoint,
+                        dns: "0s",
+                        status,
+                        error,
+                        time,
+                    })
+                    .collect(),
             })?;
         } else {
-            println!(
-                "{counter}: {}://{host}   status={status} time={time}",
-                endpoint.scheme
-            );
+            // Go tabwriter (padding 3) over `N: URL<TAB>status=... time=...`.
+            let width = lines
+                .iter()
+                .map(|(endpoint, ..)| endpoint.url().len())
+                .max()
+                .unwrap_or(0);
+            for (endpoint, status, _, time) in &lines {
+                println!(
+                    "{counter}: {:<width$}   status={status} time={time}",
+                    endpoint.url()
+                );
+            }
         }
-        let stop = (args.exit && online)
-            || args
-                .error_count
-                .is_some_and(|limit| stats.error_count >= limit)
-            || args.count.is_some_and(|count| index >= count);
+        stop |= (args.exit && all_ok) || args.count.is_some_and(|count| index >= count);
         if stop {
             break;
         }
@@ -222,15 +297,41 @@ fn print_summary(summary: &BTreeMap<String, ServerStats>, json: bool) -> Result<
             ]
         })
         .collect::<Vec<_>>();
-    print!(
-        "{}",
-        crate::commands::ilm::render_table(
-            None,
-            &["Endpoint", "Min", "Avg", "Max", "Error", "Count"],
-            &rows
-        )
-    );
+    print!("{}", console_table(&header_row(), &rows));
     Ok(())
+}
+
+fn header_row() -> Vec<String> {
+    ["Endpoint", "Min", "Avg", "Max", "Error", "Count"]
+        .map(String::from)
+        .to_vec()
+}
+
+/// minio/pkg `console.Table.PopulateTable`: borders, no header separator, left-aligned cells.
+fn console_table(header: &[String], rows: &[Vec<String>]) -> String {
+    let mut all = vec![header.to_vec()];
+    all.extend(rows.iter().cloned());
+    let mut widths = vec![0; header.len()];
+    for row in &all {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.chars().count());
+        }
+    }
+    let border = |left: &str, mid: &str, right: &str| {
+        let segments: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
+        format!("{left}{}{right}\n", segments.join(mid))
+    };
+    let mut out = border("┌", "┬", "┐");
+    for row in &all {
+        let cells: Vec<String> = row
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| format!("{cell:<width$}"))
+            .collect();
+        out.push_str(&format!("│ {} │\n", cells.join(" │ ")));
+    }
+    out.push_str(&border("└", "┴", "┘"));
+    out
 }
 
 #[cfg(test)]
@@ -242,6 +343,36 @@ mod tests {
         assert_eq!(format_time(Duration::from_micros(1234)), "1.23ms  ");
         assert_eq!(format_time(Duration::from_millis(250)), "250.00ms");
         assert_eq!(format_time(Duration::from_millis(1500)), "1.50s   ");
+    }
+
+    #[test]
+    fn summary_table_matches_mc_console_table() {
+        let rows = vec![vec![
+            "http://h:9000".to_string(),
+            "0.51ms  ".to_string(),
+            "0.62ms  ".to_string(),
+            "0.73ms  ".to_string(),
+            "0".to_string(),
+            "2".to_string(),
+        ]];
+        assert_eq!(
+            console_table(&header_row(), &rows),
+            "┌───────────────┬──────────┬──────────┬──────────┬───────┬───────┐\n\
+             │ Endpoint      │ Min      │ Avg      │ Max      │ Error │ Count │\n\
+             │ http://h:9000 │ 0.51ms   │ 0.62ms   │ 0.73ms   │ 0     │ 2     │\n\
+             └───────────────┴──────────┴──────────┴──────────┴───────┴───────┘\n"
+        );
+    }
+
+    #[test]
+    fn endpoint_serializes_like_go_url() {
+        let value = serde_json::to_value(Endpoint::new("http", "h:9000")).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"Scheme":"http","Opaque":"","User":null,"Host":"h:9000","Path":"",
+                "RawPath":"","OmitHost":false,"ForceQuery":false,"RawQuery":"","Fragment":"",
+                "RawFragment":""})
+        );
     }
 
     #[test]

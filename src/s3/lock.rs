@@ -322,6 +322,7 @@ pub async fn get_bucket_lock_config(
     let output = match result {
         Ok(output) => output,
         Err(error) if error_code(&error) == Some("ObjectLockConfigurationNotFoundError") => {
+            super::bucket::require_bucket(client, bucket).await?;
             return Ok(None);
         }
         Err(error) => return Err(super::error::s3_error(&error, bucket, "")),
@@ -355,6 +356,7 @@ pub async fn put_bucket_lock_config(
     bucket: &str,
     rule: Option<(ObjectLockRetentionMode, u32, ValidityUnit)>,
 ) -> Result<()> {
+    super::bucket::require_bucket(client, bucket).await?;
     client
         .put_object_lock_configuration()
         .bucket(bucket)

@@ -5,9 +5,8 @@ use crate::output;
 use crate::target::is_valid_alias;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
-use tabwriter::TabWriter;
 use url::Url;
 
 #[derive(Debug, Args)]
@@ -60,6 +59,8 @@ pub struct AliasRemoveArgs {
 #[derive(Debug, Args)]
 pub struct AliasImportArgs {
     pub alias: String,
+    /// credentials JSON file (default: stdin)
+    pub file: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -136,7 +137,7 @@ fn set(args: AliasSetArgs, json: bool) -> Result<()> {
         &AliasMessage {
             status: "success",
             alias: &alias,
-            url: Some(url.as_str()),
+            url: &url,
             access_key: Some(access_key.as_str()),
             secret_key: Some(secret_key.as_str()),
             api: Some(api.as_str()),
@@ -197,7 +198,7 @@ fn remove(args: AliasRemoveArgs, json: bool) -> Result<()> {
         &AliasMessage {
             status: "success",
             alias: &alias,
-            url: None,
+            url: "",
             access_key: None,
             secret_key: None,
             api: None,
@@ -210,21 +211,77 @@ fn remove(args: AliasRemoveArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// mc `alias import`: stores the JSON document as-is (no normalization or server probe).
 fn import(args: AliasImportArgs, json: bool) -> Result<()> {
-    let mut raw = String::new();
-    io::stdin().read_to_string(&mut raw)?;
-    let document: AliasExportDocument = serde_json::from_str(&raw)?;
-    set(
-        AliasSetArgs {
-            alias: args.alias,
-            url: document.url,
-            access_key: Some(document.access_key),
-            secret_key: Some(document.secret_key),
-            api: Some(document.api),
-            path: document.path,
+    let alias = args.alias.trim_end_matches(['/', '\\']).to_string();
+    if !is_valid_alias(&alias) {
+        return Err(McError::new(format!(
+            "Alias `{alias}` should have alphanumeric characters such as [helloWorld0, hello_World0, ...] and begin with a letter"
+        )))
+        .context("Invalid alias.");
+    }
+    let raw = match args
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+    {
+        Some(file) => std::fs::read(file).context("Unable to parse credentials file")?,
+        None => {
+            let mut raw = Vec::new();
+            io::stdin()
+                .read_to_end(&mut raw)
+                .context("Unable to parse credentials file")?;
+            raw
+        }
+    };
+    let mut cfg: AliasConfig = serde_json::from_slice(&raw).map_err(|err| {
+        anyhow::Error::new(McError::new(go_json_error(&err)))
+            .context("Unable to parse input credentials")
+    })?;
+    normalize_url(&cfg.url)?;
+    if !cfg.access_key.is_empty() && cfg.access_key.len() < 3 {
+        return Err(McError::invalid_argument())
+            .context(format!("Invalid access key `{}`.", cfg.access_key));
+    }
+    if !cfg.secret_key.is_empty() && cfg.secret_key.len() < 8 {
+        return Err(McError::invalid_argument()).context("Invalid secret key.");
+    }
+    if !cfg.api.is_empty() {
+        normalize_api(&cfg.api)?;
+    }
+    normalize_path(&cfg.path)?;
+    cfg.src = None;
+
+    let mut store = ConfigStore::load_or_create()?;
+    store
+        .config_mut()
+        .aliases
+        .insert(alias.clone(), cfg.clone());
+    store.save()?;
+    print_message(
+        &AliasMessage {
+            status: "success",
+            alias: &alias,
+            url: &cfg.url,
+            access_key: Some(cfg.access_key.as_str()),
+            secret_key: Some(cfg.secret_key.as_str()),
+            api: Some(cfg.api.as_str()),
+            path: Some(cfg.path.as_str()),
+            src: None,
         },
+        &format!("Imported `{alias}` successfully."),
         json,
     )
+}
+
+/// Go `encoding/json` wording for the common "no input" case.
+fn go_json_error(err: &serde_json::Error) -> String {
+    if err.is_eof() {
+        "unexpected end of JSON input".to_string()
+    } else {
+        err.to_string()
+    }
 }
 
 fn export(args: AliasExportArgs) -> Result<()> {
@@ -233,27 +290,14 @@ fn export(args: AliasExportArgs) -> Result<()> {
     let config = store.config().aliases.get(&alias).ok_or_else(|| {
         anyhow::Error::new(McError::invalid_argument()).context("Unable to export credentials")
     })?;
-    let document = AliasExportDocument {
-        url: config.url.clone(),
-        access_key: config.access_key.clone(),
-        secret_key: config.secret_key.clone(),
-        api: config.api.clone(),
-        path: config.path.clone(),
+    // mc marshals the stored alias config (known fields only), compact, regardless of TTY.
+    let document = AliasConfig {
+        src: None,
+        extra: Default::default(),
+        ..config.clone()
     };
-    // mc prints compact JSON here regardless of the terminal.
     println!("{}", serde_json::to_string(&document)?);
     Ok(())
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AliasExportDocument {
-    url: String,
-    #[serde(rename = "accessKey")]
-    access_key: String,
-    #[serde(rename = "secretKey")]
-    secret_key: String,
-    api: String,
-    path: String,
 }
 
 fn print_rows(rows: &[DisplayAlias], json: bool) -> Result<()> {
@@ -264,16 +308,23 @@ fn print_rows(rows: &[DisplayAlias], json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut writer = TabWriter::new(io::stdout()).padding(2);
-    writeln!(writer, "Alias\tURL\tAccessKey\tSecretKey\tAPI\tPath\tSrc")?;
+    // mc: one block per alias, names padded to the longest alias.
+    let width = rows.iter().map(|row| row.alias.len()).max().unwrap_or(0);
+    let mut out = io::stdout().lock();
     for row in rows {
-        writeln!(
-            writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            row.alias, row.url, row.access_key, row.secret_key, row.api, row.path, row.src
-        )?;
+        writeln!(out, "{:<width$}", row.alias)?;
+        for (label, value) in [
+            ("URL", &row.url),
+            ("AccessKey", &row.access_key),
+            ("SecretKey", &row.secret_key),
+            ("API", &row.api),
+            ("Path", &row.path),
+            ("Src", &row.src),
+        ] {
+            writeln!(out, "  {label:<9} : {value}")?;
+        }
     }
-    writer.flush()?;
+    out.flush()?;
     Ok(())
 }
 
@@ -413,7 +464,7 @@ impl DisplayAlias {
         AliasMessage {
             status: "success",
             alias: &self.alias,
-            url: Some(self.url.as_str()),
+            url: &self.url,
             access_key: Some(self.access_key.as_str()),
             secret_key: Some(self.secret_key.as_str()),
             api: Some(self.api.as_str()),
@@ -427,8 +478,8 @@ impl DisplayAlias {
 struct AliasMessage<'a> {
     status: &'static str,
     alias: &'a str,
-    #[serde(rename = "URL", skip_serializing_if = "Option::is_none")]
-    url: Option<&'a str>,
+    #[serde(rename = "URL")]
+    url: &'a str,
     #[serde(rename = "accessKey", skip_serializing_if = "Option::is_none")]
     access_key: Option<&'a str>,
     #[serde(rename = "secretKey", skip_serializing_if = "Option::is_none")]

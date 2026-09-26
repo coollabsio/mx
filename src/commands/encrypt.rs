@@ -113,12 +113,10 @@ fn info(args: TargetArg, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let (alias, target) = require_s3(&store, &args.target)?;
     let bucket = target.require_bucket()?.to_string();
-    let config = runtime()?
-        .block_on(crate::s3::get_encryption_config(&alias, &bucket))
+    let (algorithm, key_id) = runtime()?
+        .block_on(crate::s3::get_encryption_required(&alias, &bucket))
         .context("Unable to get encryption info")?;
-    let (algorithm, key_id) = config
-        .map(|(algorithm, key)| (algorithm, key.unwrap_or_default()))
-        .unwrap_or_default();
+    let key_id = key_id.unwrap_or_default();
     if json {
         return print_json("info", &args.target, Some(Encryption { algorithm, key_id }));
     }

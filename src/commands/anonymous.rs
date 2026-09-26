@@ -266,7 +266,8 @@ struct RuleMessage<'a> {
 }
 
 fn list(target_arg: &str, json: bool) -> Result<()> {
-    let target = load_target(target_arg)?;
+    let target = load_target(target_arg)
+        .with_context(|| format!("Unable to list policies of target `{target_arg}`."))?;
     for (resource, allow) in access_rules(&target)? {
         if json {
             crate::output::print_json(&RuleMessage {
@@ -287,7 +288,8 @@ struct LinkMessage<'a> {
 }
 
 fn links(args: AnonymousLinksArgs, json: bool) -> Result<()> {
-    let target = load_target(&args.target)?;
+    let target = load_target(&args.target)
+        .with_context(|| format!("Unable to list policies of target `{}`.", args.target))?;
     let path = format!("{}/{}", target.bucket, target.prefix);
     let rt = runtime()?;
     let client = rt.block_on(crate::s3::build_client(&target.alias))?;

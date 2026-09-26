@@ -408,17 +408,18 @@ fn encrypt_and_cors_validate_arguments() {
 }
 
 #[test]
-fn ping_rejects_unsupported_flags() {
+fn ping_validates_flags_and_server_info() {
     let home = home();
+    // `--node` / `-a` read the node list from the admin ServerInfo API first.
     fails_with(
         home.path(),
         &["ping", "--node", "n1", "local"],
-        "need the MinIO admin API",
+        "Unable to get server info",
     );
     fails_with(
         home.path(),
         &["ping", "--distributed", "local"],
-        "need the MinIO admin API",
+        "Unable to get server info",
     );
     fails_with(
         home.path(),
@@ -513,8 +514,8 @@ fn ping_reports_status_and_summary() {
             predicate::str::contains("  2: http").and(predicate::str::contains("status=failed ")),
         )
         .stdout(predicate::str::contains("  3: http"))
-        .stdout(predicate::str::contains("ENDPOINT"))
-        .stdout(predicate::str::contains("COUNT"));
+        .stdout(predicate::str::contains("│ Endpoint "))
+        .stdout(predicate::str::contains("│ Count │"));
     assert_eq!(seen.lock().unwrap().len(), 3);
 
     let assert = mx(home.path())

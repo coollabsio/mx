@@ -144,7 +144,7 @@ fn live_retention_object_and_bypass() {
         .args(["retention", "info", "-r", &live.url("dir/")])
         .assert()
         .success()
-        .stdout(predicate::str::contains("[    GOVERNANCE      ]  "))
+        .stdout(predicate::str::contains("[     GOVERNANCE     ]  "))
         .stdout(predicate::str::contains("[    NO RETENTION    ]  "));
 
     let versions = run_json(
@@ -248,7 +248,7 @@ fn live_legalhold() {
         .args(["legalhold", "info", &live.url("dir/a.txt")])
         .assert()
         .success()
-        .stdout("[ Not set  ]  a.txt\n");
+        .stdout("[  Not set ]  a.txt\n");
     live.cmd()
         .args(["legalhold", "set", &live.url("dir/a.txt")])
         .assert()
@@ -258,7 +258,7 @@ fn live_legalhold() {
         .args(["legalhold", "info", "-r", &live.url("dir/")])
         .assert()
         .success()
-        .stdout("[    ON    ]  a.txt\n[ Not set  ]  b.txt\n");
+        .stdout("[    ON    ]  a.txt\n[  Not set ]  b.txt\n");
 
     let versions = run_json(
         &live,

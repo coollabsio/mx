@@ -2,6 +2,7 @@
 
 use crate::commands::retention::{LockTarget, center_text, print_json, resolve_objects, selection};
 use crate::commands::runtime;
+use crate::error::nonfatal;
 use crate::flags::{RewindFlag, VersionIdFlag, VersionsFlag};
 use crate::s3::lock;
 use anyhow::{Context, Result, bail};
@@ -167,6 +168,7 @@ fn apply(args: LegalholdTargetArgs, hold: Option<bool>, json: bool) -> Result<()
         );
     }
 
+    let single = selection.is_none();
     let mut failed = 0;
     for (key, version_id) in objects {
         let result = match hold {
@@ -185,6 +187,24 @@ fn apply(args: LegalholdTargetArgs, hold: Option<bool>, json: bool) -> Result<()
                 &key,
                 version_id.as_deref(),
             )),
+        };
+        // mc: one object without --recursive/--versions: `info` errors are fatal, `set`/`clear`
+        // report the error and still exit 0.
+        let result = match result {
+            Err(err) if single => {
+                if hold.is_none() {
+                    return Err(err).context(format!(
+                        "Failed to show legal hold information of `{}`.",
+                        args.target
+                    ));
+                }
+                crate::output::print_error(&err.context(nonfatal(format!(
+                    "Failed to set legal hold on `{}` successfully",
+                    args.target
+                ))));
+                return Ok(());
+            }
+            result => result,
         };
         let message = LegalHoldMessage {
             legalhold: result.as_ref().ok().cloned().flatten().unwrap_or_default(),
@@ -237,8 +257,8 @@ mod tests {
             "Object legal hold successfully cleared for `k` (version-id=v1)."
         );
         assert_eq!(message("ON", "").info_text(), "[    ON    ]  k");
-        assert_eq!(message("", "").info_text(), "[ Not set  ]  k");
-        assert_eq!(message("OFF", "v1").info_text(), "[   OFF    ]  v1  k");
+        assert_eq!(message("", "").info_text(), "[  Not set ]  k");
+        assert_eq!(message("OFF", "v1").info_text(), "[    OFF   ]  v1  k");
         let json = serde_json::to_value(message("ON", "v1")).unwrap();
         assert_eq!(json["legalhold"], "ON");
         assert_eq!(json["versionID"], "v1");

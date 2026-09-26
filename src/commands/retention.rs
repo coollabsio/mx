@@ -5,11 +5,12 @@ use crate::commands::runtime;
 use crate::commands::util::require_s3;
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
+use crate::error::Detail;
 use crate::flags::{RewindFlag, VersionIdFlag, VersionsFlag};
 use crate::flags::{ValidityUnit, parse_validity, retain_until};
 use crate::s3::lock::{self, Selection};
 use crate::target::TargetRef;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::types::ObjectLockRetentionMode;
 use clap::{Args, Subcommand};
@@ -250,7 +251,8 @@ pub(crate) fn center_text(text: &str, width: usize) -> String {
     if len >= width {
         return text.to_string();
     }
-    let left = (width - len) / 2;
+    // mc `centerText`: the extra space of an odd padding goes left.
+    let left = (width - len).div_ceil(2);
     format!(
         "{}{text}{}",
         " ".repeat(left),
@@ -288,6 +290,13 @@ pub(crate) fn short_duration(duration: Duration) -> String {
     }
 }
 
+/// Go-marshaled value of an error (`{}` for errors without fields).
+fn error_value(err: &anyhow::Error) -> Detail {
+    crate::error::mc_error(err)
+        .map(|e| e.detail.clone())
+        .unwrap_or_default()
+}
+
 pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
     crate::output::print_json(value)?;
     Ok(())
@@ -321,8 +330,11 @@ struct RetentionMessage<'a> {
     #[serde(rename = "versionID")]
     version_id: &'a str,
     status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     error: Option<String>,
+    /// Go `error` field: `null` on success, the marshaled error value on failure.
+    #[serde(rename = "error")]
+    error_value: Option<Detail>,
 }
 
 impl RetentionMessage<'_> {
@@ -388,7 +400,6 @@ fn set(args: RetentionSetArgs, json: bool) -> Result<()> {
         &args.common,
         Op::Set,
         Some((mode, until)),
-        &args.validity,
         args.bypass,
         json,
     )
@@ -400,7 +411,7 @@ fn clear(args: RetentionTargetArgs, json: bool) -> Result<()> {
     if args.common.default {
         return apply_bucket_lock(&target, Op::Clear, None, json);
     }
-    apply_retention(&target, &args.common, Op::Clear, None, "", true, json)
+    apply_retention(&target, &args.common, Op::Clear, None, true, json)
 }
 
 fn apply_bucket_lock(
@@ -412,11 +423,18 @@ fn apply_bucket_lock(
     if target.target.key.is_some() {
         bail!("--default requires a bucket target (ALIAS/BUCKET).");
     }
-    runtime()?.block_on(async {
-        let client = crate::s3::build_client(&target.alias).await?;
-        target.require_lock_supported(&client).await?;
-        lock::put_bucket_lock_config(&client, &target.bucket, rule.clone()).await
-    })?;
+    let rt = runtime()?;
+    let client = rt.block_on(crate::s3::build_client(&target.alias))?;
+    // mc `retention set --default` skips its lock-support check; `clear --default` does not.
+    if op == Op::Clear {
+        rt.block_on(target.require_lock_supported(&client))?;
+    }
+    rt.block_on(lock::put_bucket_lock_config(
+        &client,
+        &target.bucket,
+        rule.clone(),
+    ))
+    .context("Unable to apply bucket lock configuration.")?;
     let (mode, validity) = match &rule {
         Some((mode, count, unit)) => (mode.as_str(), format!("{count}{}", unit.as_str())),
         None => ("", "0".to_string()),
@@ -464,7 +482,6 @@ fn apply_retention(
     flags: &RetentionCommonFlags,
     op: Op,
     retention: Option<(ObjectLockRetentionMode, SystemTime)>,
-    validity: &str,
     bypass: bool,
     json: bool,
 ) -> Result<()> {
@@ -503,11 +520,13 @@ fn apply_retention(
         let message = RetentionMessage {
             op: op.as_str(),
             mode,
-            validity,
+            // mc never fills `validity` for object messages.
+            validity: "",
             urlpath: target.alias_path(key),
             version_id: version_id.as_deref().unwrap_or_default(),
             status: if result.is_ok() { "success" } else { "failure" },
             error: result.as_ref().err().map(|error| format!("{error:#}")),
+            error_value: result.as_ref().err().map(error_value),
         };
         if json {
             print_json(&message)?;
@@ -539,8 +558,11 @@ struct RetentionInfoMessage {
     #[serde(rename = "versionID")]
     version_id: String,
     status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip)]
     error: Option<String>,
+    /// Go `error` field: `null` on success, the marshaled error value on failure.
+    #[serde(rename = "error")]
+    error_value: Option<Detail>,
 }
 
 fn info(args: RetentionTargetArgs, json: bool) -> Result<()> {
@@ -608,6 +630,7 @@ fn info(args: RetentionTargetArgs, json: bool) -> Result<()> {
             version_id: version_id.unwrap_or_default(),
             status: if result.is_ok() { "success" } else { "failure" },
             error: result.as_ref().err().map(|error| format!("{error:#}")),
+            error_value: result.as_ref().err().map(error_value),
         };
         if result.is_err() {
             failed += 1;
@@ -621,6 +644,10 @@ fn info(args: RetentionTargetArgs, json: bool) -> Result<()> {
         }
     }
     if failed > 0 {
+        // mc prints only the failure message for a single object.
+        if !list_style {
+            return Err(crate::output::Exit(1).into());
+        }
         bail!("Unable to get retention of {failed} object(s)/version(s).");
     }
     Ok(())
@@ -681,7 +708,6 @@ fn info_record(
             }
         }
     }
-    out.push('\n');
     out
 }
 
@@ -693,7 +719,7 @@ mod tests {
     #[test]
     fn centers_text_like_mc() {
         assert_eq!(center_text("ON", 8), "   ON   ");
-        assert_eq!(center_text("OFF", 8), "  OFF   ");
+        assert_eq!(center_text("OFF", 8), "   OFF  ");
         assert_eq!(center_text("NO RETENTION", 8), "NO RETENTION");
     }
 
@@ -727,14 +753,15 @@ mod tests {
             version_id: "v1".into(),
             status: "success",
             error: None,
+            error_value: None,
         };
         assert_eq!(
             info_record(&message, until, now),
-            "Name    : local/b/k\nVersion : v1\nMode    : GOVERNANCE, expiring in 10 days\n"
+            "Name    : local/b/k\nVersion : v1\nMode    : GOVERNANCE, expiring in 10 days"
         );
         assert_eq!(
             info_list_line(&message, until, now),
-            "[    GOVERNANCE      ]  v1  local/b/k"
+            "[     GOVERNANCE     ]  v1  local/b/k"
         );
         let expired = Some(now - Duration::from_secs(5));
         assert!(info_list_line(&message, expired, now).contains("GOVERNANCE EXPIRED"));
@@ -745,6 +772,7 @@ mod tests {
             version_id: String::new(),
             status: "success",
             error: None,
+            error_value: None,
         };
         assert_eq!(none.until, "0001-01-01T00:00:00Z");
         assert_eq!(
@@ -753,7 +781,7 @@ mod tests {
         );
         assert_eq!(
             info_record(&none, None, now),
-            "Name    : local/b/k\nMode    : NO RETENTION\n"
+            "Name    : local/b/k\nMode    : NO RETENTION"
         );
     }
 
@@ -767,6 +795,7 @@ mod tests {
             version_id: "v1",
             status: "success",
             error: None,
+            error_value: None,
         };
         assert_eq!(
             message.text(),

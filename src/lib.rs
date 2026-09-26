@@ -67,15 +67,23 @@ where
     commands::run(cli)
 }
 
-/// Version text like mc's `printMCVersion`.
+/// Version text shaped like mc's `printMCVersion` (four lines). The release tag is mx's own
+/// (commit time, see build.rs); `Runtime` names the Rust toolchain with Go-style OS/arch.
 pub fn version_text() -> String {
+    let release = env!("MX_RELEASE");
+    let year = release.get(8..12).unwrap_or("2026");
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "x86" => "386",
+        other => other,
+    };
     format!(
-        "{} version {} (commit-id={})\nRuntime: {} {}/{}\nLicense Apache-2.0 <https://www.apache.org/licenses/LICENSE-2.0>\n",
+        "{} version {release} (commit-id={})\nRuntime: {} {}/{arch}\nCopyright (c) {year} mx contributors (mx {})\nLicense Apache-2.0 <https://www.apache.org/licenses/LICENSE-2.0>\n",
         output::prog_name(),
-        env!("CARGO_PKG_VERSION"),
         option_env!("MX_COMMIT_ID").unwrap_or("unknown"),
         option_env!("MX_RUSTC_VERSION").unwrap_or("rustc"),
         std::env::consts::OS,
-        std::env::consts::ARCH,
+        env!("CARGO_PKG_VERSION"),
     )
 }

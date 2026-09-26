@@ -20,7 +20,9 @@ fn list_creates_default_mx_config() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("play"))
-        .stdout(predicate::str::contains("Alias"));
+        .stdout(predicate::str::contains(
+            "  URL       : https://play.min.io",
+        ));
 
     let config_path = home.path().join(".mx/config.json");
     assert!(
@@ -230,5 +232,6 @@ fn remove_supports_json_output() {
         .success()
         .stdout(predicate::str::contains("\"status\":\"success\""))
         .stdout(predicate::str::contains("\"alias\":\"demo\""))
-        .stdout(predicate::str::contains("\"URL\"").not());
+        // mc keeps an empty `URL` in remove messages.
+        .stdout(predicate::str::contains("\"URL\":\"\""));
 }
