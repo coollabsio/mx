@@ -47,3 +47,4 @@ network); export both the host URL and the internal address when both are needed
 | file | exports |
 |------|---------|
 | `minio_pools.sh` | `MX_TEST_POOLS_URL`, `MX_TEST_POOLS_ACCESS_KEY`, `MX_TEST_POOLS_SECRET_KEY`, `MX_TEST_POOLS_POOL1` (`/data{1...4}`), `MX_TEST_POOLS_POOL2` (`/data{5...8}`) |
+| `minio_server.sh` | `MX_TEST_SERVER_URL`, `MX_TEST_SERVER_ACCESS_KEY`, `MX_TEST_SERVER_SECRET_KEY` (4-drive erasure set, safe to restart/freeze) |

@@ -185,8 +185,19 @@ impl AdminClient {
         ))
     }
 
-    /// Sends an unsigned request (STS `AssumeRoleWith*` form posts); `path` must already be
-    /// percent-encoded. The status is not checked.
+    /// Sends an unsigned request without a body (e.g. Prometheus metrics with a bearer
+    /// token); `path` may carry a `?query` and must already be percent-encoded.
+    pub async fn send_unsigned(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+    ) -> Result<Response> {
+        self.send_anonymous(method, path, headers, Vec::new()).await
+    }
+
+    /// Sends an unsigned request (STS `AssumeRoleWith*` form posts, metrics) over the same
+    /// connector; `path` must already be percent-encoded. The status is not checked.
     pub async fn send_anonymous(
         &self,
         method: &str,
