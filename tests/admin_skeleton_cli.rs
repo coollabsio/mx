@@ -78,54 +78,6 @@ fn assert_stubs(rows: &[&[&str]]) {
 }
 
 // ---------------------------------------------------------------------------
-// IAM
-// ---------------------------------------------------------------------------
-
-const IAM: &[&[&str]] = &[
-    &["admin", "user", "add", "a"],
-    &["admin", "user", "disable", "a", "a"],
-    &["admin", "user", "enable", "a", "a"],
-    &["admin", "user", "remove", "a", "a"],
-    &["admin", "user", "list", "a"],
-    &["admin", "user", "info", "a", "a"],
-    &["admin", "user", "policy", "a", "a"],
-    &["admin", "user", "svcacct", "add", "a", "a"],
-    &["admin", "user", "svcacct", "list", "a", "a"],
-    &["admin", "user", "svcacct", "remove", "a", "a"],
-    &["admin", "user", "svcacct", "info", "a", "a"],
-    &["admin", "user", "svcacct", "edit", "a", "a"],
-    &["admin", "user", "svcacct", "enable", "a", "a"],
-    &["admin", "user", "svcacct", "disable", "a", "a"],
-    &["admin", "user", "sts", "info", "a", "a"],
-    &["admin", "group", "add", "a", "a", "a"],
-    &["admin", "group", "remove", "a", "a"],
-    &["admin", "group", "info", "a", "a"],
-    &["admin", "group", "list", "a"],
-    &["admin", "group", "enable", "a", "a"],
-    &["admin", "group", "disable", "a", "a"],
-    &["admin", "policy", "create", "a", "a", "a"],
-    &["admin", "policy", "remove", "a", "a"],
-    &["admin", "policy", "list", "a"],
-    &["admin", "policy", "info", "a", "a"],
-    &["admin", "policy", "attach", "a", "a"],
-    &["admin", "policy", "detach", "a", "a"],
-    &["admin", "policy", "entities", "a"],
-    &["admin", "accesskey", "list", "a"],
-    &["admin", "accesskey", "remove", "a", "a"],
-    &["admin", "accesskey", "info", "a", "a"],
-    &["admin", "accesskey", "create"],
-    &["admin", "accesskey", "edit"],
-    &["admin", "accesskey", "enable"],
-    &["admin", "accesskey", "disable"],
-    &["admin", "accesskey", "sts-revoke", "a"],
-];
-
-#[test]
-fn iam_stubs() {
-    assert_stubs(IAM);
-}
-
-// ---------------------------------------------------------------------------
 // IDP
 // ---------------------------------------------------------------------------
 
