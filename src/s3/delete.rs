@@ -112,3 +112,151 @@ pub async fn delete_keys(client: &Client, bucket: &str, keys: &[String]) -> Resu
     }
     Ok(())
 }
+
+/// One object (version) to delete with [`delete_versions`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeleteTarget {
+    pub key: String,
+    pub version_id: Option<String>,
+}
+
+/// Per-object outcome of a delete request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeleteOutcome {
+    pub key: String,
+    /// The version that was requested for deletion.
+    pub version_id: Option<String>,
+    /// A delete marker was created (or the removed version was a delete marker).
+    pub delete_marker: bool,
+    pub delete_marker_version_id: Option<String>,
+    /// Error message when the server refused to delete this object.
+    pub error: Option<String>,
+}
+
+/// Bulk-deletes objects/versions with DeleteObjects in batches of 1000 and reports every
+/// result. `bypass` sets `x-amz-bypass-governance-retention`.
+pub async fn delete_versions(
+    client: &Client,
+    bucket: &str,
+    targets: &[DeleteTarget],
+    bypass: bool,
+) -> Result<Vec<DeleteOutcome>> {
+    let mut outcomes = Vec::new();
+    for chunk in targets.chunks(1_000) {
+        let objects = chunk
+            .iter()
+            .map(|target| {
+                ObjectIdentifier::builder()
+                    .key(&target.key)
+                    .set_version_id(target.version_id.clone())
+                    .build()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut request = client.delete_objects().bucket(bucket).delete(
+            Delete::builder()
+                .set_objects(Some(objects))
+                .quiet(false)
+                .build()?,
+        );
+        if bypass {
+            request = request.bypass_governance_retention(true);
+        }
+        let response = request.send().await?;
+        for deleted in response.deleted() {
+            outcomes.push(DeleteOutcome {
+                key: deleted.key().unwrap_or_default().to_string(),
+                version_id: deleted.version_id().map(str::to_string),
+                delete_marker: deleted.delete_marker().unwrap_or(false),
+                delete_marker_version_id: deleted.delete_marker_version_id().map(str::to_string),
+                error: None,
+            });
+        }
+        for error in response.errors() {
+            outcomes.push(DeleteOutcome {
+                key: error.key().unwrap_or_default().to_string(),
+                version_id: error.version_id().map(str::to_string),
+                error: Some(
+                    error
+                        .message()
+                        .or(error.code())
+                        .unwrap_or("unknown error")
+                        .to_string(),
+                ),
+                ..Default::default()
+            });
+        }
+    }
+    Ok(outcomes)
+}
+
+/// DeleteObject for one key/version. `bypass` sets `x-amz-bypass-governance-retention`;
+/// `purge` sets MinIO's `x-minio-force-delete: true` (removes the whole prefix/object tree).
+pub async fn delete_object_with(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+    bypass: bool,
+    purge: bool,
+) -> Result<DeleteOutcome> {
+    let mut request = client
+        .delete_object()
+        .bucket(bucket)
+        .key(key)
+        .set_version_id(version_id.map(str::to_string));
+    if bypass {
+        request = request.bypass_governance_retention(true);
+    }
+    let response = if purge {
+        request
+            .customize()
+            .mutate_request(add_force_delete_header)
+            .send()
+            .await?
+    } else {
+        request.send().await?
+    };
+    let delete_marker = response.delete_marker().unwrap_or(false);
+    Ok(DeleteOutcome {
+        key: key.to_string(),
+        version_id: version_id.map(str::to_string),
+        delete_marker,
+        delete_marker_version_id: if delete_marker {
+            response.version_id().map(str::to_string)
+        } else {
+            None
+        },
+        error: None,
+    })
+}
+
+/// Aborts one incomplete multipart upload.
+pub async fn abort_upload(client: &Client, bucket: &str, key: &str, upload_id: &str) -> Result<()> {
+    client
+        .abort_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .send()
+        .await?;
+    Ok(())
+}
+
+/// MinIO force bucket removal (`x-minio-force-delete: true`): deletes the bucket with all its
+/// contents, including object-locked data.
+pub async fn delete_bucket_force(client: &Client, bucket: &str) -> Result<()> {
+    client
+        .delete_bucket()
+        .bucket(bucket)
+        .customize()
+        .mutate_request(add_force_delete_header)
+        .send()
+        .await?;
+    Ok(())
+}
+
+fn add_force_delete_header(
+    request: &mut aws_smithy_runtime_api::client::orchestrator::HttpRequest,
+) {
+    request.headers_mut().insert("x-minio-force-delete", "true");
+}

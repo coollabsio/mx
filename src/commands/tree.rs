@@ -1,5 +1,6 @@
-use crate::commands::util::{key_depth, object_infos};
+use crate::commands::util::key_depth;
 use crate::config::ConfigStore;
+use crate::flags::RewindFlag;
 use anyhow::Result;
 use clap::Args;
 use std::collections::BTreeSet;
@@ -10,12 +11,14 @@ pub struct TreeArgs {
     pub files: bool,
     #[arg(short = 'd', long)]
     pub depth: Option<usize>,
+    #[command(flatten)]
+    pub rewind: RewindFlag,
     pub target: String,
 }
 
 pub fn run(args: TreeArgs, _json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
-    let (_, items) = object_infos(&store, &args.target)?;
+    let items = super::du::listing(&store, &args.target, false, &args.rewind)?;
     let mut nodes = BTreeSet::new();
     for item in items {
         let parts: Vec<_> = item

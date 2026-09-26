@@ -61,6 +61,8 @@ pub struct ListOptions {
     pub rewind: Option<SystemTime>,
     /// Return incomplete multipart uploads instead of objects.
     pub incomplete: bool,
+    /// MinIO only: list the contents of zip archives (`x-minio-extract: true`).
+    pub zip: bool,
 }
 
 pub async fn list_target(
@@ -105,6 +107,10 @@ pub async fn list_object_infos(
 
 /// General listing entry point honoring [`ListOptions`]. Prefix entries are only returned for
 /// non-recursive object/version listings.
+///
+/// Version selection: `versions` alone returns every version and delete marker; `rewind` alone
+/// returns the state at that time ([`resolve_rewind`]); both together return every version and
+/// delete marker modified at or before the rewind time ([`versions_before`]).
 pub async fn list_objects_with(
     client: &Client,
     bucket: &str,
@@ -116,12 +122,13 @@ pub async fn list_objects_with(
     }
     if options.versions || options.rewind.is_some() {
         let versions = list_object_versions(client, bucket, prefix, options.recursive).await?;
-        return Ok(match options.rewind {
-            Some(at) => resolve_rewind(versions, at),
-            None => versions,
+        return Ok(match (options.versions, options.rewind) {
+            (true, Some(at)) => versions_before(versions, at),
+            (false, Some(at)) => resolve_rewind(versions, at),
+            _ => versions,
         });
     }
-    let items = list_objects_raw(client, bucket, prefix, options.recursive).await?;
+    let items = list_objects_raw(client, bucket, prefix, options.recursive, options.zip).await?;
     Ok(items
         .into_iter()
         .filter_map(|(item, modified)| match item {
@@ -160,6 +167,36 @@ pub async fn list_object_versions(
     recursive: bool,
 ) -> Result<Vec<ObjectInfo>> {
     let normalized_prefix = normalize_prefix(prefix);
+    list_versions_inner(
+        client,
+        bucket,
+        normalized_prefix.as_deref(),
+        normalized_prefix.as_deref(),
+        recursive,
+    )
+    .await
+}
+
+/// All versions and delete markers of exactly `key` (absolute key in `ObjectInfo::key`),
+/// newest first.
+pub async fn list_key_versions(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<Vec<ObjectInfo>> {
+    let mut items = list_versions_inner(client, bucket, Some(key), None, true).await?;
+    items.retain(|item| item.key == key);
+    Ok(items)
+}
+
+/// `request_prefix` is sent as-is; keys are reported relative to `display_prefix`.
+async fn list_versions_inner(
+    client: &Client,
+    bucket: &str,
+    request_prefix: Option<&str>,
+    display_prefix: Option<&str>,
+    recursive: bool,
+) -> Result<Vec<ObjectInfo>> {
     let mut key_marker: Option<String> = None;
     let mut version_marker: Option<String> = None;
     let mut items = Vec::new();
@@ -168,7 +205,7 @@ pub async fn list_object_versions(
         if !recursive {
             request = request.delimiter("/");
         }
-        if let Some(prefix) = &normalized_prefix {
+        if let Some(prefix) = request_prefix {
             request = request.prefix(prefix);
         }
         if let Some(marker) = key_marker.take() {
@@ -181,7 +218,7 @@ pub async fn list_object_versions(
         for prefix in response.common_prefixes() {
             if let Some(raw) = prefix.prefix() {
                 items.push(ObjectInfo {
-                    key: display_name(raw, normalized_prefix.as_deref()),
+                    key: display_name(raw, display_prefix),
                     is_prefix: true,
                     is_latest: true,
                     ..Default::default()
@@ -191,7 +228,7 @@ pub async fn list_object_versions(
         for version in response.versions() {
             let Some(key) = version.key() else { continue };
             items.push(ObjectInfo {
-                key: display_name(key, normalized_prefix.as_deref()),
+                key: display_name(key, display_prefix),
                 size: version.size().unwrap_or(0),
                 last_modified: version.last_modified().and_then(to_system_time),
                 etag: version.e_tag().map(str::to_string),
@@ -204,7 +241,7 @@ pub async fn list_object_versions(
         for marker in response.delete_markers() {
             let Some(key) = marker.key() else { continue };
             items.push(ObjectInfo {
-                key: display_name(key, normalized_prefix.as_deref()),
+                key: display_name(key, display_prefix),
                 last_modified: marker.last_modified().and_then(to_system_time),
                 version_id: marker.version_id().map(str::to_string),
                 is_latest: marker.is_latest().unwrap_or(false),
@@ -267,6 +304,14 @@ pub fn resolve_rewind(versions: Vec<ObjectInfo>, at: SystemTime) -> Vec<ObjectIn
         .collect()
 }
 
+/// Every version and delete marker with `last_modified <= at` (prefix entries pass through).
+pub fn versions_before(versions: Vec<ObjectInfo>, at: SystemTime) -> Vec<ObjectInfo> {
+    versions
+        .into_iter()
+        .filter(|item| item.is_prefix || item.last_modified.is_some_and(|modified| modified <= at))
+        .collect()
+}
+
 /// Lists incomplete multipart uploads (paginated ListMultipartUploads). `size` is 0; each
 /// entry has `upload_id` and `last_modified` = initiation time.
 pub async fn list_incomplete_uploads(
@@ -276,6 +321,42 @@ pub async fn list_incomplete_uploads(
     recursive: bool,
 ) -> Result<Vec<ObjectInfo>> {
     let normalized_prefix = normalize_prefix(prefix);
+    let items = list_uploads_inner(
+        client,
+        bucket,
+        normalized_prefix.as_deref(),
+        normalized_prefix.as_deref(),
+        recursive,
+    )
+    .await?;
+    let Some(prefix) = normalized_prefix.filter(|_| recursive && items.is_empty()) else {
+        return Ok(items);
+    };
+    // MinIO only honors a prefix that names an object; list the bucket and filter instead.
+    Ok(list_uploads_inner(client, bucket, None, None, true)
+        .await?
+        .into_iter()
+        .filter_map(|mut item| {
+            item.key = item.key.strip_prefix(&prefix)?.to_string();
+            Some(item)
+        })
+        .collect())
+}
+
+/// Incomplete multipart uploads of exactly `key` (absolute key in `ObjectInfo::key`).
+pub async fn list_key_uploads(client: &Client, bucket: &str, key: &str) -> Result<Vec<ObjectInfo>> {
+    let mut items = list_uploads_inner(client, bucket, Some(key), None, true).await?;
+    items.retain(|item| item.key == key);
+    Ok(items)
+}
+
+async fn list_uploads_inner(
+    client: &Client,
+    bucket: &str,
+    request_prefix: Option<&str>,
+    display_prefix: Option<&str>,
+    recursive: bool,
+) -> Result<Vec<ObjectInfo>> {
     let mut key_marker: Option<String> = None;
     let mut upload_marker: Option<String> = None;
     let mut items = Vec::new();
@@ -284,7 +365,7 @@ pub async fn list_incomplete_uploads(
         if !recursive {
             request = request.delimiter("/");
         }
-        if let Some(prefix) = &normalized_prefix {
+        if let Some(prefix) = request_prefix {
             request = request.prefix(prefix);
         }
         if let Some(marker) = key_marker.take() {
@@ -297,7 +378,7 @@ pub async fn list_incomplete_uploads(
         for prefix in response.common_prefixes() {
             if let Some(raw) = prefix.prefix() {
                 items.push(ObjectInfo {
-                    key: display_name(raw, normalized_prefix.as_deref()),
+                    key: display_name(raw, display_prefix),
                     is_prefix: true,
                     ..Default::default()
                 });
@@ -306,7 +387,7 @@ pub async fn list_incomplete_uploads(
         for upload in response.uploads() {
             let Some(key) = upload.key() else { continue };
             items.push(ObjectInfo {
-                key: display_name(key, normalized_prefix.as_deref()),
+                key: display_name(key, display_prefix),
                 last_modified: upload.initiated().and_then(to_system_time),
                 storage_class: upload.storage_class().map(|v| v.as_str().to_string()),
                 upload_id: upload.upload_id().map(str::to_string),
@@ -348,7 +429,7 @@ pub async fn list_objects(
     prefix: Option<&str>,
     recursive: bool,
 ) -> Result<Vec<S3ListItem>> {
-    Ok(list_objects_raw(client, bucket, prefix, recursive)
+    Ok(list_objects_raw(client, bucket, prefix, recursive, false)
         .await?
         .into_iter()
         .map(|(item, _)| item)
@@ -360,6 +441,7 @@ async fn list_objects_raw(
     bucket: &str,
     prefix: Option<&str>,
     recursive: bool,
+    zip: bool,
 ) -> Result<Vec<(S3ListItem, Option<SystemTime>)>> {
     let normalized_prefix = normalize_prefix(prefix);
     let mut continuation = None;
@@ -377,7 +459,15 @@ async fn list_objects_raw(
             request = request.continuation_token(token);
         }
 
-        let response = request.send().await?;
+        let response = if zip {
+            request
+                .customize()
+                .mutate_request(super::objects::add_zip_extract_header)
+                .send()
+                .await?
+        } else {
+            request.send().await?
+        };
 
         for prefix in response.common_prefixes() {
             if let Some(raw) = prefix.prefix() {
@@ -420,6 +510,28 @@ async fn list_objects_raw(
     Ok(items)
 }
 
+/// `true` when the bucket has no objects, versions or delete markers.
+pub async fn bucket_is_empty(client: &Client, bucket: &str) -> Result<bool> {
+    match client
+        .list_object_versions()
+        .bucket(bucket)
+        .max_keys(1)
+        .send()
+        .await
+    {
+        Ok(response) => Ok(response.versions().is_empty() && response.delete_markers().is_empty()),
+        Err(_) => {
+            let response = client
+                .list_objects_v2()
+                .bucket(bucket)
+                .max_keys(1)
+                .send()
+                .await?;
+            Ok(response.contents().is_empty())
+        }
+    }
+}
+
 pub(crate) fn normalize_prefix(prefix: Option<&str>) -> Option<String> {
     prefix
         .map(str::trim)
@@ -455,7 +567,7 @@ pub fn full_key(prefix: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObjectInfo, resolve_rewind};
+    use super::{ObjectInfo, resolve_rewind, versions_before};
     use std::time::{Duration, UNIX_EPOCH};
 
     fn version(key: &str, secs: u64, id: &str, delete: bool) -> ObjectInfo {
@@ -486,5 +598,25 @@ mod tests {
             .map(|item| item.version_id.as_deref().unwrap())
             .collect();
         assert_eq!(picked, ["a2", "d2"]);
+    }
+
+    #[test]
+    fn versions_before_keeps_all_older_versions_and_prefixes() {
+        let mut versions = vec![
+            version("a", 10, "a1", false),
+            version("a", 30, "a3", false),
+            version("b", 15, "b2", true),
+        ];
+        versions.push(ObjectInfo {
+            key: "dir/".into(),
+            is_prefix: true,
+            ..Default::default()
+        });
+        let result = versions_before(versions, UNIX_EPOCH + Duration::from_secs(20));
+        let keys: Vec<_> = result
+            .iter()
+            .map(|item| item.version_id.as_deref().unwrap_or(&item.key))
+            .collect();
+        assert_eq!(keys, ["a1", "b2", "dir/"]);
     }
 }
