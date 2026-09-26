@@ -10,6 +10,7 @@
 //! AES-256-GCM), which every MinIO server decrypts (it is madmin's FIPS mode).
 
 use crate::config::model::AliasConfig;
+use crate::error::McError;
 use anyhow::{Context, Result, anyhow, bail};
 use aws_credential_types::Credentials;
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
@@ -29,15 +30,25 @@ use std::time::SystemTime;
 pub const ADMIN_PREFIX: &str = "/minio/admin/v3";
 
 /// Raw HTTP response.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Response {
     pub status: u16,
     pub body: Vec<u8>,
+    /// Response headers (lower-case names).
+    pub headers: Vec<(String, String)>,
 }
 
 impl Response {
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    /// First header named `name` (case-insensitive).
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
     }
 }
 
@@ -140,14 +151,23 @@ impl AdminClient {
             .connector
             .call(request)
             .await
-            .map_err(|err| anyhow!("request to {} failed: {err}", self.authority))?;
+            .map_err(|err| super::error::go_transport_error(&go_method(method), &uri, &err))?;
         let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(n, v)| (n.to_ascii_lowercase(), v.to_string()))
+            .collect();
         let body = ByteStream::new(response.into_body())
             .collect()
             .await?
             .into_bytes()
             .to_vec();
-        Ok(Response { status, body })
+        Ok(Response {
+            status,
+            body,
+            headers,
+        })
     }
 
     /// Sends an admin API request (`/minio/admin/v3/<api>`); non-2xx statuses become errors.
@@ -171,7 +191,9 @@ impl AdminClient {
         query: &[(&str, &str)],
         body: Vec<u8>,
     ) -> Result<Response> {
-        let path = format!("/{}", encode_path(bucket));
+        // minio-go requests bucket sub-resources as `/bucket/?...` (the server echoes the
+        // path as the error `Resource`).
+        let path = format!("/{}/", encode_path(bucket));
         let mut headers = Vec::new();
         if !body.is_empty() {
             use base64::Engine;
@@ -185,7 +207,8 @@ impl AdminClient {
         self.send(method, &path, query, &headers, body).await
     }
 
-    /// Like [`Self::bucket_raw`], but non-2xx statuses become errors.
+    /// Like [`Self::bucket_raw`], but non-2xx statuses become errors (minio-go
+    /// `ErrorResponse`, the S3 API errors mc reports).
     pub async fn bucket(
         &self,
         method: &str,
@@ -193,8 +216,45 @@ impl AdminClient {
         query: &[(&str, &str)],
         body: Vec<u8>,
     ) -> Result<Response> {
-        check_status(self.bucket_raw(method, bucket, query, body).await?)
+        check_s3_status(self.bucket_raw(method, bucket, query, body).await?, bucket)
     }
+}
+
+/// Go `net/http` method spelling in `url.Error` texts (`Get "URL": ...`).
+fn go_method(method: &str) -> String {
+    let lower = method.to_ascii_lowercase();
+    let mut chars = lower.chars();
+    chars
+        .next()
+        .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+        .unwrap_or_default()
+}
+
+/// mc `newAdminClient(aliasedURL)`: the alias is the first path element; failures carry
+/// mc's message `Unable to initialize admin connection.`.
+pub fn admin_client_for(
+    store: &crate::config::ConfigStore,
+    aliased_url: &str,
+) -> Result<AdminClient> {
+    let alias = aliased_url.split('/').next().unwrap_or_default();
+    let config = if store.is_invalid_env_alias(alias) {
+        store.alias(alias)
+    } else {
+        store.config().aliases.get(alias).cloned().ok_or_else(|| {
+            let lower = aliased_url.to_ascii_lowercase();
+            if lower.starts_with("http://") || lower.starts_with("https://") {
+                McError::invalid_aliased_url(aliased_url).into()
+            } else {
+                McError::new(format!(
+                    "No valid configuration found for '{aliased_url}' host alias"
+                ))
+                .into()
+            }
+        })
+    };
+    config
+        .and_then(|config| AdminClient::new(&config))
+        .context("Unable to initialize admin connection.")
 }
 
 /// Returns SigV4 headers (`authorization`, `x-amz-date`, `x-amz-content-sha256`, ...) to add.
@@ -240,44 +300,118 @@ pub fn sign_headers(
         .collect())
 }
 
+/// Admin API status check: non-2xx responses become madmin `ErrorResponse` errors.
 pub fn check_status(response: Response) -> Result<Response> {
     if (200..300).contains(&response.status) {
         return Ok(response);
     }
-    Err(anyhow!(error_message(&response)))
+    Err(madmin_error(&response).into())
 }
 
-/// Extracts a readable message from a MinIO admin (JSON) or S3 (XML) error body.
-pub fn error_message(response: &Response) -> String {
-    #[derive(Deserialize)]
-    struct AdminError {
-        #[serde(rename = "Code", default)]
-        code: String,
-        #[serde(rename = "Message", default)]
-        message: String,
+/// S3 API status check for bucket sub-resources: minio-go `ErrorResponse` errors.
+pub fn check_s3_status(response: Response, bucket: &str) -> Result<Response> {
+    if (200..300).contains(&response.status) {
+        return Ok(response);
     }
+    let resp = super::error::ErrorResponse::from_http(
+        response.status,
+        |name| response.header(name),
+        &response.body,
+        bucket,
+        "",
+    );
+    Err(resp.to_raw_error().into())
+}
+
+/// Decodes an admin API error like madmin `httpRespToErrorResponse` (JSON, then XML body);
+/// the detail is madmin's `ErrorResponse` as Go marshals it.
+pub fn madmin_error(response: &Response) -> McError {
     let text = response.text();
-    if let Ok(err) = serde_json::from_str::<AdminError>(&text) {
-        if !err.message.is_empty() {
-            return err.message;
+    let status_line = || {
+        format!(
+            "{} {}",
+            response.status,
+            http::StatusCode::from_u16(response.status)
+                .ok()
+                .and_then(|s| s.canonical_reason())
+                .unwrap_or_default()
+        )
+    };
+    let mut fields: Vec<(&str, String)> = [
+        "Code",
+        "Message",
+        "BucketName",
+        "Key",
+        "RequestID",
+        "HostID",
+        "Region",
+    ]
+    .iter()
+    .map(|name| (*name, String::new()))
+    .collect();
+    let mut set = |name: &str, value: String| {
+        if let Some(field) = fields
+            .iter_mut()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        {
+            field.1 = value;
         }
-        if !err.code.is_empty() {
-            return err.code;
+    };
+    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text) {
+        Ok(map) => {
+            for (key, value) in map {
+                // Go matches JSON keys case-insensitively (`RequestId` -> `RequestID`).
+                if let Some(value) = value.as_str() {
+                    set(&key, value.to_string());
+                }
+            }
+        }
+        Err(json_err) => {
+            let xml_code = xml_text(&text, "Code");
+            if xml_code.is_some() {
+                for (tag, name) in [
+                    ("Code", "Code"),
+                    ("Message", "Message"),
+                    ("BucketName", "BucketName"),
+                    ("Key", "Key"),
+                    ("RequestId", "RequestID"),
+                    ("HostId", "HostID"),
+                    ("Region", "Region"),
+                ] {
+                    set(name, xml_text(&text, tag).unwrap_or_default());
+                }
+            } else {
+                let json_text = if text.trim().is_empty() {
+                    "unexpected end of JSON input".to_string()
+                } else {
+                    json_err.to_string()
+                };
+                let mut body = text.clone();
+                if body.len() > 1024 {
+                    body = format!("{}...", &body[..body.floor_char_boundary(1021)]);
+                }
+                set("Code", status_line());
+                set(
+                    "Message",
+                    format!("Failed to parse server response ({json_text}): {body}"),
+                );
+            }
         }
     }
-    if let Some(message) = xml_text(&text, "Message").filter(|m| !m.is_empty()) {
-        return message;
-    }
-    if let Some(code) = xml_text(&text, "Code") {
-        return code;
-    }
-    match response.status {
-        403 => "Access denied (admin privileges required).".to_string(),
-        404 => {
-            "The requested resource does not exist on the server (not a MinIO server?).".to_string()
-        }
-        status => format!("server returned HTTP {status}"),
-    }
+    let message = fields[1].1.clone();
+    let code = fields[0].1.clone();
+    let detail = crate::error::Detail(
+        fields
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), serde_json::Value::String(value)))
+            .collect(),
+    );
+    McError::with_detail(message, detail).with_code(code)
+}
+
+/// Readable message of a MinIO admin (JSON) or S3 (XML) error body.
+pub fn error_message(response: &Response) -> String {
+    madmin_error(response).message
 }
 
 /// Returns the S3 error code of an XML error body.
@@ -512,6 +646,70 @@ pub fn comma(value: i64) -> String {
     if value < 0 { format!("-{out}") } else { out }
 }
 
+/// `humanize.ParseBytes`: `1GB` = 10^9, `1GiB` = 2^30, `1.5k`, `1,024`. Errors are mc's
+/// causes, with the Go error value as detail (`*strconv.NumError` for a bad number).
+pub fn parse_bytes(input: &str) -> std::result::Result<u64, McError> {
+    let digits = input
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == ','))
+        .map(|(i, _)| i)
+        .unwrap_or(input.len());
+    let num = input[..digits].replace(',', "");
+    let value: f64 = num.parse().map_err(|_| {
+        McError::with_detail(
+            format!("strconv.ParseFloat: parsing {num:?}: invalid syntax"),
+            crate::detail![
+                ("Func", "ParseFloat"),
+                ("Num", num),
+                ("Err", serde_json::json!({}))
+            ],
+        )
+    })?;
+    let extra = input[digits..].trim().to_ascii_lowercase();
+    let unit = |prefix: &str| -> Option<f64> {
+        let exp = ["", "k", "m", "g", "t", "p", "e"]
+            .iter()
+            .position(|p| *p == prefix)?;
+        Some(exp as f64)
+    };
+    let multiplier = match extra.as_str() {
+        "" | "b" => Some(1.0),
+        other => {
+            let stem = other.strip_suffix('b').unwrap_or(other);
+            match stem.strip_suffix('i') {
+                Some(prefix) if !prefix.is_empty() => unit(prefix).map(|e| 1024f64.powf(e)),
+                _ => unit(stem).filter(|e| *e > 0.0).map(|e| 1000f64.powf(e)),
+            }
+        }
+    };
+    let Some(multiplier) = multiplier else {
+        return Err(McError::new(format!("unhandled size name: {extra}")));
+    };
+    let bytes = value * multiplier;
+    if bytes >= u64::MAX as f64 {
+        return Err(McError::new(format!("too large: {input}")));
+    }
+    Ok(bytes as u64)
+}
+
+/// Serializes an `f64` like Go's `encoding/json` (integral values without `.0`).
+pub fn go_f64<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    if value.fract() == 0.0 && value.abs() < 1e21 {
+        serializer.serialize_i64(*value as i64)
+    } else {
+        serializer.serialize_f64(*value)
+    }
+}
+
+/// [`go_f64`] for `f32`.
+pub fn go_f32<S: serde::Serializer>(value: &f32, serializer: S) -> Result<S::Ok, S::Error> {
+    if value.fract() == 0.0 && value.abs() < 1e21 {
+        serializer.serialize_i64(*value as i64)
+    } else {
+        serializer.serialize_f32(*value)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bucket quota
 // ---------------------------------------------------------------------------
@@ -562,46 +760,219 @@ pub async fn set_bucket_quota(
 // Remote tiers
 // ---------------------------------------------------------------------------
 
-type JsonObject = serde_json::Map<String, serde_json::Value>;
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
-/// `madmin.TierConfig`. Tier-type specific sections are kept as raw JSON objects so that
-/// unknown fields (and azure/gcs tiers) round-trip untouched.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
+}
+
+/// madmin `TierS3` (Go field order, `omitempty`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TierS3 {
+    #[serde(rename = "Endpoint", skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    #[serde(rename = "AccessKey", skip_serializing_if = "String::is_empty")]
+    pub access_key: String,
+    #[serde(rename = "SecretKey", skip_serializing_if = "String::is_empty")]
+    pub secret_key: String,
+    #[serde(rename = "Bucket", skip_serializing_if = "String::is_empty")]
+    pub bucket: String,
+    #[serde(rename = "Prefix", skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    #[serde(rename = "Region", skip_serializing_if = "String::is_empty")]
+    pub region: String,
+    #[serde(rename = "StorageClass", skip_serializing_if = "String::is_empty")]
+    pub storage_class: String,
+    #[serde(rename = "AWSRole", skip_serializing_if = "is_false")]
+    pub aws_role: bool,
+    #[serde(
+        rename = "AWSRoleWebIdentityTokenFile",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub aws_role_web_identity_token_file: String,
+    #[serde(rename = "AWSRoleARN", skip_serializing_if = "String::is_empty")]
+    pub aws_role_arn: String,
+    #[serde(
+        rename = "AWSRoleSessionName",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub aws_role_session_name: String,
+    #[serde(rename = "AWSRoleDurationSeconds", skip_serializing_if = "is_zero_i64")]
+    pub aws_role_duration_seconds: i64,
+}
+
+/// madmin `ServicePrincipalAuth` (a struct, so Go always marshals it, even when empty).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServicePrincipalAuth {
+    #[serde(rename = "TenantID", skip_serializing_if = "String::is_empty")]
+    pub tenant_id: String,
+    #[serde(rename = "ClientID", skip_serializing_if = "String::is_empty")]
+    pub client_id: String,
+    #[serde(rename = "ClientSecret", skip_serializing_if = "String::is_empty")]
+    pub client_secret: String,
+}
+
+/// madmin `TierAzure`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TierAzure {
+    #[serde(rename = "Endpoint", skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    #[serde(rename = "AccountName", skip_serializing_if = "String::is_empty")]
+    pub account_name: String,
+    #[serde(rename = "AccountKey", skip_serializing_if = "String::is_empty")]
+    pub account_key: String,
+    #[serde(rename = "Bucket", skip_serializing_if = "String::is_empty")]
+    pub bucket: String,
+    #[serde(rename = "Prefix", skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    #[serde(rename = "Region", skip_serializing_if = "String::is_empty")]
+    pub region: String,
+    #[serde(rename = "StorageClass", skip_serializing_if = "String::is_empty")]
+    pub storage_class: String,
+    #[serde(rename = "SPAuth")]
+    pub sp_auth: ServicePrincipalAuth,
+}
+
+/// madmin `TierGCS` (`Creds` is the URL-safe base64 of the credentials JSON file).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TierGCS {
+    #[serde(rename = "Endpoint", skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    #[serde(rename = "Creds", skip_serializing_if = "String::is_empty")]
+    pub creds: String,
+    #[serde(rename = "Bucket", skip_serializing_if = "String::is_empty")]
+    pub bucket: String,
+    #[serde(rename = "Prefix", skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    #[serde(rename = "Region", skip_serializing_if = "String::is_empty")]
+    pub region: String,
+    #[serde(rename = "StorageClass", skip_serializing_if = "String::is_empty")]
+    pub storage_class: String,
+}
+
+/// madmin `TierMinIO`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TierMinIO {
+    #[serde(rename = "Endpoint", skip_serializing_if = "String::is_empty")]
+    pub endpoint: String,
+    #[serde(rename = "AccessKey", skip_serializing_if = "String::is_empty")]
+    pub access_key: String,
+    #[serde(rename = "SecretKey", skip_serializing_if = "String::is_empty")]
+    pub secret_key: String,
+    #[serde(rename = "Bucket", skip_serializing_if = "String::is_empty")]
+    pub bucket: String,
+    #[serde(rename = "Prefix", skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    #[serde(rename = "Region", skip_serializing_if = "String::is_empty")]
+    pub region: String,
+}
+
+/// `madmin.TierConfig`; sections serialize in madmin's field order.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TierConfig {
     #[serde(rename = "Version")]
     pub version: String,
     #[serde(rename = "Type")]
     pub tier_type: String,
-    #[serde(rename = "Name")]
+    #[serde(rename = "Name", default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     #[serde(rename = "S3", default, skip_serializing_if = "Option::is_none")]
-    pub s3: Option<JsonObject>,
+    pub s3: Option<TierS3>,
     #[serde(rename = "Azure", default, skip_serializing_if = "Option::is_none")]
-    pub azure: Option<JsonObject>,
+    pub azure: Option<TierAzure>,
     #[serde(rename = "GCS", default, skip_serializing_if = "Option::is_none")]
-    pub gcs: Option<JsonObject>,
+    pub gcs: Option<TierGCS>,
     #[serde(rename = "MinIO", default, skip_serializing_if = "Option::is_none")]
-    pub minio: Option<JsonObject>,
+    pub minio: Option<TierMinIO>,
 }
 
+/// Common fields of a tier section: endpoint, bucket, prefix, region, storage class.
+type TierFields<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str);
+
 impl TierConfig {
-    fn section(&self) -> Option<&JsonObject> {
+    fn fields(&self) -> TierFields<'_> {
         match self.tier_type.as_str() {
-            "s3" => self.s3.as_ref(),
-            "azure" => self.azure.as_ref(),
-            "gcs" => self.gcs.as_ref(),
-            "minio" => self.minio.as_ref(),
+            "s3" => self.s3.as_ref().map(|t| {
+                (
+                    t.endpoint.as_str(),
+                    t.bucket.as_str(),
+                    t.prefix.as_str(),
+                    t.region.as_str(),
+                    t.storage_class.as_str(),
+                )
+            }),
+            "azure" => self.azure.as_ref().map(|t| {
+                (
+                    t.endpoint.as_str(),
+                    t.bucket.as_str(),
+                    t.prefix.as_str(),
+                    t.region.as_str(),
+                    t.storage_class.as_str(),
+                )
+            }),
+            "gcs" => self.gcs.as_ref().map(|t| {
+                (
+                    t.endpoint.as_str(),
+                    t.bucket.as_str(),
+                    t.prefix.as_str(),
+                    t.region.as_str(),
+                    t.storage_class.as_str(),
+                )
+            }),
+            "minio" => self.minio.as_ref().map(|t| {
+                (
+                    t.endpoint.as_str(),
+                    t.bucket.as_str(),
+                    t.prefix.as_str(),
+                    t.region.as_str(),
+                    "",
+                )
+            }),
             _ => None,
         }
+        .unwrap_or_default()
     }
 
-    /// String field of the type-specific section (`Endpoint`, `Bucket`, ...), or "".
+    pub fn endpoint(&self) -> &str {
+        self.fields().0
+    }
+
+    pub fn bucket(&self) -> &str {
+        self.fields().1
+    }
+
+    pub fn prefix(&self) -> &str {
+        self.fields().2
+    }
+
+    pub fn region(&self) -> &str {
+        self.fields().3
+    }
+
+    /// Storage class (mc `storageClass`: empty for minio tiers).
+    pub fn storage_class(&self) -> &str {
+        self.fields().4
+    }
+
+    /// Common field by madmin name (`Endpoint`, `Bucket`, `Prefix`, `Region`,
+    /// `StorageClass`), or "".
     pub fn field(&self, name: &str) -> String {
-        self.section()
-            .and_then(|s| s.get(name))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string()
+        match name {
+            "Endpoint" => self.endpoint(),
+            "Bucket" => self.bucket(),
+            "Prefix" => self.prefix(),
+            "Region" => self.region(),
+            "StorageClass" => self.storage_class(),
+            _ => "",
+        }
+        .to_string()
     }
 }
 
@@ -614,6 +985,75 @@ pub struct TierCreds {
     pub secret_key: String,
     #[serde(rename = "awsrole")]
     pub aws_role: bool,
+    #[serde(
+        rename = "awsroleWebIdentity",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub aws_role_web_identity_token_file: String,
+    #[serde(rename = "awsroleARN", skip_serializing_if = "String::is_empty")]
+    pub aws_role_arn: String,
+    #[serde(rename = "azSP")]
+    pub az_sp: ServicePrincipalAuth,
+    /// GCS credentials file contents (Go `[]byte`: standard base64 in JSON).
+    #[serde(
+        rename = "creds",
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_base64"
+    )]
+    pub creds_json: Vec<u8>,
+}
+
+fn serialize_base64<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+    use base64::Engine;
+    serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// `madmin.TierStats`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TierStats {
+    #[serde(rename = "totalSize")]
+    pub total_size: u64,
+    #[serde(rename = "numVersions")]
+    pub num_versions: i64,
+    #[serde(rename = "numObjects")]
+    pub num_objects: i64,
+}
+
+/// Go's zero `time.Time` as JSON.
+pub const GO_ZERO_TIME: &str = "0001-01-01T00:00:00Z";
+
+/// `madmin.DailyTierStats` (`Bins` is a Go `[24]TierStats` array).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DailyTierStats {
+    #[serde(rename = "Bins")]
+    pub bins: Vec<TierStats>,
+    #[serde(rename = "UpdatedAt")]
+    pub updated_at: String,
+}
+
+impl Default for DailyTierStats {
+    fn default() -> Self {
+        Self {
+            bins: vec![TierStats::default(); 24],
+            updated_at: GO_ZERO_TIME.to_string(),
+        }
+    }
+}
+
+/// `madmin.TierInfo` from `tier-stats`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TierInfo {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Type")]
+    pub tier_type: String,
+    #[serde(rename = "Stats")]
+    pub stats: TierStats,
+    #[serde(rename = "DailyStats")]
+    pub daily_stats: DailyTierStats,
 }
 
 pub async fn add_tier(client: &AdminClient, config: &TierConfig, force: bool) -> Result<()> {
@@ -659,11 +1099,15 @@ pub async fn verify_tier(client: &AdminClient, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// `madmin.TierInfo` list from `tier-stats` (kept as JSON; see `ilm tier info`).
-pub async fn tier_stats(client: &AdminClient) -> Result<Vec<serde_json::Value>> {
+/// `madmin.TierInfo` list from `tier-stats`.
+pub async fn tier_stats(client: &AdminClient) -> Result<Vec<TierInfo>> {
     let response = client.admin("GET", "tier-stats", &[], Vec::new()).await?;
-    let infos: Option<Vec<serde_json::Value>> = serde_json::from_slice(&response.body)?;
-    Ok(infos.unwrap_or_default())
+    let mut infos: Vec<TierInfo> =
+        serde_json::from_slice::<Option<Vec<TierInfo>>>(&response.body)?.unwrap_or_default();
+    for info in &mut infos {
+        info.daily_stats.bins.resize(24, TierStats::default());
+    }
+    Ok(infos)
 }
 
 #[cfg(test)]
@@ -839,46 +1283,124 @@ mod tests {
     }
 
     #[test]
-    fn extracts_error_messages() {
+    fn maps_admin_errors_like_madmin() {
         let json = Response {
             status: 404,
-            body: br#"{"Code":"XMinioAdminNoSuchQuotaConfiguration","Message":"The quota configuration does not exist","Resource":"/x"}"#.to_vec(),
+            body: br#"{"Code":"XMinioAdminNoSuchQuotaConfiguration","Message":"The quota configuration does not exist","Resource":"/x","RequestId":"R1","HostId":"H1"}"#.to_vec(),
+            ..Default::default()
         };
+        let err = madmin_error(&json);
+        assert_eq!(err.message, "The quota configuration does not exist");
         assert_eq!(
-            error_message(&json),
-            "The quota configuration does not exist"
+            err.code.as_deref(),
+            Some("XMinioAdminNoSuchQuotaConfiguration")
+        );
+        assert_eq!(
+            serde_json::to_string(&err.detail).unwrap(),
+            r#"{"Code":"XMinioAdminNoSuchQuotaConfiguration","Message":"The quota configuration does not exist","BucketName":"","Key":"","RequestID":"R1","HostID":"H1","Region":""}"#
         );
         let xml = Response {
             status: 404,
-            body: b"<?xml version=\"1.0\"?><Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>".to_vec(),
+            body: b"<?xml version=\"1.0\"?><Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><BucketName>b</BucketName></Error>".to_vec(),
+            ..Default::default()
         };
         assert_eq!(error_message(&xml), "The specified bucket does not exist");
+        assert_eq!(madmin_error(&xml).detail.get("BucketName").unwrap(), "b");
         assert_eq!(error_code(&xml).as_deref(), Some("NoSuchBucket"));
         let empty = Response {
             status: 403,
-            body: Vec::new(),
+            ..Default::default()
         };
-        assert!(error_message(&empty).contains("Access denied"));
+        let err = madmin_error(&empty);
+        assert_eq!(err.code.as_deref(), Some("403 Forbidden"));
+        assert_eq!(
+            err.message,
+            "Failed to parse server response (unexpected end of JSON input): "
+        );
+        // S3 API errors (bucket sub-resources) keep minio-go's shape.
+        let err = check_s3_status(xml, "b").unwrap_err();
+        let mapped = crate::error::mc_error(&err).unwrap();
+        assert_eq!(mapped.message, "The specified bucket does not exist");
+        assert!(mapped.detail.get("Server").is_some());
+        assert_eq!(go_method("GET"), "Get");
+    }
+
+    #[test]
+    fn parses_sizes_like_go_humanize() {
+        assert_eq!(parse_bytes("1GB").unwrap(), 1_000_000_000);
+        assert_eq!(parse_bytes("64MiB").unwrap(), 64 << 20);
+        assert_eq!(parse_bytes("64mi").unwrap(), 64 << 20);
+        assert_eq!(parse_bytes("1.5 k").unwrap(), 1500);
+        assert_eq!(parse_bytes("1,024").unwrap(), 1024);
+        assert_eq!(parse_bytes("42").unwrap(), 42);
+        assert_eq!(parse_bytes("7b").unwrap(), 7);
+        assert_eq!(
+            parse_bytes("abc").unwrap_err().to_string(),
+            r#"strconv.ParseFloat: parsing "": invalid syntax"#
+        );
+        assert_eq!(
+            parse_bytes("5 zonks").unwrap_err().to_string(),
+            "unhandled size name: zonks"
+        );
+    }
+
+    #[test]
+    fn serializes_floats_like_go() {
+        #[derive(Serialize)]
+        struct F {
+            #[serde(serialize_with = "go_f64")]
+            a: f64,
+            #[serde(serialize_with = "go_f64")]
+            b: f64,
+            #[serde(serialize_with = "go_f32")]
+            c: f32,
+        }
+        assert_eq!(
+            serde_json::to_string(&F {
+                a: 0.0,
+                b: 2.189294201170696e-21,
+                c: 1.5
+            })
+            .unwrap(),
+            r#"{"a":0,"b":2.189294201170696e-21,"c":1.5}"#
+        );
     }
 
     #[test]
     fn tier_config_json_matches_madmin() {
-        let json = r#"{"Version":"v1","Type":"minio","Name":"WARM","MinIO":{"Endpoint":"http://h:9000","AccessKey":"a","SecretKey":"REDACTED","Bucket":"b","Prefix":"p/"}}"#;
+        // `ListTiers` response (madmin `TierConfig.Clone()` fills every section).
+        let json = r#"{"Version":"v1","Type":"minio","Name":"WARM","S3":{},"Azure":{"SPAuth":{}},"GCS":{},"MinIO":{"Endpoint":"http://h:9000","AccessKey":"a","SecretKey":"REDACTED","Bucket":"b","Prefix":"p/"}}"#;
         let tier: TierConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(tier.field("Endpoint"), "http://h:9000");
-        assert_eq!(tier.field("Region"), "");
-        assert_eq!(
-            serde_json::to_value(&tier).unwrap(),
-            serde_json::from_str::<serde_json::Value>(json).unwrap()
-        );
+        assert_eq!(tier.endpoint(), "http://h:9000");
+        assert_eq!(tier.region(), "");
+        assert_eq!(tier.field("Prefix"), "p/");
+        assert_eq!(serde_json::to_string(&tier).unwrap(), json);
         let creds = TierCreds {
             access_key: "a".into(),
             secret_key: "s".into(),
-            aws_role: false,
+            ..Default::default()
         };
         assert_eq!(
             serde_json::to_string(&creds).unwrap(),
-            r#"{"access":"a","secret":"s","awsrole":false}"#
+            r#"{"access":"a","secret":"s","awsrole":false,"azSP":{}}"#
         );
+        let creds = TierCreds {
+            creds_json: b"{}".to_vec(),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&creds).unwrap(),
+            r#"{"awsrole":false,"azSP":{},"creds":"e30="}"#
+        );
+    }
+
+    #[test]
+    fn tier_info_defaults_like_go() {
+        let info: TierInfo =
+            serde_json::from_str(r#"{"Name":"W","Type":"minio","Stats":{"totalSize":5}}"#).unwrap();
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["Stats"]["numObjects"], 0);
+        assert_eq!(value["DailyStats"]["Bins"].as_array().unwrap().len(), 24);
+        assert_eq!(value["DailyStats"]["UpdatedAt"], GO_ZERO_TIME);
     }
 }

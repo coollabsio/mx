@@ -116,12 +116,14 @@ fn quota_validates_arguments() {
         .args(["quota", "set", "local/b", "--size", "1XB"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Unable to parse quota"));
+        .stderr("mx: <ERROR> Unable to parse quota: unhandled size name: xb.\n");
     mx(home.path())
-        .args(["quota", "info", "local/b/key"])
+        .args(["quota", "info", "nosuch/b"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("bucket target"));
+        .stderr(
+            "mx: <ERROR> Unable to initialize admin connection. No valid configuration found for 'nosuch/b' host alias.\n",
+        );
 }
 
 #[test]
@@ -163,9 +165,12 @@ fn quota_set_and_info_use_admin_api() {
         requests[0].line,
         "PUT /minio/admin/v3/set-bucket-quota?bucket=b1 HTTP/1.1"
     );
+    // Like mc (madmin `BucketQuota{Quota, Type}`).
     let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(body["size"], 1073741824u64);
-    assert_eq!(body["quotatype"], "hard");
+    assert_eq!(
+        body,
+        serde_json::json!({"quota": 1073741824u64, "size": 0, "rate": 0, "requests": 0, "quotatype": "hard"})
+    );
     assert_signed(&requests[0]);
     assert_eq!(
         requests[1].line,
@@ -207,11 +212,47 @@ fn tier_validates_arguments() {
     };
     fail(
         &["ilm", "tier", "add", "azure", "local", "T", "--bucket", "b"],
-        "not supported by mx",
+        "azure remote tier requires the storage account name",
+    );
+    fail(
+        &[
+            "ilm",
+            "tier",
+            "add",
+            "azure",
+            "local",
+            "T",
+            "--account-name",
+            "acct",
+            "--az-sp-tenant-id",
+            "t",
+            "--bucket",
+            "b",
+        ],
+        "requires static credentials OR service principal credentials",
+    );
+    fail(
+        &[
+            "ilm",
+            "tier",
+            "add",
+            "gcs",
+            "local",
+            "T",
+            "--credentials-file",
+            "/nonexistent.json",
+            "--bucket",
+            "b",
+        ],
+        "Failed to read credentials file: open /nonexistent.json: no such file or directory.",
     );
     fail(
         &["ilm", "tier", "add", "bogus", "local", "T"],
-        "Unsupported tier type",
+        "Unsupported tier type: unsupported tier type.",
+    );
+    fail(
+        &["ilm", "tier", "add", "minio", "local", "T", "extra"],
+        "Incorrect number of arguments for tier add command. Invalid arguments provided",
     );
     fail(
         &[
@@ -253,7 +294,7 @@ fn tier_validates_arguments() {
     );
     fail(
         &["ilm", "tier", "rm", "local", "T", "--force"],
-        "--dangerous",
+        "retry this command with ‘--force’ and ‘--dangerous’ flags.",
     );
     // With --json, errors are an mc error document on stdout.
     mx(home.path())
@@ -305,15 +346,19 @@ fn tier_add_sends_encrypted_config() {
 
 #[test]
 fn tier_ls_renders_table_and_json() {
-    let tiers = r#"[{"Version":"v1","Type":"minio","Name":"WARM","MinIO":{"Endpoint":"http://remote:9000","AccessKey":"ra","SecretKey":"REDACTED","Bucket":"tier","Prefix":"p/"}}]"#;
+    let tiers = r#"[{"Version":"v1","Type":"minio","Name":"WARM","MinIO":{"Prefix":"p/","Bucket":"tier","Endpoint":"http://remote:9000","AccessKey":"ra","SecretKey":"REDACTED"}}]"#;
     let (url, server) = fake_server(vec![(200, tiers), (200, tiers), (200, "[]")]);
     let home = home_with_alias(&url);
     mx(home.path())
         .args(["ilm", "tier", "ls", "fake"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "│ WARM │ minio │ http://remote:9000 │  tier  │   p/   │   -    │       -       │",
+        .stdout(concat!(
+            "┌────┬─────┬──────────────────┬──────┬──────┬──────┬─────────────┐\n",
+            "│Name│Type │     Endpoint     │Bucket│Prefix│Region│Storage-Class│\n",
+            "├────┼─────┼──────────────────┼──────┼──────┼──────┼─────────────┤\n",
+            "│WARM│minio│http://remote:9000│ tier │  p/  │  -   │      -      │\n",
+            "└────┴─────┴──────────────────┴──────┴──────┴──────┴─────────────┘\n",
         ));
     let out = mx(home.path())
         .args(["--json", "ilm", "tier", "ls", "fake"])
@@ -322,14 +367,22 @@ fn tier_ls_renders_table_and_json() {
         .get_output()
         .stdout
         .clone();
-    let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(value["status"], "success");
-    assert_eq!(value["tiers"][0]["Name"], "WARM");
+    // madmin field order; the key order of the server response does not matter.
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        concat!(
+            r#"{"status":"success","tiers":[{"Version":"v1","Type":"minio","Name":"WARM","#,
+            r#""MinIO":{"Endpoint":"http://remote:9000","AccessKey":"ra","SecretKey":"REDACTED","Bucket":"tier","Prefix":"p/"}}]}"#,
+            "\n"
+        )
+    );
     mx(home.path())
         .args(["ilm", "tier", "ls", "fake"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("No remote tier targets found"));
+        .stdout(
+            "mx: No remote tier targets found for alias 'fake'. Use `mx ilm tier add` to configure one.\n",
+        );
     let requests = server.join().unwrap();
     assert_eq!(requests[0].line, "GET /minio/admin/v3/tier HTTP/1.1");
 }
@@ -358,11 +411,12 @@ fn tier_check_edit_and_remove_paths() {
         .assert()
         .success()
         .stdout("Updated remote tier WARM\n");
+    // mc's command is named `remove`, which has no message: an empty line.
     mx(home.path())
         .args(["ilm", "tier", "rm", "fake", "WARM"])
         .assert()
         .success()
-        .stdout("Removed remote tier WARM\n");
+        .stdout("\n");
     let requests = server.join().unwrap();
     assert_eq!(requests[0].line, "GET /minio/admin/v3/tier/WARM HTTP/1.1");
     assert_eq!(requests[1].line, "POST /minio/admin/v3/tier/WARM HTTP/1.1");
@@ -446,8 +500,8 @@ fn replicate_validates_arguments() {
     );
     fail(&["replicate", "rm", "local/b"], "rule ID cannot be empty");
     fail(
-        &["replicate", "status", "local/b", "--nodes"],
-        "not supported",
+        &["replicate", "backlog", "local"],
+        "bucket not specified in `local`. Invalid arguments provided",
     );
     fail(
         &["replicate", "resync", "start", "local/b"],
@@ -509,17 +563,15 @@ fn replicate_ls_and_export() {
         .get_output()
         .stdout
         .clone();
+    // Compact without a terminal (mc's colorjson), indented on a terminal.
     let text = String::from_utf8(out).unwrap();
-    assert!(
-        text.starts_with("{\n \"Rules\": [\n  {\n   \"ID\": \"r1\""),
-        "{text}"
-    );
+    assert!(text.starts_with(r#"{"Rules":[{"ID":"r1""#), "{text}");
     let config: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(config["Rules"][0]["Filter"]["And"]["Prefix"], "logs/");
     assert_eq!(config["Rules"][0]["DeleteReplication"]["Status"], "Enabled");
 
     let requests = server.join().unwrap();
-    assert_eq!(requests[0].line, "GET /b1?replication= HTTP/1.1");
+    assert_eq!(requests[0].line, "GET /b1/?replication= HTTP/1.1");
     assert_signed(&requests[0]);
     assert_eq!(
         requests[1].line,
@@ -583,7 +635,7 @@ fn replicate_add_creates_target_then_rule() {
         "PUT /minio/admin/v3/set-remote-target?bucket=b1 HTTP/1.1"
     );
     assert_eq!(requests[1].body[32], 0x02);
-    assert_eq!(requests[2].line, "PUT /b1?replication= HTTP/1.1");
+    assert_eq!(requests[2].line, "PUT /b1/?replication= HTTP/1.1");
     assert!(requests[2].header("content-md5").is_some());
     let xml = String::from_utf8(requests[2].body.clone()).unwrap();
     for part in [
@@ -607,9 +659,243 @@ fn replicate_rm_all_deletes_configuration() {
         .args(["--json", "replicate", "rm", "fake/b1", "--all", "--force"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""op":"rm""#));
+        .stdout(predicate::str::contains(r#""op":"remove""#));
     let requests = server.join().unwrap();
-    assert_eq!(requests[1].line, "DELETE /b1?replication= HTTP/1.1");
+    assert_eq!(requests[1].line, "DELETE /b1/?replication= HTTP/1.1");
+}
+
+/// madmin `EncryptData` body -> JSON (the test server knows the alias secret key).
+fn decrypt_json(body: &[u8]) -> serde_json::Value {
+    let plain = mx::s3::admin::decrypt_data("skey1234", body, None).unwrap();
+    serde_json::from_slice(&plain).unwrap()
+}
+
+#[test]
+fn tier_add_azure_and_gcs_send_madmin_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let creds = dir.path().join("creds.json");
+    std::fs::write(&creds, r#"{"type":"service_account"}"#).unwrap();
+    let (url, server) = fake_server(vec![(204, ""), (204, ""), (204, "")]);
+    let home = home_with_alias(&url);
+    mx(home.path())
+        .args([
+            "ilm",
+            "tier",
+            "add",
+            "azure",
+            "fake",
+            "aztier",
+            "--account-name",
+            "acct",
+            "--account-key",
+            "a2V5",
+            "--bucket",
+            "container",
+            "--prefix",
+            "p/",
+            "--region",
+            "westeurope",
+        ])
+        .assert()
+        .success()
+        .stdout("Added remote tier AZTIER of type azure\n");
+    let out = mx(home.path())
+        .args([
+            "--json",
+            "ilm",
+            "tier",
+            "add",
+            "gcs",
+            "fake",
+            "gcstier",
+            "--credentials-file",
+            creds.to_str().unwrap(),
+            "--bucket",
+            "gb",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        r#"{"status":"success","tierName":"GCSTIER","tierType":"gcs","tierEndpoint":"https://storage.googleapis.com/","bucket":"gb"}"#.to_string() + "\n"
+    );
+    mx(home.path())
+        .args([
+            "ilm",
+            "tier",
+            "edit",
+            "fake",
+            "GCSTIER",
+            "--credentials-file",
+            creds.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let requests = server.join().unwrap();
+    assert_eq!(
+        decrypt_json(&requests[0].body),
+        serde_json::json!({"Version": "v1", "Type": "azure", "Name": "AZTIER", "Azure": {
+            "AccountName": "acct", "AccountKey": "a2V5", "Bucket": "container",
+            "Prefix": "p/", "Region": "westeurope", "SPAuth": {}}})
+    );
+    // GCS credentials: URL-safe base64 of the file (madmin `NewTierGCS`).
+    assert_eq!(
+        decrypt_json(&requests[1].body),
+        serde_json::json!({"Version": "v1", "Type": "gcs", "Name": "GCSTIER", "GCS": {
+            "Endpoint": "https://storage.googleapis.com/",
+            "Creds": "eyJ0eXBlIjoic2VydmljZV9hY2NvdW50In0=", "Bucket": "gb"}})
+    );
+    // Edit: madmin `TierCreds.CredsJSON` ([]byte, standard base64).
+    assert_eq!(
+        requests[2].line,
+        "POST /minio/admin/v3/tier/GCSTIER HTTP/1.1"
+    );
+    assert_eq!(
+        decrypt_json(&requests[2].body),
+        serde_json::json!({"awsrole": false, "azSP": {}, "creds": "eyJ0eXBlIjoic2VydmljZV9hY2NvdW50In0="})
+    );
+}
+
+#[test]
+fn tier_edit_azure_service_principal() {
+    let (url, server) = fake_server(vec![(204, "")]);
+    let home = home_with_alias(&url);
+    mx(home.path())
+        .args([
+            "ilm",
+            "tier",
+            "update",
+            "fake",
+            "AZ",
+            "--az-sp-tenant-id",
+            "t",
+            "--az-sp-client-id",
+            "c",
+            "--az-sp-client-secret",
+            "s",
+        ])
+        .assert()
+        .success()
+        .stdout("\n");
+    let requests = server.join().unwrap();
+    assert_eq!(
+        decrypt_json(&requests[0].body),
+        serde_json::json!({"awsrole": false, "azSP": {"TenantID": "t", "ClientID": "c", "ClientSecret": "s"}})
+    );
+}
+
+#[test]
+fn admin_errors_carry_madmin_detail() {
+    let (url, server) = fake_server(vec![(
+        404,
+        r#"{"Code":"XMinioAdminTierNotFound","Message":"Specified remote tier was not found","Resource":"/minio/admin/v3/tier/X","RequestId":"R1","HostId":"H1"}"#,
+    )]);
+    let home = home_with_alias(&url);
+    mx(home.path())
+        .args(["--json", "ilm", "tier", "check", "fake", "X"])
+        .assert()
+        .code(1)
+        .stdout(concat!(
+            r#"{"status":"error","error":{"message":"Unable to verify remote tier target","cause":{"message":"Specified remote tier was not found","#,
+            r#""error":{"Code":"XMinioAdminTierNotFound","Message":"Specified remote tier was not found","BucketName":"","Key":"","RequestID":"R1","HostID":"H1","Region":""}},"type":"fatal"}}"#,
+            "\n"
+        ));
+    server.join().unwrap();
+}
+
+const METRICS_JSON: &str = r#"{"currStats":{"Stats":{"arn:minio:replication::id1:dst":{"completedReplicationSize":3,"failed":{"lastHour":{"bytes":0,"count":2},"lastMinute":{"bytes":0,"count":1},"totals":{"bytes":0,"count":3}},"replicationCount":1}},"completedReplicationSize":3,"queued":{"avg":{"bytes":0,"count":0},"curr":{"bytes":2048,"count":4},"max":{"bytes":0,"count":0}},"replicationCount":1},"queueStats":{"nodes":[{"activeWorkers":{"avg":2.5,"curr":3,"max":5},"nodeName":"node1:9000","transferSummary":{"Large":{"avgRate":0,"currRate":0,"peakRate":0},"Small":{"avgRate":1500,"currRate":2000,"peakRate":3000}},"uptime":7300}],"uptime":7300},"uptime":7300}"#;
+const ONLINE_TARGETS_JSON: &str = r#"[{"sourcebucket":"b1","endpoint":"remote:9000","targetbucket":"dst","arn":"arn:minio:replication::id1:dst","type":"replication","isOnline":true,"totalDowntime":61000000000,"latency":{"curr":1000000,"avg":2400000,"max":1500000000}}]"#;
+
+#[test]
+fn replicate_status_renders_mc_table() {
+    let (url, server) = fake_server(vec![
+        (200, METRICS_JSON),
+        (200, ONLINE_TARGETS_JSON),
+        (200, REPLICATION_XML),
+        (200, METRICS_JSON),
+        (200, ONLINE_TARGETS_JSON),
+        (200, REPLICATION_XML),
+    ]);
+    let home = home_with_alias(&url);
+    let out = mx(home.path())
+        .args(["replicate", "status", "fake/b1"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    assert_eq!(
+        lines,
+        [
+            "  Replication status since 2 hours",
+            "  remote:9000",
+            "  Replicated:                   1 objects (3 B)",
+            "  Queued:                       ● 4 objects, 2.0 KiB (avg: 0 objects, 0 B ; max: 0 objects, 0 B)",
+            "  Workers:                      3 (avg: 2; max: 5)",
+            "  Transfer Rate:                0 B/s (avg: 0 B/s; max: 0 B/s",
+            "  Latency:                      1ms (avg: 2ms; max: 1.5s)",
+            "  Link:                         ● online (total downtime: 1 minutes 1 seconds)",
+            "  Errors:                       1 in last 1 minute; 2 in last 1hr; 3 since uptime",
+        ],
+        "{text}"
+    );
+    let out = mx(home.path())
+        .args(["replicate", "status", "--nodes", "fake/b1"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains(
+            "node1:9000    | 2 hours         | Small Objects (<128 MiB)  | 1.5 kB/s     | 3.0 kB/s     | 2.0 kB/s     | 2         \n"
+        ),
+        "{text}"
+    );
+    let requests = server.join().unwrap();
+    assert_eq!(requests[0].line, "GET /b1/?replication-metrics=2 HTTP/1.1");
+}
+
+#[test]
+fn replicate_backlog_json_documents() {
+    let mrf = r#"{"nodeName":"n1","bucket":"b1","object":"o1","versionId":"v1","retryCount":2}
+{"nodeName":"n1","bucket":"b1","object":"o2","versionId":"","retryCount":0}"#;
+    let diff = r#"{"object":"o1","versionId":"v1","rStatus":"FAILED","lastModified":"2026-09-26T10:00:00Z","targets":{"arn1":{"rStatus":"FAILED"}},"deletemarker":false}"#;
+    let (url, server) = fake_server(vec![(200, mrf), (200, diff)]);
+    let home = home_with_alias(&url);
+    mx(home.path())
+        .args(["--json", "replicate", "backlog", "fake/b1"])
+        .assert()
+        .success()
+        .stdout(concat!(
+            r#"{"op":"mrf","status":"success","nodeName":"n1","bucket":"b1","object":"o1","versionId":"v1","retryCount":2}"#,
+            "\n",
+            r#"{"op":"mrf","status":"success","nodeName":"n1","bucket":"b1","object":"o2","versionId":"","retryCount":0}"#,
+            "\n"
+        ));
+    mx(home.path())
+        .args(["--json", "replicate", "backlog", "--full", "fake/b1/pre"])
+        .assert()
+        .success()
+        .stdout(concat!(
+            r#"{"object":"o1","versionId":"v1","targets":{"arn1":{"rStatus":"FAILED"}},"rStatus":"FAILED","replTimestamp":"0001-01-01T00:00:00Z","lastModified":"2026-09-26T10:00:00Z","deletemarker":false}"#,
+            "\n"
+        ));
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests[0].line,
+        "GET /minio/admin/v3/replication/mrf?bucket=b1&node=all HTTP/1.1"
+    );
+    assert_eq!(
+        requests[1].line,
+        "POST /minio/admin/v3/replication/diff?bucket=b1&prefix=pre HTTP/1.1"
+    );
 }
 
 #[test]

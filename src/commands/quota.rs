@@ -1,11 +1,11 @@
 //! `mx quota set|info|clear` (MinIO admin API `set-bucket-quota` / `get-bucket-quota`).
 
 use crate::commands::runtime;
-use crate::commands::util::require_s3;
 use crate::config::ConfigStore;
+use crate::error::McError;
 use crate::output;
 use crate::s3::admin::{self, AdminClient, BucketQuota};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
@@ -60,14 +60,14 @@ pub fn run(args: QuotaArgs, json: bool) -> Result<()> {
     }
 }
 
+/// mc: admin client for the alias; the bucket is the rest of the target (`url2Alias`).
 fn client_and_bucket(target: &str) -> Result<(AdminClient, String)> {
-    let store = ConfigStore::load_or_create()?;
-    let (alias, target_ref) = require_s3(&store, target)?;
-    if !target_ref.is_bucket_root() {
-        bail!("`quota` requires a bucket target like `alias/bucket`.");
-    }
-    let bucket = target_ref.require_bucket()?.to_string();
-    Ok((AdminClient::new(&alias)?, bucket))
+    let client = admin::admin_client_for(&ConfigStore::load_or_create()?, target)?;
+    let bucket = target
+        .split_once('/')
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    Ok((client, bucket.to_string()))
 }
 
 fn print(message: &QuotaMessage, text: String, json: bool) -> Result<()> {
@@ -80,14 +80,16 @@ fn print(message: &QuotaMessage, text: String, json: bool) -> Result<()> {
 }
 
 fn set(args: QuotaSetArgs, json: bool) -> Result<()> {
-    let Some(size) = args.size.as_deref() else {
-        bail!("--size flag needs to be set.");
-    };
-    let quota = crate::flags::parse_size(size).context("Unable to parse quota")?;
     let (client, bucket) = client_and_bucket(&args.target)?;
+    let Some(size) = args.size.as_deref() else {
+        return Err(
+            anyhow::Error::new(McError::invalid_argument()).context("--size flag needs to be set.")
+        );
+    };
+    let quota = admin::parse_bytes(size).context("Unable to parse quota")?;
+    // Like mc: only the (deprecated) `quota` field is sent.
     let config = BucketQuota {
         quota,
-        size: quota,
         quota_type: "hard".to_string(),
         ..Default::default()
     };
