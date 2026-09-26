@@ -155,9 +155,9 @@ fn live_put_and_out_alias_work() {
 }
 
 #[test]
-fn live_coolify_pipe_json_and_ignore_existing_work() {
+fn live_pipe_stat_json_and_ignore_existing_work() {
     if !live::enabled() {
-        eprintln!("skipping live Coolify compatibility test; set MX_LIVE_TESTS=1");
+        eprintln!("skipping live pipe/stat workflow test; set MX_LIVE_TESTS=1");
         return;
     }
 

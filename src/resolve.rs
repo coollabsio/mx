@@ -90,7 +90,7 @@ mod tests {
     use aws_smithy_runtime_api::client::dns::ResolveDns;
 
     #[test]
-    fn parses_coolify_resolve_value() {
+    fn parses_resolve_value() {
         let value: ResolveMapping = "s3.internal:9000=127.0.0.1".parse().unwrap();
         assert_eq!(value.host, "s3.internal");
         assert_eq!(value.port, 9000);

@@ -132,11 +132,8 @@ and the write deadline as the connect timeout. Without the flags the SDK default
 - `replicate backlog` text is a static table, not mc's interactive view.
 - `share upload` sorts the curl `-F` fields; `ping` reports `dns` as `0s`.
 
-## Coolify compatibility
+## Container and release binaries
 
-- `--resolve HOST:PORT=IP` is repeatable and supported as a global option.
-- `mb --ignore-existing` is supported.
-- `stat --json` emits compact JSON (when stdout is not a terminal) with an mc-compatible `size` field.
 - The container provides a static Linux binary at `/usr/bin/mc` and supports
   amd64 and arm64 builds.
 - Version tags `v*.*.*` publish `ghcr.io/<owner>/mx:<version>` and GitHub

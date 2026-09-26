@@ -63,7 +63,7 @@ fn accepts_json_after_stat_subcommand() {
 }
 
 #[test]
-fn accepts_resolve_after_commands_that_coolify_uses() {
+fn accepts_resolve_after_subcommands() {
     for args in [
         vec![
             "alias",
@@ -93,7 +93,7 @@ fn accepts_resolve_after_commands_that_coolify_uses() {
 }
 
 #[test]
-fn pipe_command_accepts_coolify_options() {
+fn pipe_command_accepts_quiet_and_resolve() {
     let home = tempfile::tempdir().unwrap();
     let mut cmd = Command::cargo_bin("mx").unwrap();
     cmd.env("HOME", home.path()).args([
