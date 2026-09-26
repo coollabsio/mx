@@ -716,6 +716,90 @@ impl Parity {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Streaming commands (`watch`, `admin trace`, `admin logs`, ...)
+// ---------------------------------------------------------------------------
+
+impl Parity {
+    /// Runs a command that never ends by itself with mc and mx side by side: both start,
+    /// `traffic` runs after `settle` (time to connect), and `drain` later both get SIGTERM
+    /// (mc exits with status 143). Returns (mc, mx).
+    pub fn run_stream(
+        &self,
+        args: &[&str],
+        settle: std::time::Duration,
+        traffic: impl FnOnce(&Parity),
+        drain: std::time::Duration,
+    ) -> (Outcome, Outcome) {
+        let spawn = |side: &Side| {
+            let args: Vec<String> = args.iter().map(|arg| side.expand(arg)).collect();
+            let mut command = Command::new(&side.program);
+            for (key, _) in std::env::vars_os() {
+                let key = key.to_string_lossy().into_owned();
+                if key.starts_with("MC_") || key.starts_with("MX_") {
+                    command.env_remove(key);
+                }
+            }
+            command
+                .args(&args)
+                .current_dir(&side.work)
+                .env("HOME", side.home.path())
+                .env("TZ", "UTC")
+                .env("LANG", "C")
+                .env_remove("NO_COLOR")
+                .envs(self.env.iter().map(|(k, v)| (k, v)))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|err| panic!("spawn {}: {err}", side.program.display()))
+        };
+        let children = [spawn(&self.mc), spawn(&self.mx)];
+        std::thread::sleep(settle);
+        traffic(self);
+        std::thread::sleep(drain);
+        let outcomes: Vec<Outcome> = children
+            .into_iter()
+            .map(|child| {
+                let _ = Command::new("kill")
+                    .args(["-TERM", &child.id().to_string()])
+                    .status();
+                let output = child.wait_with_output().expect("wait");
+                Outcome {
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                    code: output.status.code(),
+                }
+            })
+            .collect();
+        let [mc, mx]: [Outcome; 2] = outcomes.try_into().expect("two outcomes");
+        (mc, mx)
+    }
+
+    /// [`Parity::run_stream`] (2 s settle, 2 s drain), then compares like
+    /// [`Parity::assert_parity`] (normalized stdout/stderr, exit code).
+    pub fn assert_stream_parity(&self, args: &[&str], traffic: impl FnOnce(&Parity)) {
+        let wait = std::time::Duration::from_secs(2);
+        let (mc, mx) = self.run_stream(args, wait, traffic, wait);
+        let mut report = String::new();
+        self.compare_text("stdout", &mc.stdout, &mx.stdout, &mut report);
+        self.compare_text("stderr", &mc.stderr, &mx.stderr, &mut report);
+        compare_code(&mc, &mx, &mut report);
+        finish(args, &report);
+    }
+
+    /// [`Parity::run_stream`], then compares like [`Parity::assert_json_parity`].
+    pub fn assert_stream_json_parity(&self, args: &[&str], traffic: impl FnOnce(&Parity)) {
+        let wait = std::time::Duration::from_secs(2);
+        let (mc, mx) = self.run_stream(args, wait, traffic, wait);
+        let mut report = String::new();
+        self.compare_json("stdout", &mc.stdout, &mx.stdout, &mut report);
+        self.compare_text("stderr", &mc.stderr, &mx.stderr, &mut report);
+        compare_code(&mc, &mx, &mut report);
+        finish(args, &report);
+    }
+}
+
 fn run_program(
     program: &Path,
     home: &Path,

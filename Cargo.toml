@@ -27,6 +27,7 @@ http-body = "1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "tls12"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+libc = "0.2"
 md-5 = "0.10"
 mime_guess = "2.0"
 regex = "1"
