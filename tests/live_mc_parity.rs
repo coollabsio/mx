@@ -84,6 +84,8 @@ fn transfer(p: Option<Parity>) -> Option<Parity> {
 fn piping(p: Option<Parity>) -> Option<Parity> {
     let mut p = p?;
     p.normalizer.rule(r"\r [^\r]* / \?  <SPEED>", "");
+    // mc's progress ticker may redraw the ` 0 B / ?` residue more than once.
+    p.normalizer.rule(r"(\r? 0 B / \? )+", "\r 0 B / ? ");
     Some(p)
 }
 
