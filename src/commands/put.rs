@@ -1,11 +1,17 @@
-use crate::cli::PutArgs;
 use crate::commands::cp::{resolve_destination_key, source_name_from_local};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::location::{Location, parse_location};
 use anyhow::{Result, bail};
+use clap::Args;
 use serde::Serialize;
 use std::io::Read;
+
+#[derive(Debug, Args)]
+pub struct PutArgs {
+    pub source: String,
+    pub target: String,
+}
 
 pub fn run(args: PutArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

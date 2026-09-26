@@ -1,10 +1,18 @@
-use crate::cli::CopyArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::location::{Location, parse_location};
 use anyhow::{Result, bail};
+use clap::Args;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Args)]
+pub struct CopyArgs {
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+    pub source: String,
+    pub target: String,
+}
 
 pub fn run(args: CopyArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

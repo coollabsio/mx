@@ -1,8 +1,19 @@
-use crate::cli::FindArgs;
 use crate::commands::util::{glob_match, key_depth, object_infos};
 use crate::config::ConfigStore;
 use anyhow::Result;
+use clap::Args;
 use serde::Serialize;
+
+#[derive(Debug, Args)]
+pub struct FindArgs {
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long)]
+    pub regex: Option<String>,
+    #[arg(long)]
+    pub maxdepth: Option<usize>,
+    pub target: String,
+}
 
 pub fn run(args: FindArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

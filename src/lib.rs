@@ -1,6 +1,8 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod flags;
+pub mod globals;
 pub mod location;
 pub mod output;
 pub mod resolve;
@@ -16,9 +18,15 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = cli::Cli::parse_from(args);
+    let cli = cli::Cli::parse_from(flags::rewrite_argv(args));
     resolve::configure(cli.resolve.clone());
     config::configure_dir(cli.config_dir.clone());
-    output::configure(cli.quiet, cli.insecure);
+    globals::init(globals::Globals {
+        json: cli.json,
+        quiet: cli.quiet,
+        insecure: cli.insecure,
+        config_dir: cli.config_dir.clone(),
+        ..Default::default()
+    });
     commands::run(cli)
 }

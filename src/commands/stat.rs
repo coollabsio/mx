@@ -1,14 +1,19 @@
-use crate::cli::TargetArg;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::s3::S3Stat;
 use crate::target::TargetRef;
 use anyhow::Result;
+use clap::Args;
 use serde::Serialize;
 use std::io::{self, Write};
 use tabwriter::TabWriter;
 
-pub fn run(args: TargetArg, json: bool) -> Result<()> {
+#[derive(Debug, Args)]
+pub struct StatArgs {
+    pub target: String,
+}
+
+pub fn run(args: StatArgs, json: bool) -> Result<()> {
     let target = TargetRef::parse(&args.target)?;
     let store = ConfigStore::load_or_create()?;
     let alias = alias_config(&store, &target.alias)?;

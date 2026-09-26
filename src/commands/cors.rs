@@ -1,9 +1,32 @@
-use crate::cli::{CorsCommand, CorsSetArgs, TargetArg};
 use crate::commands::runtime;
 use crate::commands::util::require_s3;
 use crate::config::ConfigStore;
+use crate::flags::TargetArg;
 use crate::output;
 use anyhow::Result;
+use clap::{Args, Subcommand};
+
+#[derive(Debug, Args)]
+pub struct CorsArgs {
+    #[command(subcommand)]
+    pub command: CorsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CorsCommand {
+    #[command(about = "set bucket CORS from a JSON file")]
+    Set(CorsSetArgs),
+    #[command(about = "show bucket CORS")]
+    Get(TargetArg),
+    #[command(about = "remove bucket CORS")]
+    Remove(TargetArg),
+}
+
+#[derive(Debug, Args)]
+pub struct CorsSetArgs {
+    pub target: String,
+    pub file: String,
+}
 
 pub fn run(command: CorsCommand, json: bool) -> Result<()> {
     match command {

@@ -1,9 +1,63 @@
-use crate::cli::{IlmCommand, IlmRuleAddArgs, IlmRuleCommand, IlmRuleRemoveArgs, TargetArg};
 use crate::commands::runtime;
 use crate::commands::util::require_s3;
+use crate::commands::{ilm_restore, ilm_tier};
 use crate::config::ConfigStore;
+use crate::flags::TargetArg;
 use crate::output;
 use anyhow::{Result, bail};
+use clap::{Args, Subcommand};
+
+#[derive(Debug, Args)]
+pub struct IlmArgs {
+    #[command(subcommand)]
+    pub command: IlmCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IlmCommand {
+    #[command(about = "manage lifecycle rules")]
+    Rule(IlmRuleArgs),
+    /// Implemented in `ilm_tier.rs` (area H).
+    #[command(about = "manage remote tier targets for ILM transition")]
+    Tier(ilm_tier::IlmTierArgs),
+    /// Implemented in `ilm_restore.rs` (area G).
+    #[command(about = "restore archived objects")]
+    Restore(ilm_restore::IlmRestoreArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct IlmRuleArgs {
+    #[command(subcommand)]
+    pub command: IlmRuleCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum IlmRuleCommand {
+    #[command(about = "add a lifecycle rule")]
+    Add(IlmRuleAddArgs),
+    #[command(about = "list lifecycle rules")]
+    List(TargetArg),
+    #[command(about = "remove a lifecycle rule")]
+    Remove(IlmRuleRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct IlmRuleAddArgs {
+    #[arg(long)]
+    pub expire_days: Option<i32>,
+    #[arg(long)]
+    pub prefix: Option<String>,
+    #[arg(long)]
+    pub id: Option<String>,
+    pub target: String,
+}
+
+#[derive(Debug, Args)]
+pub struct IlmRuleRemoveArgs {
+    #[arg(long)]
+    pub id: String,
+    pub target: String,
+}
 
 pub fn run(command: IlmCommand, json: bool) -> Result<()> {
     match command {
@@ -12,6 +66,8 @@ pub fn run(command: IlmCommand, json: bool) -> Result<()> {
             IlmRuleCommand::List(args) => list(args, json),
             IlmRuleCommand::Remove(args) => remove(args, json),
         },
+        IlmCommand::Tier(args) => ilm_tier::run(args, json),
+        IlmCommand::Restore(args) => ilm_restore::run(args, json),
     }
 }
 

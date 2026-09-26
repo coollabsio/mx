@@ -1,10 +1,16 @@
-use crate::cli::GetArgs;
 use crate::commands::cp::{resolve_local_destination, source_name_from_key};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::location::{Location, parse_location};
 use crate::output;
 use anyhow::{Result, bail};
+use clap::Args;
+
+#[derive(Debug, Args)]
+pub struct GetArgs {
+    pub source: String,
+    pub target: Option<String>,
+}
 
 pub fn run(args: GetArgs, _json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

@@ -1,10 +1,19 @@
-use crate::cli::RemoveArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::output;
 use crate::target::TargetRef;
 use anyhow::{Result, bail};
+use clap::Args;
 use serde::Serialize;
+
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+    #[arg(long)]
+    pub force: bool,
+    pub target: String,
+}
 
 pub fn run(args: RemoveArgs, json: bool) -> Result<()> {
     let target = TargetRef::parse(&args.target)?;

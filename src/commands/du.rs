@@ -1,9 +1,18 @@
-use crate::cli::DuArgs;
 use crate::commands::util::{key_depth, object_infos};
 use crate::config::ConfigStore;
 use anyhow::Result;
+use clap::Args;
 use serde::Serialize;
 use std::collections::BTreeMap;
+
+#[derive(Debug, Args)]
+pub struct DuArgs {
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+    #[arg(short = 'd', long)]
+    pub depth: Option<usize>,
+    pub target: String,
+}
 
 pub fn run(args: DuArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

@@ -6,6 +6,8 @@ use crate::target::TargetRef;
 use anyhow::{Result, bail};
 use std::time::Duration;
 
+pub use crate::flags::parse_tags;
+
 pub fn parse_expire(input: &str) -> Result<Duration> {
     let input = input.trim();
     if input.len() < 2 {
@@ -54,6 +56,8 @@ pub fn object_infos(store: &ConfigStore, input: &str) -> Result<(String, Vec<Obj
                         .unwrap_or_default()
                         .to_string(),
                     size: path.metadata()?.len() as i64,
+                    is_latest: true,
+                    ..Default::default()
                 }]
             } else {
                 crate::transfer::local_inventory(&path)?
@@ -61,6 +65,8 @@ pub fn object_infos(store: &ConfigStore, input: &str) -> Result<(String, Vec<Obj
                     .map(|entry| crate::s3::ObjectInfo {
                         key: entry.relative,
                         size: entry.size as i64,
+                        is_latest: true,
+                        ..Default::default()
                     })
                     .collect()
             };
@@ -86,27 +92,6 @@ fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
     }
 }
 
-pub fn parse_tags(input: &str) -> Result<Vec<(String, String)>> {
-    let mut tags = Vec::new();
-    for part in input.split('&') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let (key, value) = part
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("tag `{part}` must use key=value"))?;
-        if key.is_empty() {
-            bail!("tag key cannot be empty");
-        }
-        tags.push((key.to_string(), value.to_string()));
-    }
-    if tags.is_empty() {
-        bail!("at least one tag is required");
-    }
-    Ok(tags)
-}
-
 pub fn key_depth(key: &str) -> usize {
     key.trim_matches('/')
         .split('/')
@@ -116,7 +101,7 @@ pub fn key_depth(key: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{glob_match, parse_expire, parse_tags};
+    use super::{glob_match, parse_expire};
     use std::time::Duration;
 
     #[test]
@@ -128,16 +113,5 @@ mod tests {
     fn matches_glob_names() {
         assert!(glob_match("*.txt", "notes.txt"));
         assert!(!glob_match("*.txt", "notes.md"));
-    }
-
-    #[test]
-    fn parses_ampersand_tags() {
-        assert_eq!(
-            parse_tags("env=prod&team=core").unwrap(),
-            vec![
-                ("env".to_string(), "prod".to_string()),
-                ("team".to_string(), "core".to_string())
-            ]
-        );
     }
 }

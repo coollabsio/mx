@@ -1,4 +1,3 @@
-use crate::cli::CopyArgs;
 use crate::commands::cp::{
     resolve_destination_key, resolve_local_destination, source_name_from_key,
     source_name_from_local,
@@ -7,9 +6,18 @@ use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::location::{Location, parse_location};
 use anyhow::{Result, bail};
+use clap::Args;
 use serde::Serialize;
 
-pub fn run(args: CopyArgs, json: bool) -> Result<()> {
+#[derive(Debug, Args)]
+pub struct MoveArgs {
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+    pub source: String,
+    pub target: String,
+}
+
+pub fn run(args: MoveArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let source = parse_location(&args.source, store.config());
     let target = parse_location(&args.target, store.config());

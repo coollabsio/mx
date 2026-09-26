@@ -1,8 +1,15 @@
-use crate::cli::PipeArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::location::{Location, parse_location};
 use anyhow::{Result, bail};
+use clap::Args;
+
+#[derive(Debug, Args)]
+pub struct PipeArgs {
+    #[arg(long)]
+    pub quiet: bool,
+    pub target: String,
+}
 
 pub fn run(args: PipeArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

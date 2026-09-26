@@ -1,9 +1,31 @@
-use crate::cli::{AnonymousCommand, AnonymousSetArgs, TargetArg};
 use crate::commands::runtime;
 use crate::commands::util::require_s3;
 use crate::config::ConfigStore;
+use crate::flags::TargetArg;
 use crate::output;
 use anyhow::{Result, bail};
+use clap::{Args, Subcommand};
+
+#[derive(Debug, Args)]
+pub struct AnonymousArgs {
+    #[command(subcommand)]
+    pub command: AnonymousCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AnonymousCommand {
+    #[command(about = "set anonymous access policy")]
+    Set(AnonymousSetArgs),
+    #[command(about = "show anonymous access policy")]
+    Get(TargetArg),
+}
+
+#[derive(Debug, Args)]
+pub struct AnonymousSetArgs {
+    #[arg(help = "download, upload, public, or none")]
+    pub policy: String,
+    pub target: String,
+}
 
 pub fn run(command: AnonymousCommand, json: bool) -> Result<()> {
     match command {

@@ -1,8 +1,13 @@
-use crate::cli::HealthArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::output;
 use anyhow::Result;
+use clap::Args;
+
+#[derive(Debug, Args)]
+pub struct HealthArgs {
+    pub target: String,
+}
 
 pub fn run(args: HealthArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

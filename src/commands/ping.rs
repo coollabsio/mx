@@ -1,7 +1,14 @@
-use crate::cli::PingArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use anyhow::Result;
+use clap::Args;
+
+#[derive(Debug, Args)]
+pub struct PingArgs {
+    #[arg(short = 'c', long, default_value_t = 4)]
+    pub count: u32,
+    pub target: String,
+}
 
 pub fn run(args: PingArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

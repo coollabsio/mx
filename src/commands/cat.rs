@@ -1,11 +1,16 @@
-use crate::cli::TargetArg;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::target::TargetRef;
 use anyhow::{Result, bail};
+use clap::Args;
 use std::io::{self, Write};
 
-pub fn run(args: TargetArg, json: bool) -> Result<()> {
+#[derive(Debug, Args)]
+pub struct CatArgs {
+    pub target: String,
+}
+
+pub fn run(args: CatArgs, json: bool) -> Result<()> {
     if json {
         bail!("`cat` does not support `--json` yet.");
     }

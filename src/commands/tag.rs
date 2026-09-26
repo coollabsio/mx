@@ -1,9 +1,32 @@
-use crate::cli::{TagCommand, TagSetArgs, TargetArg};
 use crate::commands::runtime;
 use crate::commands::util::{parse_tags, require_s3};
 use crate::config::ConfigStore;
+use crate::flags::TargetArg;
 use crate::output;
 use anyhow::Result;
+use clap::{Args, Subcommand};
+
+#[derive(Debug, Args)]
+pub struct TagArgs {
+    #[command(subcommand)]
+    pub command: TagCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TagCommand {
+    #[command(about = "set tags")]
+    Set(TagSetArgs),
+    #[command(about = "list tags")]
+    List(TargetArg),
+    #[command(about = "remove tags")]
+    Remove(TargetArg),
+}
+
+#[derive(Debug, Args)]
+pub struct TagSetArgs {
+    pub target: String,
+    pub tags: String,
+}
 
 pub fn run(command: TagCommand, json: bool) -> Result<()> {
     match command {

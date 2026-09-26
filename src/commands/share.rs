@@ -1,11 +1,34 @@
-use crate::cli::{ShareCommand, ShareUrlArgs};
 use crate::commands::runtime;
 use crate::commands::util::{parse_expire, require_s3};
 use crate::config::ConfigStore;
 use anyhow::Result;
+use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+
+#[derive(Debug, Args)]
+pub struct ShareArgs {
+    #[command(subcommand)]
+    pub command: ShareCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ShareCommand {
+    #[command(about = "generate a presigned download URL")]
+    Download(ShareUrlArgs),
+    #[command(about = "generate a presigned upload URL")]
+    Upload(ShareUrlArgs),
+    #[command(about = "list generated share URLs")]
+    List,
+}
+
+#[derive(Debug, Args)]
+pub struct ShareUrlArgs {
+    #[arg(short = 'E', long, default_value = "168h")]
+    pub expire: String,
+    pub target: String,
+}
 
 pub fn run(command: ShareCommand, json: bool) -> Result<()> {
     match command {

@@ -1,8 +1,14 @@
-use crate::cli::DiffArgs;
 use crate::commands::util::object_infos;
 use crate::config::ConfigStore;
 use anyhow::Result;
+use clap::Args;
 use std::collections::BTreeMap;
+
+#[derive(Debug, Args)]
+pub struct DiffArgs {
+    pub source: String,
+    pub target: String,
+}
 
 pub fn run(args: DiffArgs, _json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

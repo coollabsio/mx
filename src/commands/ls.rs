@@ -1,13 +1,20 @@
-use crate::cli::LsArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::s3::S3ListItem;
 use crate::target::TargetRef;
 use anyhow::Result;
+use clap::Args;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::io::{self, Write};
 use tabwriter::TabWriter;
+
+#[derive(Debug, Args)]
+pub struct LsArgs {
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+    pub target: String,
+}
 
 pub fn run(args: LsArgs, json: bool) -> Result<()> {
     let target = TargetRef::parse(&args.target)?;
@@ -142,6 +149,7 @@ impl<'a> ListMessage<'a> {
                 last_modified,
                 etag,
                 storage_class,
+                ..
             } => Self {
                 status: "success",
                 target,

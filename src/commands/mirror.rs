@@ -1,7 +1,16 @@
-use crate::cli::{CopyArgs, MirrorArgs};
+use crate::commands::cp::CopyArgs;
 use crate::config::ConfigStore;
 use crate::location::{Location, parse_location};
 use anyhow::{Result, bail};
+use clap::Args;
+
+#[derive(Debug, Args)]
+pub struct MirrorArgs {
+    #[arg(long)]
+    pub remove: bool,
+    pub source: String,
+    pub target: String,
+}
 
 pub fn run(args: MirrorArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

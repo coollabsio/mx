@@ -1,19 +1,11 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-
-static QUIET: AtomicBool = AtomicBool::new(false);
-static INSECURE: AtomicBool = AtomicBool::new(false);
-
-pub fn configure(quiet: bool, insecure: bool) {
-    QUIET.store(quiet, Ordering::SeqCst);
-    INSECURE.store(insecure, Ordering::SeqCst);
-}
+//! Output helpers. Global settings live in [`crate::globals`].
 
 pub fn quiet() -> bool {
-    QUIET.load(Ordering::SeqCst)
+    crate::globals::quiet()
 }
 
 pub fn insecure() -> bool {
-    INSECURE.load(Ordering::SeqCst)
+    crate::globals::insecure()
 }
 
 pub fn print_plain(message: &str) {

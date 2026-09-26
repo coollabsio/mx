@@ -1,14 +1,67 @@
-use crate::cli::{
-    AliasCommand, AliasExportArgs, AliasImportArgs, AliasListArgs, AliasRemoveArgs, AliasSetArgs,
-};
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
 use crate::output;
 use anyhow::{Result, bail};
+use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use tabwriter::TabWriter;
 use url::Url;
+
+#[derive(Debug, Args)]
+pub struct AliasArgs {
+    #[command(subcommand)]
+    pub command: AliasCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AliasCommand {
+    #[command(visible_alias = "s", about = "set a new alias to configuration file")]
+    Set(AliasSetArgs),
+    #[command(visible_alias = "ls", about = "list aliases in configuration file")]
+    List(AliasListArgs),
+    #[command(
+        visible_alias = "rm",
+        about = "remove an alias from configuration file"
+    )]
+    Remove(AliasRemoveArgs),
+    #[command(about = "import an alias from JSON")]
+    Import(AliasImportArgs),
+    #[command(about = "export an alias as JSON")]
+    Export(AliasExportArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AliasSetArgs {
+    pub alias: String,
+    pub url: String,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    #[arg(long, default_value = "S3v4")]
+    pub api: String,
+    #[arg(long, default_value = "auto")]
+    pub path: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasListArgs {
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasRemoveArgs {
+    pub alias: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasImportArgs {
+    pub alias: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasExportArgs {
+    pub alias: String,
+}
 
 pub fn run(command: AliasCommand, json: bool) -> Result<()> {
     match command {

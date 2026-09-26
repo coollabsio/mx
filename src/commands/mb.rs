@@ -1,9 +1,25 @@
-use crate::cli::MakeBucketArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::target::TargetRef;
 use anyhow::{Result, bail};
+use clap::Args;
 use serde::Serialize;
+
+#[derive(Debug, Args)]
+pub struct MakeBucketArgs {
+    #[arg(short = 'p', long)]
+    pub ignore_existing: bool,
+    /// enable object versioning on the new bucket
+    #[arg(long)]
+    pub with_versioning: bool,
+    /// enable object lock (implies versioning)
+    #[arg(short = 'l', long)]
+    pub with_lock: bool,
+    /// bucket region
+    #[arg(long)]
+    pub region: Option<String>,
+    pub target: String,
+}
 
 pub fn run(args: MakeBucketArgs, json: bool) -> Result<()> {
     let target = TargetRef::parse(&args.target)?;
@@ -15,10 +31,15 @@ pub fn run(args: MakeBucketArgs, json: bool) -> Result<()> {
     let alias = alias_config(&store, &target.alias)?;
     let bucket = target.require_bucket()?.to_string();
 
-    runtime()?.block_on(crate::s3::make_bucket(
+    runtime()?.block_on(crate::s3::make_bucket_with(
         &alias,
         &bucket,
-        args.ignore_existing,
+        &crate::s3::MakeBucketOptions {
+            ignore_existing: args.ignore_existing,
+            with_versioning: args.with_versioning,
+            with_lock: args.with_lock,
+            region: args.region.clone(),
+        },
     ))?;
 
     if json {

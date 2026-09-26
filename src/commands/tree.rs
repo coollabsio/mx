@@ -1,8 +1,17 @@
-use crate::cli::TreeArgs;
 use crate::commands::util::{key_depth, object_infos};
 use crate::config::ConfigStore;
 use anyhow::Result;
+use clap::Args;
 use std::collections::BTreeSet;
+
+#[derive(Debug, Args)]
+pub struct TreeArgs {
+    #[arg(short = 'f', long)]
+    pub files: bool,
+    #[arg(short = 'd', long)]
+    pub depth: Option<usize>,
+    pub target: String,
+}
 
 pub fn run(args: TreeArgs, _json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;

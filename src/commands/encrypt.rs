@@ -1,9 +1,32 @@
-use crate::cli::{EncryptCommand, EncryptSetArgs, TargetArg};
 use crate::commands::runtime;
 use crate::commands::util::require_s3;
 use crate::config::ConfigStore;
+use crate::flags::TargetArg;
 use crate::output;
 use anyhow::{Result, bail};
+use clap::{Args, Subcommand};
+
+#[derive(Debug, Args)]
+pub struct EncryptArgs {
+    #[command(subcommand)]
+    pub command: EncryptCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EncryptCommand {
+    #[command(about = "set default bucket encryption")]
+    Set(EncryptSetArgs),
+    #[command(about = "show bucket encryption")]
+    Info(TargetArg),
+    #[command(about = "clear bucket encryption")]
+    Clear(TargetArg),
+}
+
+#[derive(Debug, Args)]
+pub struct EncryptSetArgs {
+    pub algorithm: String,
+    pub target: String,
+}
 
 pub fn run(command: EncryptCommand, json: bool) -> Result<()> {
     match command {

@@ -6,24 +6,33 @@ pub mod cp;
 pub mod diff;
 pub mod du;
 pub mod encrypt;
+pub mod event;
 pub mod find;
 pub mod get;
 pub mod head;
 pub mod ilm;
+pub mod ilm_restore;
+pub mod ilm_tier;
+pub mod legalhold;
 pub mod ls;
 pub mod mb;
 pub mod mirror;
 pub mod mv;
+pub mod od;
 pub mod ping;
 pub mod pipe;
 pub mod put;
+pub mod quota;
 pub mod rb;
 pub mod ready;
+pub mod replicate;
+pub mod retention;
 pub mod rm;
 pub mod share;
 pub mod stat;
 pub mod tag;
 pub mod tree;
+pub mod undo;
 pub mod util;
 pub mod version;
 
@@ -77,5 +86,12 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Encrypt(args) => encrypt::run(args.command, json),
         Commands::Anonymous(args) => anonymous::run(args.command, json),
         Commands::Ilm(args) => ilm::run(args.command, json),
+        Commands::Retention(args) => retention::run(args, json),
+        Commands::Legalhold(args) => legalhold::run(args, json),
+        Commands::Event(args) => event::run(args, json),
+        Commands::Undo(args) => undo::run(args, json),
+        Commands::Od(args) => od::run(args, json),
+        Commands::Replicate(args) => replicate::run(args, json),
+        Commands::Quota(args) => quota::run(args, json),
     }
 }

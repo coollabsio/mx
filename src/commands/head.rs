@@ -1,9 +1,16 @@
-use crate::cli::HeadArgs;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::location::{Location, parse_location};
 use anyhow::{Result, bail};
+use clap::Args;
 use std::io::{self, BufRead, Write};
+
+#[derive(Debug, Args)]
+pub struct HeadArgs {
+    #[arg(short = 'n', long, default_value_t = 10)]
+    pub lines: usize,
+    pub target: String,
+}
 
 pub fn run(args: HeadArgs, json: bool) -> Result<()> {
     if json {

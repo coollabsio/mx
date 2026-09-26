@@ -1,9 +1,26 @@
-use crate::cli::{TargetArg, VersionCommand};
 use crate::commands::runtime;
 use crate::commands::util::require_s3;
 use crate::config::ConfigStore;
+use crate::flags::TargetArg;
 use crate::output;
 use anyhow::Result;
+use clap::{Args, Subcommand};
+
+#[derive(Debug, Args)]
+pub struct VersionArgs {
+    #[command(subcommand)]
+    pub command: VersionCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum VersionCommand {
+    #[command(about = "enable bucket versioning")]
+    Enable(TargetArg),
+    #[command(about = "suspend bucket versioning")]
+    Suspend(TargetArg),
+    #[command(about = "show bucket versioning")]
+    Info(TargetArg),
+}
 
 pub fn run(command: VersionCommand, json: bool) -> Result<()> {
     match command {
