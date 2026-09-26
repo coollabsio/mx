@@ -410,6 +410,22 @@ fn live_cp_preserve_xattrs_and_stream_copy_tags() {
                 .map(String::as_str),
             Some("blue")
         );
+        // Binary (non-UTF-8) values are hex-encoded like mc.
+        let binary = live.local_file("binattrs.txt", "x\n");
+        xattr::set(&binary, "user.bin", &[0x00, 0xff, 0x0a, 0x41]).unwrap();
+        live.cmd()
+            .args(["cp", "-a", &s(&binary), &live.url("binattrs.txt")])
+            .assert()
+            .success();
+        let object = head(&client, &live.bucket, "binattrs.txt");
+        assert_eq!(
+            object
+                .metadata()
+                .unwrap()
+                .get("user.bin")
+                .map(String::as_str),
+            Some("00ff0a41")
+        );
         live.cmd()
             .args(["cp", &s(&file), &live.url("plain.txt")])
             .assert()

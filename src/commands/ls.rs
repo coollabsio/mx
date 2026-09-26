@@ -110,7 +110,15 @@ pub fn run(args: LsArgs, json: bool) -> Result<()> {
             }
         });
         let (objects, size) = match listing {
-            Ok(listing) => print_listing(&listing, args.storage_class.as_deref(), json)?,
+            Ok(listing) => {
+                // mc keeps walking past unreadable folders, reports each and exits 1; an
+                // unreadable walk root is skipped silently.
+                for denied in listing.denied.iter().filter(|denied| !denied.root) {
+                    crate::output::print_error(&denied.error());
+                    failed = true;
+                }
+                print_listing(&listing, args.storage_class.as_deref(), json)?
+            }
             Err(error) => {
                 crate::output::print_error(&error.context(nonfatal("Unable to list folder.")));
                 failed = true;
@@ -173,10 +181,31 @@ impl Content {
 }
 
 /// Result of listing one target: mc's target URL (`url` in JSON) and the entries in mc order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Listing {
     pub url: String,
     pub contents: Vec<Content>,
+    /// Local recursive listings: folders skipped for lack of permission (mc
+    /// `PathInsufficientPermission` entries), the walked root first if it was unreadable.
+    pub denied: Vec<Denied>,
+}
+
+/// An unreadable folder met by a local recursive listing.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Denied {
+    pub path: String,
+    /// The folder the walk started from (mc `ls` skips its error silently, `du` reports it).
+    pub root: bool,
+}
+
+impl Denied {
+    /// mc's error for the entry (`Unable to list folder.` + `PathInsufficientPermission`).
+    pub fn error(&self) -> anyhow::Error {
+        anyhow::Error::new(crate::error::McError::path_insufficient_permission(
+            &self.path,
+        ))
+        .context(nonfatal("Unable to list folder."))
+    }
 }
 
 /// Lists one target like mc `ls` (a folder target without a trailing `/` is listed as a
@@ -228,6 +257,7 @@ async fn list_s3(alias: &AliasConfig, target: &TargetRef, opts: &ListOpts) -> Re
         return Ok(Listing {
             url: format!("{base}/"),
             contents,
+            ..Default::default()
         });
     };
     let mut key = target.key_with_trailing_slash().unwrap_or_default();
@@ -253,7 +283,11 @@ async fn list_s3(alias: &AliasConfig, target: &TargetRef, opts: &ListOpts) -> Re
         .into_iter()
         .map(|(item, ordinal)| content("", prefix_path, item, ordinal))
         .collect();
-    Ok(Listing { url, contents })
+    Ok(Listing {
+        url,
+        contents,
+        ..Default::default()
+    })
 }
 
 /// Version selection: `versions` keeps every version (at or before `rewind`), numbered newest
@@ -347,13 +381,21 @@ fn list_local(input: &str, opts: &ListOpts) -> Result<Listing> {
     };
     let prefix_path = fpath[..fpath.rfind('/').map_or(0, |index| index + 1)].to_string();
     let mut found = Vec::new();
+    let mut denied = Vec::new();
     if opts.recursive {
         let (dir, file_prefix) = if fpath.ends_with('/') {
             (fpath.clone(), String::new())
         } else {
             (prefix_path.clone(), fpath.clone())
         };
-        walk(&dir, &file_prefix, &mut found)?;
+        walk(
+            &dir,
+            &file_prefix,
+            true,
+            &mut found,
+            &mut denied,
+            &read_dir_entries,
+        )?;
     } else if fpath.ends_with('/') {
         let dir = if fpath == "/" {
             "/"
@@ -395,13 +437,27 @@ fn list_local(input: &str, opts: &ListOpts) -> Result<Listing> {
     Ok(Listing {
         url: fpath,
         contents,
+        denied,
+    })
+}
+
+type DirEntries = Vec<(String, std::fs::Metadata)>;
+
+/// [`read_dir_entries`] with mc's errors for a plain (non-recursive) folder listing.
+fn read_dir_sorted(dir: &str) -> Result<DirEntries> {
+    read_dir_entries(dir).map_err(|error| match error.kind() {
+        // mc reports the raw `open` error here (`PathInsufficientPermission` only when walking).
+        std::io::ErrorKind::PermissionDenied => anyhow::Error::new(crate::error::McError::new(
+            format!("open {}/: permission denied", dir.trim_end_matches('/')),
+        )),
+        _ => crate::error::io_error(&error, dir).into(),
     })
 }
 
 /// Regular files and folders of `dir` (symlinks followed, broken ones skipped) as absolute
 /// paths, in mc's lexical order (folders compare with a trailing `/`).
-fn read_dir_sorted(dir: &str) -> Result<Vec<(String, std::fs::Metadata)>> {
-    let entries = std::fs::read_dir(dir).map_err(|error| crate::error::io_error(&error, dir))?;
+fn read_dir_entries(dir: &str) -> std::io::Result<DirEntries> {
+    let entries = std::fs::read_dir(dir)?;
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -431,20 +487,39 @@ fn read_dir_sorted(dir: &str) -> Result<Vec<(String, std::fs::Metadata)>> {
 }
 
 /// mc `listRecursiveInRoutine`: regular files below `dir` whose path starts with
-/// `file_prefix` (when set). Symlinked folders are not followed.
-fn walk(dir: &str, file_prefix: &str, out: &mut Vec<(String, std::fs::Metadata)>) -> Result<()> {
-    for (path, meta) in read_dir_sorted(dir)? {
+/// `file_prefix` (when set). Symlinked folders are not followed. Unreadable folders are
+/// collected in `denied` and skipped, like mc (which keeps walking); other errors abort.
+fn walk(
+    dir: &str,
+    file_prefix: &str,
+    root: bool,
+    out: &mut DirEntries,
+    denied: &mut Vec<Denied>,
+    read_dir: &dyn Fn(&str) -> std::io::Result<DirEntries>,
+) -> Result<()> {
+    let entries = match read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            denied.push(Denied {
+                path: crate::error::abs_path(dir),
+                root,
+            });
+            return Ok(());
+        }
+        Err(error) => return Err(crate::error::io_error(&error, dir).into()),
+    };
+    for (path, meta) in entries {
         let linked_dir = meta.is_dir()
             && std::fs::symlink_metadata(&path).is_ok_and(|link| link.file_type().is_symlink());
         if !file_prefix.is_empty() && !path.starts_with(file_prefix) {
             if meta.is_dir() && !linked_dir && file_prefix.starts_with(&path) {
-                walk(&path, file_prefix, out)?;
+                walk(&path, file_prefix, false, out, denied, read_dir)?;
             }
             continue;
         }
         if meta.is_dir() {
             if !linked_dir {
-                walk(&path, file_prefix, out)?;
+                walk(&path, file_prefix, false, out, denied, read_dir)?;
             }
         } else {
             out.push((path, meta));
@@ -593,6 +668,51 @@ impl<'a> ContentMessage<'a> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn walk_skips_unreadable_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap().to_string();
+        for sub in ["a", "bad", "c/d"] {
+            std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+        }
+        std::fs::write(dir.path().join("a/f1"), "1").unwrap();
+        std::fs::write(dir.path().join("bad/x"), "1").unwrap();
+        std::fs::write(dir.path().join("c/d/f2"), "1").unwrap();
+        let bad = format!("{root}/bad");
+        let read = |path: &str| {
+            if path == bad {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                read_dir_entries(path)
+            }
+        };
+        let (mut out, mut denied) = (Vec::new(), Vec::new());
+        walk(&root, "", true, &mut out, &mut denied, &read).unwrap();
+        let files: Vec<_> = out.iter().map(|(path, _)| path.clone()).collect();
+        assert_eq!(files, [format!("{root}/a/f1"), format!("{root}/c/d/f2")]);
+        assert_eq!(
+            denied,
+            [Denied {
+                path: bad.clone(),
+                root: false
+            }]
+        );
+        // The walk root itself.
+        let (mut out, mut denied) = (Vec::new(), Vec::new());
+        walk(&bad, "", true, &mut out, &mut denied, &read).unwrap();
+        assert!(out.is_empty());
+        assert_eq!(
+            denied,
+            [Denied {
+                path: bad,
+                root: true
+            }]
+        );
+        // Other errors still abort.
+        let broken = |_: &str| Err(std::io::Error::other("boom"));
+        assert!(walk(&root, "", true, &mut out, &mut denied, &broken).is_err());
+    }
 
     fn version(key: &str, secs: u64, id: &str, marker: bool) -> ObjectInfo {
         ObjectInfo {

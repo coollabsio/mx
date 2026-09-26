@@ -272,6 +272,117 @@ fn ls_lists_local_folders_like_mc() {
     assert_eq!(docs[1]["url"], format!("{path}/"));
 }
 
+/// Runs `mx ARGS` so that mode-000 folders are really unreadable: directly as a normal user,
+/// via `setpriv` as `nobody` (with a world-readable copy of the binary) when root. `None` when
+/// that is not possible.
+#[cfg(unix)]
+fn run_unprivileged(work: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_mx"));
+    let config = work.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let uid = std::process::Command::new("id").arg("-u").output().ok()?;
+    let mut cmd = if String::from_utf8_lossy(&uid.stdout).trim() == "0" {
+        let copy = work.join("mx");
+        std::fs::copy(&bin, &copy).unwrap();
+        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cmd = std::process::Command::new("setpriv");
+        cmd.args(["--reuid=65534", "--regid=65534", "--clear-groups"])
+            .arg(copy);
+        cmd
+    } else {
+        std::process::Command::new(bin)
+    };
+    let out = cmd
+        .env("NO_COLOR", "1")
+        .arg("-C")
+        .arg(&config)
+        .args(args)
+        .output()
+        .ok()?;
+    // setpriv missing or not permitted.
+    (!String::from_utf8_lossy(&out.stderr).contains("setpriv")).then_some(out)
+}
+
+#[cfg(unix)]
+#[test]
+fn local_walks_continue_past_unreadable_folders_like_mc() {
+    use std::os::unix::fs::PermissionsExt;
+    let work = tempfile::tempdir().expect("tempdir");
+    std::fs::set_permissions(work.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root = work.path().join("tree");
+    std::fs::create_dir_all(root.join("a")).unwrap();
+    std::fs::create_dir_all(root.join("bad")).unwrap();
+    std::fs::write(root.join("a/f1"), "hi\n").unwrap();
+    std::fs::write(root.join("bad/secret"), "x\n").unwrap();
+    std::fs::write(root.join("top"), "z\n").unwrap();
+    std::fs::set_permissions(root.join("bad"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let path = root.to_str().unwrap();
+    let bad = format!("{path}/bad");
+    let denied = format!(
+        "<ERROR> Unable to list folder. Insufficient permissions to access this path `{bad}`"
+    );
+    let Some(ls) = run_unprivileged(work.path(), &["ls", "-r", path]) else {
+        eprintln!("skipping: cannot drop privileges");
+        return;
+    };
+    // mc `ls -r`: reports the folder, lists the rest, exits 1.
+    let stdout = String::from_utf8_lossy(&ls.stdout);
+    assert_eq!(ls.status.code(), Some(1), "{ls:?}");
+    assert!(
+        String::from_utf8_lossy(&ls.stderr).contains(&denied),
+        "{ls:?}"
+    );
+    assert!(
+        stdout.contains(" a/f1\n") && stdout.contains(" top\n"),
+        "{stdout}"
+    );
+    // An unreadable walk root is skipped silently.
+    let ls = run_unprivileged(work.path(), &["ls", "-r", &bad]).unwrap();
+    assert_eq!(ls.status.code(), Some(0), "{ls:?}");
+    assert!(ls.stdout.is_empty() && ls.stderr.is_empty(), "{ls:?}");
+    // A plain listing reports mc's raw `open` error.
+    let ls = run_unprivileged(work.path(), &["ls", &bad]).unwrap();
+    assert_eq!(ls.status.code(), Some(1), "{ls:?}");
+    assert!(
+        String::from_utf8_lossy(&ls.stderr).contains(&format!(
+            "Unable to list folder. open {bad}/: permission denied"
+        )),
+        "{ls:?}"
+    );
+    // mc `du`: reports the folder, still prints the total, exits 0.
+    let du = run_unprivileged(work.path(), &["du", path]).unwrap();
+    assert_eq!(du.status.code(), Some(0), "{du:?}");
+    assert!(
+        String::from_utf8_lossy(&du.stderr).contains(&denied),
+        "{du:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&du.stdout),
+        format!("5B\t2 objects\t{}\n", path.trim_matches('/'))
+    );
+    let du = run_unprivileged(work.path(), &["du", "-d", "2", path]).unwrap();
+    assert_eq!(du.status.code(), Some(0), "{du:?}");
+    let trimmed = path.trim_matches('/');
+    assert_eq!(
+        String::from_utf8_lossy(&du.stdout),
+        format!(
+            "3B\t1 object\t{trimmed}/a\n0B\t0 objects\t{trimmed}/bad\n5B\t2 objects\t{trimmed}\n"
+        )
+    );
+    // `du -r` lists every level plainly, so the unreadable folder is fatal like in mc.
+    let du = run_unprivileged(work.path(), &["du", "-r", path]).unwrap();
+    assert_eq!(du.status.code(), Some(1), "{du:?}");
+    assert!(
+        String::from_utf8_lossy(&du.stderr).contains(&format!(
+            "Failed to find disk usage of `{bad}` recursively. open {bad}/: permission denied"
+        )),
+        "{du:?}"
+    );
+    std::fs::set_permissions(root.join("bad"), std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[test]
 fn rb_requires_force_and_dangerous_for_alias_root() {
     fails_with(

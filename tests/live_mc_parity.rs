@@ -540,6 +540,31 @@ case!(
     ["head", "-n", "2", "{target}/dir/b.txt"]
 );
 
+/// A newline-free object longer than Go's 4096-byte `bufio.Reader` buffer.
+fn long_line() -> Option<Parity> {
+    let p = Parity::new()?;
+    let mut text = "x".repeat(4095);
+    text.push('\r');
+    text.push_str(&"y".repeat(6000));
+    p.object("long.txt", &text);
+    p.file("long.txt", &text);
+    Some(p)
+}
+
+// mc's `bufio.ReadLine` splits over-long lines into 4096-byte "lines".
+case!(
+    head_long_line_text,
+    text,
+    long_line(),
+    ["head", "-n", "3", "{target}/long.txt"]
+);
+case!(
+    head_long_line_local_text,
+    text,
+    long_line(),
+    ["head", "-n", "1", "long.txt"]
+);
+
 // ---------------------------------------------------------------------------
 // du / tree / find / diff
 // ---------------------------------------------------------------------------
@@ -1227,6 +1252,44 @@ case!(
     json,
     locked(),
     ["legalhold", "info", "{target}/a.txt"]
+);
+// Multi-object runs without matches print a plain message and exit 0.
+case!(
+    legalhold_info_recursive_none_text,
+    text,
+    locked(),
+    ["legalhold", "info", "-r", "{target}/nope/"]
+);
+case!(
+    legalhold_info_recursive_none_json,
+    json,
+    locked(),
+    ["legalhold", "info", "-r", "{target}/nope/"]
+);
+case!(
+    legalhold_set_recursive_none_text,
+    text,
+    locked(),
+    ["legalhold", "set", "-r", "{target}/nope/"]
+);
+case!(
+    legalhold_clear_versions_none_text,
+    text,
+    locked(),
+    ["legalhold", "clear", "--versions", "{target}/nope.txt"]
+);
+// A lone --rewind addresses the single (latest) object like mc.
+case!(
+    legalhold_info_rewind_text,
+    text,
+    locked(),
+    ["legalhold", "info", "--rewind", "1d", "{target}/a.txt"]
+);
+case!(
+    legalhold_info_rewind_missing_text,
+    text,
+    locked(),
+    ["legalhold", "info", "--rewind", "1d", "{target}/nope.txt"]
 );
 
 // ---------------------------------------------------------------------------

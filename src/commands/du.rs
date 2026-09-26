@@ -103,12 +103,16 @@ impl Du<'_> {
         let listing = list(self.store, self.rt, &dir, &opts).with_context(|| {
             crate::error::nonfatal(format!("Failed to find disk usage of `{url}` recursively."))
         })?;
+        // mc reports unreadable folders of the recursive listing and still prints the total.
+        for denied in &listing.denied {
+            crate::output::print_error(&denied.error());
+        }
         let (mut size, mut objects) = (0, 0);
         for content in &listing.contents {
             if content.is_dir && !recursive {
-                // mc descends with the absolute path of local folders.
+                // mc descends with the absolute path of local folders (no trailing `/`).
                 let sub = if self.local {
-                    format!("{}{}", listing.url, content.key)
+                    format!("{}{}", listing.url, content.key.trim_end_matches('/'))
                 } else {
                     format!("{dir}{}", content.key)
                 };

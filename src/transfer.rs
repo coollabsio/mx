@@ -106,11 +106,23 @@ pub fn file_xattrs(path: &Path) -> Vec<(String, String)> {
                 return None;
             }
             let value = xattr::get(path, &name).ok().flatten().unwrap_or_default();
-            Some((name, String::from_utf8_lossy(&value).into_owned()))
+            Some((name, xattr_value(value)))
         })
         .collect();
     out.sort();
     out
+}
+
+/// mc `getXAttr`: valid UTF-8 values are sent as-is, anything else hex-encoded.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn xattr_value(value: Vec<u8>) -> String {
+    String::from_utf8(value).unwrap_or_else(|error| {
+        error
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    })
 }
 
 #[cfg(not(unix))]
@@ -242,6 +254,13 @@ mod tests {
             Some("me".to_string())
         );
         assert_eq!(parse_id_name("root:x:0:\n", 7), None);
+    }
+
+    #[test]
+    fn hex_encodes_non_utf8_xattrs_like_mc() {
+        assert_eq!(xattr_value(b"blue".to_vec()), "blue");
+        assert_eq!(xattr_value("gr\u{fc}n".as_bytes().to_vec()), "gr\u{fc}n");
+        assert_eq!(xattr_value(vec![0x00, 0xff, 0x0a, 0x41]), "00ff0a41");
     }
 
     #[cfg(unix)]

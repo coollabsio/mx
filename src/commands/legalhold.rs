@@ -74,18 +74,10 @@ struct LegalHoldMessage {
     #[serde(rename = "versionID")]
     version_id: String,
     status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
 }
 
 impl LegalHoldMessage {
     fn set_text(&self) -> String {
-        if let Some(error) = &self.error {
-            return format!(
-                "Unable to set object legal hold status `{}`. {error}",
-                self.key
-            );
-        }
         let op = if self.legalhold == "OFF" {
             "cleared"
         } else {
@@ -100,12 +92,6 @@ impl LegalHoldMessage {
     }
 
     fn info_text(&self) -> String {
-        if let Some(error) = &self.error {
-            return format!(
-                "Unable to get object legal hold status `{}`. {error}",
-                self.key
-            );
-        }
         let status = if self.legalhold.is_empty() {
             "Not set"
         } else {
@@ -131,12 +117,15 @@ pub fn run(args: LegalholdArgs, json: bool) -> Result<()> {
 
 /// `hold = Some(on)` sets/clears the legal hold, `None` shows it.
 fn apply(args: LegalholdTargetArgs, hold: Option<bool>, json: bool) -> Result<()> {
+    // mc takes the multi-object path only with --recursive or --versions (a lone --rewind
+    // still addresses the single latest object).
     let selection = selection(
         args.recursive,
         &args.version_id,
         &args.rewind,
         &args.versions,
-    )?;
+    )?
+    .filter(|selection| selection.recursive || selection.versions);
     let target = LockTarget::resolve(&args.target)?;
     let rt = runtime()?;
     let client = rt.block_on(crate::s3::build_client(&target.alias))?;
@@ -160,23 +149,16 @@ fn apply(args: LegalholdTargetArgs, hold: Option<bool>, json: bool) -> Result<()
         selection.as_ref(),
         args.version_id.version_id.as_deref(),
     )?;
-    let verb = if hold.is_some() { "setting" } else { "getting" };
-    if objects.is_empty() {
-        bail!(
-            "No objects/versions found while {verb} legal hold on `{}`.",
-            args.target
-        );
-    }
 
     let single = selection.is_none();
-    let mut failed = 0;
-    for (key, version_id) in objects {
+    let mut failed = false;
+    for (key, version_id) in &objects {
         let result = match hold {
             Some(on) => rt
                 .block_on(lock::put_object_legal_hold(
                     &client,
                     &target.bucket,
-                    &key,
+                    key,
                     version_id.as_deref(),
                     on,
                 ))
@@ -184,39 +166,38 @@ fn apply(args: LegalholdTargetArgs, hold: Option<bool>, json: bool) -> Result<()
             None => rt.block_on(lock::get_object_legal_hold(
                 &client,
                 &target.bucket,
-                &key,
+                key,
                 version_id.as_deref(),
             )),
         };
-        // mc: one object without --recursive/--versions: `info` errors are fatal, `set`/`clear`
-        // report the error and still exit 0.
-        let result = match result {
-            Err(err) if single => {
-                if hold.is_none() {
-                    return Err(err).context(format!(
-                        "Failed to show legal hold information of `{}`.",
-                        args.target
-                    ));
-                }
-                crate::output::print_error(&err.context(nonfatal(format!(
-                    "Failed to set legal hold on `{}` successfully",
+        let legalhold = match result {
+            Ok(legalhold) => legalhold.unwrap_or_default(),
+            // mc: one object without --recursive/--versions: `info` errors are fatal.
+            Err(err) if single && hold.is_none() => {
+                return Err(err).context(format!(
+                    "Failed to show legal hold information of `{}`.",
                     args.target
-                ))));
-                return Ok(());
+                ));
             }
-            result => result,
+            // Otherwise each failure is reported (errorIf) and the command still exits 0.
+            Err(err) => {
+                crate::output::print_error(&err.context(nonfatal(failure_text(
+                    hold.is_some(),
+                    single,
+                    &args.target,
+                    &format!("/{}/{key}", target.bucket),
+                ))));
+                failed = true;
+                continue;
+            }
         };
         let message = LegalHoldMessage {
-            legalhold: result.as_ref().ok().cloned().flatten().unwrap_or_default(),
-            urlpath: target.object_url(&key),
-            key: target.relative_key(&key),
-            version_id: version_id.unwrap_or_default(),
-            status: if result.is_ok() { "success" } else { "failure" },
-            error: result.as_ref().err().map(|error| format!("{error:#}")),
+            legalhold,
+            urlpath: target.object_url(key),
+            key: target.relative_key(key),
+            version_id: version_id.clone().unwrap_or_default(),
+            status: "success",
         };
-        if result.is_err() {
-            failed += 1;
-        }
         if json {
             print_json(&message)?;
         } else if hold.is_some() {
@@ -225,10 +206,39 @@ fn apply(args: LegalholdTargetArgs, hold: Option<bool>, json: bool) -> Result<()
             println!("{}", message.info_text());
         }
     }
-    if failed > 0 {
-        bail!("Errors found while {verb} legal hold on {failed} object(s)/version(s).");
+    if !single
+        && !json
+        && let Some(summary) =
+            summary_text(hold.is_some(), objects.is_empty(), failed, &args.target)
+    {
+        println!("{summary}");
     }
     Ok(())
+}
+
+/// mc's per-object error message (`urlpath` is the object's URL path, `/BUCKET/KEY`).
+fn failure_text(set: bool, single: bool, target: &str, urlpath: &str) -> String {
+    match (set, single) {
+        (true, true) => format!("Failed to set legal hold on `{target}` successfully"),
+        (true, false) => format!("Failed to set legal hold on `{urlpath}` successfully"),
+        (false, _) => format!("Failed to get legal hold information on `{urlpath}`"),
+    }
+}
+
+/// mc's closing line of a multi-object text run (note mc's space before the newline).
+fn summary_text(set: bool, empty: bool, failed: bool, target: &str) -> Option<String> {
+    match (set, empty, failed) {
+        (true, true, _) => Some(format!(
+            "No objects/versions found while setting legal hold on `{target}`. "
+        )),
+        (false, true, _) => Some(format!(
+            "No objects/versions found while getting legal hold status with prefix `{target}`. "
+        )),
+        (false, false, true) => Some(format!(
+            "Errors found while getting legal hold status on objects with prefix `{target}`. "
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -242,7 +252,6 @@ mod tests {
             key: "k".into(),
             version_id: version_id.into(),
             status: "success",
-            error: None,
         }
     }
 
@@ -263,6 +272,36 @@ mod tests {
         assert_eq!(json["legalhold"], "ON");
         assert_eq!(json["versionID"], "v1");
         assert_eq!(json["key"], "k");
-        assert!(json.get("error").is_none());
+    }
+
+    #[test]
+    fn multi_object_messages_match_mc() {
+        assert_eq!(
+            failure_text(true, false, "a/b/dir/", "/b/dir/k"),
+            "Failed to set legal hold on `/b/dir/k` successfully"
+        );
+        assert_eq!(
+            failure_text(true, true, "a/b/k", "/b/k"),
+            "Failed to set legal hold on `a/b/k` successfully"
+        );
+        assert_eq!(
+            failure_text(false, false, "a/b/", "/b/k"),
+            "Failed to get legal hold information on `/b/k`"
+        );
+        assert_eq!(
+            summary_text(true, true, false, "a/b/x").unwrap(),
+            "No objects/versions found while setting legal hold on `a/b/x`. "
+        );
+        assert_eq!(
+            summary_text(false, true, false, "a/b/x").unwrap(),
+            "No objects/versions found while getting legal hold status with prefix `a/b/x`. "
+        );
+        assert_eq!(
+            summary_text(false, false, true, "a/b/").unwrap(),
+            "Errors found while getting legal hold status on objects with prefix `a/b/`. "
+        );
+        // Per-object `set`/`clear` failures only print their own errors.
+        assert_eq!(summary_text(true, false, true, "a/b/"), None);
+        assert_eq!(summary_text(false, false, false, "a/b/"), None);
     }
 }

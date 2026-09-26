@@ -140,15 +140,37 @@ fn size_tag(size: i64) -> &'static str {
     }
 }
 
-/// Binds `address` (`HOST:PORT`) and serves `GET /metrics` in the background.
+/// Binds `address` (`HOST:PORT`, or Go's `:PORT` for all interfaces) and serves
+/// `GET /metrics` in the background.
 pub async fn serve(address: &str) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(address).await?;
+    let listener = tokio::net::TcpListener::bind(bind_address(address).as_ref()).await?;
     tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            tokio::spawn(respond(stream));
+        // Like Go's `http.Server`: accept errors (e.g. too many open files) are logged and
+        // retried with a growing delay instead of stopping the server.
+        let mut delay = Duration::ZERO;
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    delay = Duration::ZERO;
+                    tokio::spawn(respond(stream));
+                }
+                Err(error) => {
+                    delay = (delay * 2).clamp(Duration::from_millis(5), Duration::from_secs(1));
+                    eprintln!("http: Accept error: {error}; retrying in {delay:?}");
+                    tokio::time::sleep(delay).await;
+                }
+            }
         }
     });
     Ok(())
+}
+
+/// Go listens on every interface for an empty host (`:8080`).
+fn bind_address(address: &str) -> std::borrow::Cow<'_, str> {
+    match address.strip_prefix(':') {
+        Some(port) => format!("0.0.0.0:{port}").into(),
+        None => address.into(),
+    }
 }
 
 /// Answers one HTTP/1.x request and closes the connection.
@@ -183,6 +205,37 @@ async fn respond(mut stream: tokio::net::TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binds_all_interfaces_for_empty_host() {
+        assert_eq!(bind_address(":8080"), "0.0.0.0:8080");
+        assert_eq!(bind_address("127.0.0.1:8080"), "127.0.0.1:8080");
+        assert_eq!(bind_address("[::1]:8080"), "[::1]:8080");
+    }
+
+    #[test]
+    fn serves_on_port_only_address() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            serve(&format!(":{port}")).await.unwrap();
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            stream
+                .write_all(b"GET /metrics HTTP/1.1\r\n\r\n")
+                .await
+                .unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).await.unwrap();
+            assert!(reply.starts_with("HTTP/1.1 200 OK"), "{reply}");
+            assert!(reply.contains("mc_mirror_total_s3ops"), "{reply}");
+        });
+    }
 
     #[test]
     fn tags_sizes_like_mc() {
