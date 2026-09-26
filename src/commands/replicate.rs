@@ -372,7 +372,9 @@ fn validate_path(path: &str) -> Result<()> {
 
 fn bandwidth(value: Option<&str>) -> Result<i64> {
     match value.filter(|v| !v.is_empty()) {
-        Some(value) => Ok(admin::parse_bytes(value).context("invalid bandwidth value")? as i64),
+        Some(value) => {
+            Ok(crate::flags::parse_size(value).context("invalid bandwidth value")? as i64)
+        }
         None => Ok(0),
     }
 }

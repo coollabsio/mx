@@ -4,79 +4,8 @@
 
 mod common;
 
-use common::live::{Live, enabled, mx, unique_bucket_name};
-use std::path::Path;
+use common::live::{Live, Tls, set_tls_alias};
 use std::time::{Duration, Instant};
-
-/// Temp HOME with alias `tls` for the TLS server and one bucket (made with `--insecure`).
-struct Tls {
-    home: tempfile::TempDir,
-    url: String,
-    ca: String,
-    bucket: String,
-}
-
-impl Tls {
-    fn new() -> Option<Self> {
-        if !enabled() {
-            eprintln!("skipping live test; set MX_LIVE_TESTS=1");
-            return None;
-        }
-        let (Ok(url), Ok(ca)) = (
-            std::env::var("MX_TEST_TLS_URL"),
-            std::env::var("MX_TEST_TLS_CA"),
-        ) else {
-            eprintln!("skipping TLS live test; set MX_TEST_TLS_URL and MX_TEST_TLS_CA");
-            return None;
-        };
-        let home = tempfile::tempdir().unwrap();
-        set_alias(home.path(), "tls", &url);
-        let bucket = unique_bucket_name();
-        mx().env("HOME", home.path())
-            .args(["--insecure", "mb", &format!("tls/{bucket}")])
-            .assert()
-            .success();
-        Some(Self {
-            home,
-            url,
-            ca,
-            bucket,
-        })
-    }
-
-    fn cmd(&self) -> assert_cmd::Command {
-        let mut command = mx();
-        command.env("HOME", self.home.path());
-        command
-    }
-
-    fn target(&self, path: &str) -> String {
-        format!("tls/{}/{path}", self.bucket)
-    }
-}
-
-impl Drop for Tls {
-    fn drop(&mut self) {
-        let _ = self
-            .cmd()
-            .args([
-                "--insecure",
-                "rb",
-                "--force",
-                &format!("tls/{}", self.bucket),
-            ])
-            .output();
-    }
-}
-
-fn set_alias(home: &Path, alias: &str, url: &str) {
-    let access_key = std::env::var("MX_TEST_ACCESS_KEY").unwrap();
-    let secret_key = std::env::var("MX_TEST_SECRET_KEY").unwrap();
-    mx().env("HOME", home)
-        .args(["alias", "set", alias, url, &access_key, &secret_key])
-        .assert()
-        .success();
-}
 
 fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
@@ -157,7 +86,7 @@ fn live_tls_insecure_with_resolve() {
     let Some(tls) = Tls::new() else { return };
     let port = url::Url::parse(&tls.url).unwrap().port().unwrap();
     // The certificate does not cover this name, and it does not resolve without --resolve.
-    set_alias(
+    set_tls_alias(
         tls.home.path(),
         "pinned",
         &format!("https://mx-pinned.invalid:{port}"),
@@ -172,6 +101,31 @@ fn live_tls_insecure_with_resolve() {
         .args(["--insecure", "ls", "pinned"])
         .assert()
         .failure();
+}
+
+#[test]
+fn live_admin_api_honors_tls_trust() {
+    let Some(tls) = Tls::new() else { return };
+    let bucket = format!("tls/{}", tls.bucket);
+
+    // Admin API requests use the same trust rules as S3 requests.
+    let output = tls.cmd().args(["quota", "info", &bucket]).output().unwrap();
+    assert!(!output.status.success(), "self-signed CA must be rejected");
+    tls.cmd()
+        .args(["--insecure", "quota", "set", &bucket, "--size", "1MiB"])
+        .assert()
+        .success();
+    tls.cmd()
+        .args(["--insecure", "ilm", "tier", "ls", "tls"])
+        .assert()
+        .success();
+
+    tls.trust_ca();
+    tls.cmd()
+        .args(["quota", "info", &bucket])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("1.0 MiB"));
 }
 
 #[test]

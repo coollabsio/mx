@@ -130,7 +130,7 @@ fn lock_options(args: &CopyArgs, now: SystemTime) -> Result<LockOptions> {
             if mode != "GOVERNANCE" && mode != "COMPLIANCE" {
                 bail!("invalid retention mode `{mode}`: use `governance` or `compliance`");
             }
-            Some((mode, retain_until(duration, now)?))
+            Some((mode, retention_until(duration, now)?))
         }
         _ => bail!(
             "Both object retention flags `--retention-mode` and `--retention-duration` are required."
@@ -139,65 +139,11 @@ fn lock_options(args: &CopyArgs, now: SystemTime) -> Result<LockOptions> {
     Ok((legal_hold, retention))
 }
 
-/// mc retention validity: `<N>d` (days) or `<N>y` (calendar years) from `now`.
-pub(crate) fn retain_until(validity: &str, now: SystemTime) -> Result<SystemTime> {
-    let invalid = || anyhow!("invalid retention duration `{validity}`: use e.g. `30d` or `1y`");
-    let value = validity.trim();
-    let unit = value.chars().last().ok_or_else(invalid)?;
-    let count: u64 = value[..value.len() - unit.len_utf8()]
-        .parse()
-        .map_err(|_| invalid())?;
-    if count == 0 {
-        return Err(invalid());
-    }
-    let secs = now
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| invalid())?
-        .as_secs();
-    let (days, rem) = ((secs / 86_400) as i64, secs % 86_400);
-    let target_days = match unit.to_ascii_lowercase() {
-        'd' => days + count as i64,
-        'y' => {
-            let (year, month, day) = civil_from_days(days);
-            let (year, month, day) = normalize_date(year + count as i64, month, day);
-            days_from_civil(year, month, day)
-        }
-        _ => return Err(invalid()),
-    };
-    Ok(std::time::UNIX_EPOCH + std::time::Duration::from_secs(target_days as u64 * 86_400 + rem))
-}
-
-/// Go `AddDate` normalization for Feb 29 in non-leap years (-> Mar 1).
-fn normalize_date(year: i64, month: u32, day: u32) -> (i64, u32, u32) {
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
-    if month == 2 && day == 29 && !leap {
-        (year, 3, 1)
-    } else {
-        (year, month, day)
-    }
-}
-
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = year - era * 400;
-    let month = month as i64;
-    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
-    (year, month, day)
+/// mc `--retention-duration`: `<N>d` (days) or `<N>y` (calendar years) from `now`.
+fn retention_until(validity: &str, now: SystemTime) -> Result<SystemTime> {
+    let (count, unit) = crate::flags::parse_validity(validity)
+        .map_err(|_| anyhow!("invalid retention duration `{validity}`: use e.g. `30d` or `1y`"))?;
+    crate::flags::retain_until(now, count, unit)
 }
 
 // ---------------------------------------------------------------------------
@@ -1368,25 +1314,14 @@ mod tests {
     }
 
     #[test]
-    fn computes_retention_dates() {
+    fn parses_retention_durations() {
         let now = UNIX_EPOCH + Duration::from_secs(1_704_164_645); // 2024-01-02T03:04:05Z
         assert_eq!(
-            retain_until("1d", now).unwrap(),
+            retention_until("1d", now).unwrap(),
             now + Duration::from_secs(86_400)
         );
-        // 2025-01-02T03:04:05Z
-        assert_eq!(
-            retain_until("1Y", now).unwrap(),
-            UNIX_EPOCH + Duration::from_secs(1_735_787_045)
-        );
-        let leap = UNIX_EPOCH + Duration::from_secs(1_709_164_800); // 2024-02-29
-        assert_eq!(
-            retain_until("1y", leap).unwrap(),
-            UNIX_EPOCH + Duration::from_secs(1_740_787_200) // 2025-03-01
-        );
-        for bad in ["", "d", "0d", "5w", "x1d", "1.5y"] {
-            assert!(retain_until(bad, now).is_err(), "{bad}");
-        }
+        let error = retention_until("5w", now).unwrap_err().to_string();
+        assert!(error.contains("invalid retention duration"), "{error}");
     }
 
     fn copy_args(extra: &[&str]) -> CopyArgs {

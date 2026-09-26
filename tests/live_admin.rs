@@ -458,3 +458,126 @@ fn live_replicate_workflow() {
             "replication configuration not set",
         ));
 }
+
+/// `--json stat` output of one object.
+fn stat_json(live: &Live, target: &str) -> serde_json::Value {
+    let out = stdout(
+        live.cmd()
+            .args(["--json", "stat", target])
+            .assert()
+            .success(),
+    );
+    serde_json::from_str(&out).unwrap()
+}
+
+/// Polls `check` every second for up to `timeout`; returns whether it became true.
+fn wait_until(timeout: Duration, mut check: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if check() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    check()
+}
+
+/// `ilm tier add` (area H) + `ilm rule add --transition-*` (area F) + `ilm restore` (area G).
+/// With `--transition-days 0` MinIO transitions new objects right after the PUT; the wait is
+/// still best effort because it depends on MinIO's background transition workers.
+#[test]
+fn live_ilm_tier_transition_and_restore() {
+    let Some(live) = Live::new() else { return };
+    let Some(internal) = internal_url2() else {
+        eprintln!("skipping transition test; MX_TEST_URL2_INTERNAL not set");
+        return;
+    };
+    let Some(remote_bucket) = live.make_bucket2(BucketOpts::default()) else {
+        eprintln!("skipping transition test; second server not configured");
+        return;
+    };
+    let (access_key, secret_key) = credentials2();
+    let name = format!("X{}", live.bucket.replace('-', "")).to_uppercase();
+    // Dropped before `live`: the tier is force-removed while the buckets still exist.
+    let _cleanup = Cleanup {
+        live: &live,
+        args: vec![
+            "ilm".into(),
+            "tier".into(),
+            "rm".into(),
+            "--force".into(),
+            "--dangerous".into(),
+            live.alias.clone(),
+            name.clone(),
+        ],
+    };
+    let endpoint = internal.as_str().trim_end_matches('/').to_string();
+    live.cmd()
+        .args([
+            "ilm",
+            "tier",
+            "add",
+            "minio",
+            &live.alias,
+            &name,
+            "--endpoint",
+            &endpoint,
+            "--access-key",
+            &access_key,
+            "--secret-key",
+            &secret_key,
+            "--bucket",
+            &remote_bucket,
+        ])
+        .assert()
+        .success();
+    live.cmd()
+        .args([
+            "ilm",
+            "rule",
+            "add",
+            &live.bucket_target(),
+            "--transition-days",
+            "0",
+            "--transition-tier",
+            &name,
+        ])
+        .assert()
+        .success();
+
+    let file = live.local_file("cold.txt", "cold data");
+    let target = live.url("cold.txt");
+    live.cmd()
+        .args(["put", file.to_str().unwrap(), &target])
+        .assert()
+        .success();
+    let transitioned = wait_until(Duration::from_secs(90), || {
+        stat_json(&live, &target)["storageClass"] == name.as_str()
+    });
+    if !transitioned {
+        eprintln!(
+            "skipping restore part: MinIO did not transition the object to tier {name} within 90s"
+        );
+        return;
+    }
+
+    live.cmd()
+        .args(["ilm", "restore", "--days", "1", &target])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "1/1 object(s) successfully restored",
+        ));
+    let restored = wait_until(Duration::from_secs(90), || {
+        let restore = &stat_json(&live, &target)["restore"];
+        restore["OngoingRestore"] == false && restore["ExpiryTime"].is_string()
+    });
+    assert!(restored, "{}", stat_json(&live, &target));
+    // Still in the tier, but readable locally.
+    assert_eq!(stat_json(&live, &target)["storageClass"], name.as_str());
+    live.cmd()
+        .args(["cat", &target])
+        .assert()
+        .success()
+        .stdout("cold data");
+}

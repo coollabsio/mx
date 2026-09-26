@@ -40,14 +40,31 @@ pub async fn stat_object(
     key: &str,
     version_id: Option<&str>,
 ) -> Result<ObjectStat> {
-    let response = client
+    stat_object_sse_c(client, bucket, key, version_id, None).await
+}
+
+/// [`stat_object`] with an optional SSE-C key (needed to HEAD SSE-C objects).
+pub async fn stat_object_sse_c(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    version_id: Option<&str>,
+    sse_c: Option<[u8; 32]>,
+) -> Result<ObjectStat> {
+    let mut request = client
         .head_object()
         .bucket(bucket)
         .key(key)
         .set_version_id(version_id.map(str::to_string))
-        .checksum_mode(ChecksumMode::Enabled)
-        .send()
-        .await?;
+        .checksum_mode(ChecksumMode::Enabled);
+    if let Some(sse_c) = &sse_c {
+        let (algorithm, encoded, md5) = super::objects::sse_c_headers(sse_c);
+        request = request
+            .sse_customer_algorithm(algorithm)
+            .sse_customer_key(encoded)
+            .sse_customer_key_md5(md5);
+    }
+    let response = request.send().await?;
     Ok(object_stat_from_head(key, &response))
 }
 

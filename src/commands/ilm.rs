@@ -195,35 +195,12 @@ pub struct RuleOptions {
     pub noncurrent_tier: Option<String>,
 }
 
-/// Parses humanized sizes like `10MiB`, `5MB`, `1.5GB`, `100` (go-humanize `ParseBytes`).
-pub fn parse_size(input: &str) -> Result<i64> {
-    let text = input.trim();
-    let split = text
-        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
-        .unwrap_or(text.len());
-    let (number, unit) = text.split_at(split);
-    let number: f64 = number
-        .parse()
-        .map_err(|_| anyhow!("size value {input} is invalid"))?;
-    let multiplier: f64 = match unit.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1.0,
-        "k" | "kb" => 1e3,
-        "ki" | "kib" => 1024.0,
-        "m" | "mb" => 1e6,
-        "mi" | "mib" => 1024f64.powi(2),
-        "g" | "gb" => 1e9,
-        "gi" | "gib" => 1024f64.powi(3),
-        "t" | "tb" => 1e12,
-        "ti" | "tib" => 1024f64.powi(4),
-        "p" | "pb" => 1e15,
-        "pi" | "pib" => 1024f64.powi(5),
-        _ => bail!("size value {input} is invalid"),
-    };
-    let bytes = number * multiplier;
-    if !bytes.is_finite() || bytes < 0.0 || bytes > i64::MAX as f64 {
-        bail!("size value {input} is invalid");
-    }
-    Ok(bytes as i64)
+/// [`crate::flags::parse_size`] as the `i64` lifecycle filters use.
+fn parse_size(input: &str) -> Result<i64> {
+    crate::flags::parse_size(input)
+        .ok()
+        .and_then(|bytes| i64::try_from(bytes).ok())
+        .ok_or_else(|| anyhow!("size value {input} is invalid"))
 }
 
 fn parse_days(flag: &str, value: &str) -> Result<i64> {

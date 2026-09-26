@@ -5,7 +5,8 @@
 //! signatures are still checked). It honors `--resolve` like the default client.
 
 use crate::resolve::PinnedDnsResolver;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use aws_smithy_http_client::tls::{TlsContext, TrustStore};
 use aws_smithy_runtime_api::client::dns::ResolveDns;
 use aws_smithy_runtime_api::client::http::{
     HttpClient, HttpConnector, HttpConnectorFuture, HttpConnectorSettings, SharedHttpClient,
@@ -90,18 +91,71 @@ pub fn load_ca_certs(dir: &Path) -> Result<Vec<Vec<u8>>> {
 
 /// HTTP client that skips server certificate verification (`--insecure`).
 pub fn insecure_http_client(resolver: PinnedDnsResolver) -> Result<SharedHttpClient> {
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .context("Unable to configure TLS.")?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
-        .with_no_client_auth();
     Ok(SharedHttpClient::new(InsecureClient {
-        config,
+        config: insecure_tls_config()?,
         resolver,
         connector: OnceLock::new(),
     }))
+}
+
+/// HTTP connector for callers without SDK runtime components (the admin client) that skips
+/// server certificate verification (`--insecure`).
+pub fn insecure_connector(resolver: PinnedDnsResolver) -> Result<SharedHttpConnector> {
+    Ok(build_insecure_connector(
+        insecure_tls_config()?,
+        resolver,
+        None,
+    ))
+}
+
+/// TLS context trusting the system roots plus `certs/CAs`; None when that dir has no CAs.
+pub fn custom_ca_context() -> Result<Option<TlsContext>> {
+    let ca_certs = match cas_dir() {
+        Some(dir) => load_ca_certs(&dir)?,
+        None => Vec::new(),
+    };
+    if ca_certs.is_empty() {
+        return Ok(None);
+    }
+    let mut trust_store = TrustStore::default();
+    for pem in ca_certs {
+        trust_store.add_pem_certificate(pem);
+    }
+    let context = TlsContext::builder()
+        .with_trust_store(trust_store)
+        .build()
+        .map_err(|err| anyhow!("Unable to configure TLS: {err}"))?;
+    Ok(Some(context))
+}
+
+fn insecure_tls_config() -> Result<rustls::ClientConfig> {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    Ok(
+        rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .context("Unable to configure TLS.")?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
+            .with_no_client_auth(),
+    )
+}
+
+fn build_insecure_connector(
+    config: rustls::ClientConfig,
+    resolver: PinnedDnsResolver,
+    connect_timeout: Option<std::time::Duration>,
+) -> SharedHttpConnector {
+    let mut http = HyperHttpConnector::new_with_resolver(Resolver(resolver));
+    http.enforce_http(false);
+    http.set_nodelay(true);
+    http.set_connect_timeout(connect_timeout);
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(config)
+        .https_or_http()
+        .enable_http1()
+        .wrap_connector(http);
+    let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
+    SharedHttpConnector::new(InsecureConnector { client })
 }
 
 #[derive(Debug)]
@@ -164,19 +218,11 @@ impl HttpClient for InsecureClient {
     ) -> SharedHttpConnector {
         self.connector
             .get_or_init(|| {
-                let mut http =
-                    HyperHttpConnector::new_with_resolver(Resolver(self.resolver.clone()));
-                http.enforce_http(false);
-                http.set_nodelay(true);
-                http.set_connect_timeout(settings.connect_timeout());
-                let https = hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_tls_config(self.config.clone())
-                    .https_or_http()
-                    .enable_http1()
-                    .wrap_connector(http);
-                let client =
-                    hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
-                SharedHttpConnector::new(InsecureConnector { client })
+                build_insecure_connector(
+                    self.config.clone(),
+                    self.resolver.clone(),
+                    settings.connect_timeout(),
+                )
             })
             .clone()
     }

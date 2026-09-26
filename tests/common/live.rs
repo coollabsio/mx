@@ -253,3 +253,91 @@ pub fn alias_config_from_home(home: &Path, alias: &str) -> mx::config::model::Al
     }
     panic!("alias `{alias}` not found under {}", home.display());
 }
+
+// ---------------------------------------------------------------------------
+// TLS server (MX_TEST_TLS_URL / MX_TEST_TLS_CA)
+// ---------------------------------------------------------------------------
+
+/// Temp HOME with alias `tls` for the TLS server and one bucket (made with `--insecure`).
+#[allow(dead_code)]
+pub struct Tls {
+    pub home: tempfile::TempDir,
+    pub url: String,
+    /// CA PEM path (MX_TEST_TLS_CA).
+    pub ca: String,
+    pub bucket: String,
+}
+
+#[allow(dead_code)]
+impl Tls {
+    /// Returns None (with a skip note) unless live tests and the TLS server are configured.
+    pub fn new() -> Option<Self> {
+        if !enabled() {
+            eprintln!("skipping live test; set MX_LIVE_TESTS=1");
+            return None;
+        }
+        let (Ok(url), Ok(ca)) = (
+            std::env::var("MX_TEST_TLS_URL"),
+            std::env::var("MX_TEST_TLS_CA"),
+        ) else {
+            eprintln!("skipping TLS live test; set MX_TEST_TLS_URL and MX_TEST_TLS_CA");
+            return None;
+        };
+        let home = tempfile::tempdir().unwrap();
+        set_tls_alias(home.path(), "tls", &url);
+        let bucket = unique_bucket_name();
+        mx().env("HOME", home.path())
+            .args(["--insecure", "mb", &format!("tls/{bucket}")])
+            .assert()
+            .success();
+        Some(Self {
+            home,
+            url,
+            ca,
+            bucket,
+        })
+    }
+
+    pub fn cmd(&self) -> assert_cmd::Command {
+        let mut command = mx();
+        command.env("HOME", self.home.path());
+        command
+    }
+
+    /// Installs the test CA in `~/.mx/certs/CAs` so commands work without `--insecure`.
+    pub fn trust_ca(&self) {
+        let cas = self.home.path().join(".mx/certs/CAs");
+        std::fs::create_dir_all(&cas).unwrap();
+        std::fs::copy(&self.ca, cas.join("ca.crt")).unwrap();
+    }
+
+    /// `tls/BUCKET/<path>`.
+    pub fn target(&self, path: &str) -> String {
+        format!("tls/{}/{path}", self.bucket)
+    }
+}
+
+impl Drop for Tls {
+    fn drop(&mut self) {
+        let _ = self
+            .cmd()
+            .args([
+                "--insecure",
+                "rb",
+                "--force",
+                &format!("tls/{}", self.bucket),
+            ])
+            .output();
+    }
+}
+
+/// Registers `alias` for `url` with the primary server credentials.
+#[allow(dead_code)]
+pub fn set_tls_alias(home: &Path, alias: &str, url: &str) {
+    let access_key = std::env::var("MX_TEST_ACCESS_KEY").unwrap();
+    let secret_key = std::env::var("MX_TEST_SECRET_KEY").unwrap();
+    mx().env("HOME", home)
+        .args(["alias", "set", alias, url, &access_key, &secret_key])
+        .assert()
+        .success();
+}

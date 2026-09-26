@@ -1,8 +1,7 @@
 use crate::commands::cp::{resolve_destination_key, source_name_from_local};
-use crate::commands::util::parse_size;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
-use crate::flags::{ChecksumFlag, EncFlags};
+use crate::flags::{ChecksumFlag, EncFlags, parse_size};
 use crate::location::{Location, parse_location};
 use crate::s3::{BlockingReader, PutOptions, upload_stream};
 use anyhow::{Context, Result, bail};

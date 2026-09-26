@@ -67,7 +67,7 @@ pub struct Cli {
 }
 
 fn parse_rate(value: &str) -> anyhow::Result<u64> {
-    crate::net::parse_bytes(value)
+    crate::flags::parse_size(value)
 }
 
 fn parse_custom_header(value: &str) -> anyhow::Result<(String, String)> {

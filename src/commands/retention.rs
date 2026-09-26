@@ -6,7 +6,8 @@ use crate::commands::util::require_s3;
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
 use crate::flags::{RewindFlag, VersionIdFlag, VersionsFlag};
-use crate::s3::lock::{self, Selection, ValidityUnit};
+use crate::flags::{ValidityUnit, parse_validity, retain_until};
+use crate::s3::lock::{self, Selection};
 use crate::target::TargetRef;
 use anyhow::{Result, bail};
 use aws_sdk_s3::Client;
@@ -341,12 +342,12 @@ fn print_bucket_message(message: &BucketMessage<'_>, json: bool) -> Result<()> {
 fn set(args: RetentionSetArgs, json: bool) -> Result<()> {
     args.common.check_default(args.bypass)?;
     let mode = lock::parse_retention_mode(&args.mode)?;
-    let (count, unit) = lock::parse_validity(&args.validity)?;
+    let (count, unit) = parse_validity(&args.validity)?;
     let target = LockTarget::resolve(&args.target)?;
     if args.common.default {
         return apply_bucket_lock(&target, Op::Set, Some((mode, count, unit)), json);
     }
-    let until = lock::retain_until(SystemTime::now(), count, unit)?;
+    let until = retain_until(SystemTime::now(), count, unit)?;
     apply_retention(
         &target,
         &args.common,

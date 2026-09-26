@@ -175,6 +175,107 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+// ---------------------------------------------------------------------------
+// retention validity
+// ---------------------------------------------------------------------------
+
+/// Unit of a retention validity (`Nd` / `Ny`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidityUnit {
+    Days,
+    Years,
+}
+
+impl ValidityUnit {
+    /// mc/minio-go spelling (`DAYS` / `YEARS`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ValidityUnit::Days => "DAYS",
+            ValidityUnit::Years => "YEARS",
+        }
+    }
+}
+
+/// Parses retention validity `Nd` / `Ny` (N > 0), case-insensitive.
+pub fn parse_validity(value: &str) -> Result<(u32, ValidityUnit)> {
+    let value = value.trim();
+    let invalid = || anyhow!("invalid validity '{value}': use Nd or Ny, e.g. 30d or 1y");
+    let unit = match value.chars().last() {
+        Some('d' | 'D') => ValidityUnit::Days,
+        Some('y' | 'Y') => ValidityUnit::Years,
+        _ => return Err(invalid()),
+    };
+    let count: u32 = value[..value.len() - 1].parse().map_err(|_| invalid())?;
+    if count == 0 {
+        bail!("invalid validity '{value}': must be greater than 0");
+    }
+    Ok((count, unit))
+}
+
+/// `now + validity`, truncated to whole seconds. Years are calendar years (Feb 29 rolls over
+/// to Mar 1 like Go's `AddDate`).
+pub fn retain_until(now: SystemTime, count: u32, unit: ValidityUnit) -> Result<SystemTime> {
+    let secs = now.duration_since(UNIX_EPOCH)?.as_secs();
+    let now = UNIX_EPOCH + Duration::from_secs(secs);
+    match unit {
+        ValidityUnit::Days => Ok(now + Duration::from_secs(u64::from(count) * 86_400)),
+        ValidityUnit::Years => {
+            use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
+            // YYYY-MM-DDTHH:MM:SSZ
+            let text = DateTime::from(now).fmt(DateTimeFormat::DateTime)?;
+            let new_year = text[..4].parse::<i64>()? + i64::from(count);
+            let mut rest = text[4..].to_string();
+            let leap = (new_year % 4 == 0 && new_year % 100 != 0) || new_year % 400 == 0;
+            if rest.starts_with("-02-29") && !leap {
+                rest.replace_range(..6, "-03-01");
+            }
+            let parsed =
+                DateTime::from_str(&format!("{new_year:04}{rest}"), DateTimeFormat::DateTime)?;
+            Ok(SystemTime::try_from(parsed)?)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// sizes
+// ---------------------------------------------------------------------------
+
+/// Parses a byte size like mc (go-humanize `ParseBytes`): `1024`, `1,000b`, `1MiB`, `500 KiB`,
+/// `10MB`, `1.5k`, `2gi`. SI units are powers of 1000, IEC units powers of 1024; units are
+/// case-insensitive, the trailing `b` is optional, and a space may separate number and unit.
+pub fn parse_size(input: &str) -> Result<u64> {
+    let text = input.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ','))
+        .unwrap_or(text.len());
+    let number: f64 = text[..split]
+        .replace(',', "")
+        .parse()
+        .map_err(|_| anyhow!("invalid size `{input}`"))?;
+    let unit = text[split..].trim().to_ascii_lowercase();
+    let multiplier: u64 = match unit.as_str() {
+        "" | "b" | "byte" | "bytes" => 1,
+        "k" | "kb" => 1000,
+        "ki" | "kib" => 1 << 10,
+        "m" | "mb" => 1000u64.pow(2),
+        "mi" | "mib" => 1 << 20,
+        "g" | "gb" => 1000u64.pow(3),
+        "gi" | "gib" => 1 << 30,
+        "t" | "tb" => 1000u64.pow(4),
+        "ti" | "tib" => 1 << 40,
+        "p" | "pb" => 1000u64.pow(5),
+        "pi" | "pib" => 1 << 50,
+        "e" | "eb" => 1000u64.pow(6),
+        "ei" | "eib" => 1 << 60,
+        _ => bail!("invalid size `{input}`: unhandled size name `{unit}`"),
+    };
+    let bytes = number * multiplier as f64;
+    if !bytes.is_finite() || bytes >= u64::MAX as f64 {
+        bail!("size `{input}` is too large");
+    }
+    Ok(bytes as u64)
+}
+
 /// `--older-than` / `--newer-than` filters.
 #[derive(Debug, Clone, Default, Args)]
 pub struct TimeFilterFlags {
@@ -608,6 +709,64 @@ mod tests {
         assert!(parse_duration("10").is_err());
         assert!(parse_duration("h").is_err());
         assert!(parse_duration("5y").is_err());
+    }
+
+    #[test]
+    fn parses_humanized_sizes() {
+        assert_eq!(parse_size("100").unwrap(), 100);
+        assert_eq!(parse_size("1MiB").unwrap(), 1 << 20);
+        assert_eq!(parse_size("16MiB").unwrap(), 16 << 20);
+        assert_eq!(parse_size("500 KiB").unwrap(), 500 * 1024);
+        assert_eq!(parse_size("1.5 KiB").unwrap(), 1536);
+        assert_eq!(parse_size("64MB").unwrap(), 64_000_000);
+        assert_eq!(parse_size("64mb").unwrap(), 64_000_000);
+        assert_eq!(parse_size("1.5k").unwrap(), 1500);
+        assert_eq!(parse_size("2gi").unwrap(), 2 << 30);
+        assert_eq!(parse_size("1.5GiB").unwrap(), 3 << 29);
+        assert_eq!(parse_size("2G").unwrap(), 2_000_000_000);
+        assert_eq!(parse_size("1,000b").unwrap(), 1000);
+        assert_eq!(parse_size("42 bytes").unwrap(), 42);
+        assert!(parse_size("").is_err());
+        assert!(parse_size("MiB").is_err());
+        assert!(parse_size("fast").is_err());
+        assert!(parse_size("10XB").is_err());
+        assert!(parse_size("10 parsecs").is_err());
+        assert!(parse_size("100EiB").is_err());
+    }
+
+    #[test]
+    fn parses_validity() {
+        assert_eq!(parse_validity("30d").unwrap(), (30, ValidityUnit::Days));
+        assert_eq!(parse_validity("2Y").unwrap(), (2, ValidityUnit::Years));
+        for bad in ["", "d", "0d", "10", "5w", "x1d", "1.5y"] {
+            assert!(parse_validity(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn computes_retain_until() {
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        // 2024-02-29T12:00:00.5Z
+        let now = at(1_709_208_000) + Duration::from_millis(500);
+        assert_eq!(
+            retain_until(now, 2, ValidityUnit::Days).unwrap(),
+            at(1_709_208_000 + 2 * 86_400)
+        );
+        // 2025-03-01T12:00:00Z
+        assert_eq!(
+            retain_until(now, 1, ValidityUnit::Years).unwrap(),
+            at(1_740_830_400)
+        );
+        // 2028-02-29T12:00:00Z
+        assert_eq!(
+            retain_until(now, 4, ValidityUnit::Years).unwrap(),
+            at(1_835_438_400)
+        );
+        // 2024-01-02T03:04:05Z + 1y = 2025-01-02T03:04:05Z
+        assert_eq!(
+            retain_until(at(1_704_164_645), 1, ValidityUnit::Years).unwrap(),
+            at(1_735_787_045)
+        );
     }
 
     #[test]

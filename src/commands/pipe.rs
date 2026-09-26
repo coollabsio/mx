@@ -1,6 +1,6 @@
-use crate::commands::util::parse_size;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::flags::parse_size;
 use crate::flags::{ChecksumFlag, EncFlags, MetadataFlags};
 use crate::location::{Location, parse_location};
 use anyhow::{Context, Result, bail};

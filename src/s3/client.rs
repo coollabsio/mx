@@ -11,7 +11,7 @@ use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{ConfigBag, Intercept, RuntimeComponents};
 use aws_smithy_http_client::{
     Builder as HttpClientBuilder,
-    tls::{self, TlsContext, TrustStore, rustls_provider::CryptoMode},
+    tls::{self, rustls_provider::CryptoMode},
 };
 use aws_smithy_runtime_api::box_error::BoxError;
 use aws_smithy_runtime_api::client::http::SharedHttpClient;
@@ -78,21 +78,11 @@ fn http_client(alias: &AliasConfig) -> Result<Option<SharedHttpClient>> {
         return Ok(Some(crate::net::tls::insecure_http_client(resolver)?));
     }
 
-    let ca_certs = match crate::net::tls::cas_dir() {
-        Some(dir) => crate::net::tls::load_ca_certs(&dir)?,
-        None => Vec::new(),
-    };
-    if mappings.is_empty() && ca_certs.is_empty() {
+    let tls_context = crate::net::tls::custom_ca_context()?;
+    if mappings.is_empty() && tls_context.is_none() {
         return Ok(None);
     }
-    let mut trust_store = TrustStore::default();
-    for pem in ca_certs {
-        trust_store.add_pem_certificate(pem);
-    }
-    let tls_context = TlsContext::builder()
-        .with_trust_store(trust_store)
-        .build()
-        .map_err(|err| anyhow::anyhow!("Unable to configure TLS: {err}"))?;
+    let tls_context = tls_context.unwrap_or_default();
     let builder = HttpClientBuilder::new()
         .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
         .tls_context(tls_context);
@@ -116,9 +106,10 @@ pub fn force_path_style(alias: &AliasConfig) -> Result<bool> {
     }
 }
 
-/// Strips unsigned SDK metadata headers that MinIO rejects. Despite the name, this does NOT
-/// remove `x-amz-checksum-*` headers: explicitly requested checksums (see
-/// `objects::checksum_override`) are still sent.
+/// Strips unsigned SDK metadata headers that MinIO rejects. The SDK adds them in its own
+/// `modify_before_transmit` hooks (after signing), so the strip must run there too; client
+/// interceptors run after the SDK's. Despite the name, this does NOT remove `x-amz-checksum-*`
+/// headers: explicitly requested checksums (see `objects::checksum_override`) are still sent.
 #[derive(Debug)]
 struct StripFlexibleChecksums;
 
@@ -127,7 +118,7 @@ impl Intercept for StripFlexibleChecksums {
         "strip-flexible-checksums"
     }
 
-    fn modify_before_signing(
+    fn modify_before_transmit(
         &self,
         context: &mut BeforeTransmitInterceptorContextMut<'_>,
         _runtime_components: &RuntimeComponents,

@@ -2,14 +2,15 @@
 //! selection used by `retention`/`legalhold`/`undo`/`ilm restore`, and RestoreObject.
 
 use super::{ObjectInfo, error_code, from_system_time, resolve_rewind, to_system_time};
-use anyhow::{Result, anyhow, bail};
+use crate::flags::ValidityUnit;
+use anyhow::{Result, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::types::{
     DefaultRetention, GlacierJobParameters, ObjectLockConfiguration, ObjectLockEnabled,
     ObjectLockLegalHold, ObjectLockLegalHoldStatus, ObjectLockRetention, ObjectLockRetentionMode,
     ObjectLockRule, RestoreRequest, Tier,
 };
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 // ---------------------------------------------------------------------------
 // object selection
@@ -188,62 +189,6 @@ pub fn parse_retention_mode(value: &str) -> Result<ObjectLockRetentionMode> {
         "GOVERNANCE" => Ok(ObjectLockRetentionMode::Governance),
         "COMPLIANCE" => Ok(ObjectLockRetentionMode::Compliance),
         _ => bail!("invalid retention mode '{value}': use GOVERNANCE or COMPLIANCE"),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidityUnit {
-    Days,
-    Years,
-}
-
-impl ValidityUnit {
-    /// mc/minio-go spelling (`DAYS` / `YEARS`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ValidityUnit::Days => "DAYS",
-            ValidityUnit::Years => "YEARS",
-        }
-    }
-}
-
-/// Parses retention validity `Nd` / `Ny` (N > 0).
-pub fn parse_validity(value: &str) -> Result<(u32, ValidityUnit)> {
-    let value = value.trim();
-    let invalid = || anyhow!("invalid validity '{value}': use Nd or Ny, e.g. 30d or 1y");
-    let unit = match value.chars().last() {
-        Some('d' | 'D') => ValidityUnit::Days,
-        Some('y' | 'Y') => ValidityUnit::Years,
-        _ => return Err(invalid()),
-    };
-    let count: u32 = value[..value.len() - 1].parse().map_err(|_| invalid())?;
-    if count == 0 {
-        bail!("invalid validity '{value}': must be greater than 0");
-    }
-    Ok((count, unit))
-}
-
-/// `now + validity`, truncated to whole seconds. Years are calendar years (Feb 29 rolls over
-/// to Mar 1 like Go's `AddDate`).
-pub fn retain_until(now: SystemTime, count: u32, unit: ValidityUnit) -> Result<SystemTime> {
-    let secs = now.duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
-    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-    match unit {
-        ValidityUnit::Days => Ok(now + Duration::from_secs(u64::from(count) * 86_400)),
-        ValidityUnit::Years => {
-            use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
-            // YYYY-MM-DDTHH:MM:SSZ
-            let text = from_system_time(now).fmt(DateTimeFormat::DateTime)?;
-            let new_year = text[..4].parse::<i64>()? + i64::from(count);
-            let mut rest = text[4..].to_string();
-            let leap = (new_year % 4 == 0 && new_year % 100 != 0) || new_year % 400 == 0;
-            if rest.starts_with("-02-29") && !leap {
-                rest.replace_range(..6, "-03-01");
-            }
-            let parsed =
-                DateTime::from_str(&format!("{new_year:04}{rest}"), DateTimeFormat::DateTime)?;
-            Ok(SystemTime::try_from(parsed)?)
-        }
     }
 }
 
@@ -499,7 +444,7 @@ pub fn parse_restore_ongoing(header: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::UNIX_EPOCH;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn at(secs: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(secs)
@@ -627,32 +572,6 @@ mod tests {
             ObjectLockRetentionMode::Compliance
         );
         assert!(parse_retention_mode("legal").is_err());
-        assert_eq!(parse_validity("30d").unwrap(), (30, ValidityUnit::Days));
-        assert_eq!(parse_validity("2Y").unwrap(), (2, ValidityUnit::Years));
-        assert!(parse_validity("0d").is_err());
-        assert!(parse_validity("10").is_err());
-        assert!(parse_validity("d").is_err());
-        assert!(parse_validity("5w").is_err());
-    }
-
-    #[test]
-    fn computes_retain_until() {
-        // 2024-02-29T12:00:00.5Z
-        let now = at(1_709_208_000) + Duration::from_millis(500);
-        assert_eq!(
-            retain_until(now, 2, ValidityUnit::Days).unwrap(),
-            at(1_709_208_000 + 2 * 86_400)
-        );
-        // 2025-03-01T12:00:00Z
-        assert_eq!(
-            retain_until(now, 1, ValidityUnit::Years).unwrap(),
-            at(1_740_830_400)
-        );
-        // 2028-02-29T12:00:00Z
-        assert_eq!(
-            retain_until(now, 4, ValidityUnit::Years).unwrap(),
-            at(1_835_438_400)
-        );
     }
 
     #[test]

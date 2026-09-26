@@ -1,6 +1,7 @@
+use crate::commands::cat::EncCFlag;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
-use crate::flags::{RewindFlag, VersionIdFlag};
+use crate::flags::{RewindFlag, VersionIdFlag, resolve_sse};
 use crate::s3::{BucketStat, ListOptions, ObjectInfo, ObjectStat, full_key, parse_header_pairs};
 use crate::target::TargetRef;
 use anyhow::{Context, Result, bail};
@@ -30,6 +31,8 @@ pub struct StatArgs {
     /// disable all LIST operations for stat
     #[arg(long)]
     pub no_list: bool,
+    #[command(flatten)]
+    pub enc: EncCFlag,
     #[arg(required = true, value_name = "TARGET")]
     pub targets: Vec<String>,
 }
@@ -122,10 +125,15 @@ async fn collect(
         None => String::new(),
     };
     let relative = |key: &str| key.strip_prefix(dir.as_str()).unwrap_or(key).to_string();
+    let enc = args.enc.entries()?;
+    let sse_c = |key: &str| {
+        resolve_sse(&enc, &format!("{}/{bucket}/{key}", target.alias))
+            .and_then(|sse| sse.customer_key())
+    };
 
     let Some(key) = key else {
         if args.recursive || target.trailing_slash {
-            return list_entries(&client, &bucket, None, args, rewind, &relative).await;
+            return list_entries(&client, &bucket, None, args, rewind, &relative, &sse_c).await;
         }
         return Ok(vec![StatEntry::Bucket(
             crate::s3::stat_bucket(&client, &bucket).await?,
@@ -133,17 +141,27 @@ async fn collect(
     };
 
     if args.no_list || args.version_id.version_id.is_some() {
-        let stat = crate::s3::stat_object(
+        let stat = crate::s3::stat_object_sse_c(
             &client,
             &bucket,
             &key,
             args.version_id.version_id.as_deref(),
+            sse_c(&key),
         )
         .await?;
         return Ok(vec![object_entry(&bucket, stat, &relative)]);
     }
     if args.recursive || key.ends_with('/') {
-        return list_entries(&client, &bucket, Some(&key), args, rewind, &relative).await;
+        return list_entries(
+            &client,
+            &bucket,
+            Some(&key),
+            args,
+            rewind,
+            &relative,
+            &sse_c,
+        )
+        .await;
     }
     if args.versions || rewind.is_some() {
         let mut versions = crate::s3::list_key_versions(&client, &bucket, &key).await?;
@@ -157,12 +175,12 @@ async fn collect(
         }
         let mut entries = Vec::new();
         for version in versions {
-            let stat = stat_version(&client, &bucket, &key, &version).await?;
+            let stat = stat_version(&client, &bucket, &key, &version, sse_c(&key)).await?;
             entries.push(object_entry(&bucket, stat, &relative));
         }
         return Ok(entries);
     }
-    match crate::s3::stat_object(&client, &bucket, &key, None).await {
+    match crate::s3::stat_object_sse_c(&client, &bucket, &key, None, sse_c(&key)).await {
         Ok(stat) => Ok(vec![object_entry(&bucket, stat, &relative)]),
         Err(error) => {
             // Not an object: report it as a folder if it is a non-empty prefix.
@@ -199,6 +217,7 @@ async fn list_entries(
     args: &StatArgs,
     rewind: Option<SystemTime>,
     relative: &dyn Fn(&str) -> String,
+    sse_c: &dyn Fn(&str) -> Option<[u8; 32]>,
 ) -> Result<Vec<StatEntry>> {
     let options = ListOptions {
         recursive: args.recursive,
@@ -220,7 +239,7 @@ async fn list_entries(
             });
             continue;
         }
-        let stat = stat_version(client, bucket, &key, &item).await?;
+        let stat = stat_version(client, bucket, &key, &item, sse_c(&key)).await?;
         entries.push(object_entry(bucket, stat, relative));
     }
     Ok(entries)
@@ -232,6 +251,7 @@ async fn stat_version(
     bucket: &str,
     key: &str,
     item: &ObjectInfo,
+    sse_c: Option<[u8; 32]>,
 ) -> Result<ObjectStat> {
     if item.is_delete_marker {
         return Ok(ObjectStat {
@@ -242,7 +262,7 @@ async fn stat_version(
             ..Default::default()
         });
     }
-    crate::s3::stat_object(client, bucket, key, item.version_id.as_deref()).await
+    crate::s3::stat_object_sse_c(client, bucket, key, item.version_id.as_deref(), sse_c).await
 }
 
 // ---------------------------------------------------------------------------

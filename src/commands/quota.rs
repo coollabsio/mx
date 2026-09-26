@@ -83,7 +83,7 @@ fn set(args: QuotaSetArgs, json: bool) -> Result<()> {
     let Some(size) = args.size.as_deref() else {
         bail!("--size flag needs to be set.");
     };
-    let quota = admin::parse_bytes(size).context("Unable to parse quota")?;
+    let quota = crate::flags::parse_size(size).context("Unable to parse quota")?;
     let (client, bucket) = client_and_bucket(&args.target)?;
     let config = BucketQuota {
         quota,

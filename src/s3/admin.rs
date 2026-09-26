@@ -1,9 +1,9 @@
 //! MinIO admin API client (area H: quota, ilm tier, replication targets).
 //!
 //! Requests are SigV4-signed (service `s3`, region `us-east-1`, `x-amz-content-sha256`) and sent
-//! with the smithy HTTP connector, so `--resolve` pins apply. The same client is used for the
-//! MinIO-specific bucket sub-resources (`?replication`, `?replication-metrics`, ...) whose XML/JSON
-//! bodies the AWS SDK cannot model.
+//! with the smithy HTTP connector, so `--resolve` pins, `--insecure` and `certs/CAs` apply. The
+//! same client is used for the MinIO-specific bucket sub-resources (`?replication`,
+//! `?replication-metrics`, ...) whose XML/JSON bodies the AWS SDK cannot model.
 //!
 //! Request bodies that carry credentials are encrypted like `madmin.EncryptData`:
 //! `salt(32) | id(1) | nonce(8) | sio-DARE stream`. We use id `0x02` (PBKDF2-SHA256 +
@@ -21,7 +21,7 @@ use aws_smithy_http_client::{
     Connector,
     tls::{self, rustls_provider::CryptoMode},
 };
-use aws_smithy_runtime_api::client::http::HttpConnector;
+use aws_smithy_runtime_api::client::http::{HttpConnector, SharedHttpConnector};
 use aws_smithy_runtime_api::client::identity::Identity;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -48,7 +48,7 @@ pub struct AdminClient {
     access_key: String,
     secret_key: String,
     session_token: Option<String>,
-    connector: Connector,
+    connector: SharedHttpConnector,
 }
 
 impl AdminClient {
@@ -67,11 +67,21 @@ impl AdminClient {
             .into_iter()
             .filter(|m| m.host.eq_ignore_ascii_case(host) && Some(m.port) == port)
             .collect();
-        let builder = Connector::builder().tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc));
-        let connector = if mappings.is_empty() {
-            builder.build()
+        let resolver = crate::resolve::PinnedDnsResolver::new(&mappings)?;
+        // Same TLS trust as the S3 client: `--insecure`, else system roots + `certs/CAs`.
+        let connector = if crate::globals::insecure() {
+            crate::net::tls::insecure_connector(resolver)?
         } else {
-            builder.build_with_resolver(crate::resolve::PinnedDnsResolver::new(&mappings)?)
+            let mut builder =
+                Connector::builder().tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc));
+            if let Some(context) = crate::net::tls::custom_ca_context()? {
+                builder = builder.tls_context(context);
+            }
+            SharedHttpConnector::new(if mappings.is_empty() {
+                builder.build()
+            } else {
+                builder.build_with_resolver(resolver)
+            })
         };
         Ok(Self {
             scheme: url.scheme().to_string(),
@@ -461,40 +471,6 @@ pub fn decrypt_data(password: &str, data: &[u8], argon2id: Option<Argon2idFn>) -
 // Human-readable sizes (go-humanize compatible)
 // ---------------------------------------------------------------------------
 
-/// `humanize.ParseBytes`: "1GiB", "1 gb", "10k", "1.5TB", "123".
-pub fn parse_bytes(input: &str) -> Result<u64> {
-    let text = input.trim();
-    let split = text
-        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ','))
-        .unwrap_or(text.len());
-    let number: f64 = text[..split]
-        .replace(',', "")
-        .parse()
-        .map_err(|_| anyhow!("invalid size `{input}`"))?;
-    let unit = text[split..].trim().to_ascii_lowercase();
-    let multiplier: f64 = match unit.as_str() {
-        "" | "b" | "byte" | "bytes" => 1.0,
-        "k" | "kb" => 1e3,
-        "ki" | "kib" => 1024.0,
-        "m" | "mb" => 1e6,
-        "mi" | "mib" => 1024f64.powi(2),
-        "g" | "gb" => 1e9,
-        "gi" | "gib" => 1024f64.powi(3),
-        "t" | "tb" => 1e12,
-        "ti" | "tib" => 1024f64.powi(4),
-        "p" | "pb" => 1e15,
-        "pi" | "pib" => 1024f64.powi(5),
-        "e" | "eb" => 1e18,
-        "ei" | "eib" => 1024f64.powi(6),
-        _ => bail!("unhandled size name: {unit}"),
-    };
-    let value = number * multiplier;
-    if value >= u64::MAX as f64 {
-        bail!("too large: {input}");
-    }
-    Ok(value as u64)
-}
-
 fn humanate(size: u64, base: f64, units: &[&str]) -> String {
     if size < 10 {
         return format!("{size} B");
@@ -852,15 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_formats_sizes() {
-        assert_eq!(parse_bytes("1GiB").unwrap(), 1 << 30);
-        assert_eq!(parse_bytes("1gi").unwrap(), 1 << 30);
-        assert_eq!(parse_bytes("1GB").unwrap(), 1_000_000_000);
-        assert_eq!(parse_bytes("1.5 KiB").unwrap(), 1536);
-        assert_eq!(parse_bytes("42").unwrap(), 42);
-        assert_eq!(parse_bytes("2G").unwrap(), 2_000_000_000);
-        assert!(parse_bytes("1XB").is_err());
-        assert!(parse_bytes("abc").is_err());
+    fn formats_sizes() {
         assert_eq!(ibytes(1 << 30), "1.0 GiB");
         assert_eq!(ibytes(5), "5 B");
         assert_eq!(ibytes(1_000_000_000), "954 MiB");

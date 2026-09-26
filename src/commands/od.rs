@@ -43,7 +43,7 @@ fn parse_operands(operands: &[String]) -> Result<Operands> {
         match key {
             "if" => parsed.input = value.to_string(),
             "of" => parsed.output = value.to_string(),
-            "size" => parsed.size = Some(parse_bytes(value)?),
+            "size" => parsed.size = Some(crate::flags::parse_size(value)?),
             "parts" => parsed.parts = Some(number(value)?),
             "skip" => parsed.skip = Some(number(value)?),
             _ => bail!("unknown operand `{key}`: supported operands are if, of, size, parts, skip"),
@@ -56,37 +56,6 @@ fn parse_operands(operands: &[String]) -> Result<Operands> {
         bail!("parts and skip must not be negative");
     }
     Ok(parsed)
-}
-
-/// go-humanize `ParseBytes`: `40MiB`, `40MB` (decimal), `1.5 GiB`, `1024`.
-fn parse_bytes(input: &str) -> Result<u64> {
-    let text = input.trim();
-    let split = text
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(text.len());
-    let (number, unit) = text.split_at(split);
-    let number: f64 = number
-        .parse()
-        .map_err(|_| anyhow!("invalid size `{input}`"))?;
-    let multiplier: f64 = match unit.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1.0,
-        "k" | "kb" => 1e3,
-        "ki" | "kib" => 1024.0,
-        "m" | "mb" => 1e6,
-        "mi" | "mib" => 1024f64.powi(2),
-        "g" | "gb" => 1e9,
-        "gi" | "gib" => 1024f64.powi(3),
-        "t" | "tb" => 1e12,
-        "ti" | "tib" => 1024f64.powi(4),
-        "p" | "pb" => 1e15,
-        "pi" | "pib" => 1024f64.powi(5),
-        _ => bail!("invalid size `{input}`: unknown unit `{unit}`"),
-    };
-    let value = number * multiplier;
-    if !value.is_finite() || value > u64::MAX as f64 {
-        bail!("size `{input}` is too large");
-    }
-    Ok(value as u64)
 }
 
 /// go-humanize `IBytes`: `3.0 MiB`, `25 MiB`, `512 B`.
@@ -468,17 +437,6 @@ mod tests {
         assert!(parse_operands(&["if=a".into(), "of=b".into(), "bs=1".into()]).is_err());
         assert!(parse_operands(&["if=a".into(), "of".into()]).is_err());
         assert!(parse_operands(&["if=a".into(), "of=b".into(), "parts=x".into()]).is_err());
-    }
-
-    #[test]
-    fn parses_humanized_sizes() {
-        assert_eq!(parse_bytes("40MiB").unwrap(), 40 * MIB);
-        assert_eq!(parse_bytes("40MB").unwrap(), 40_000_000);
-        assert_eq!(parse_bytes("1.5 KiB").unwrap(), 1536);
-        assert_eq!(parse_bytes("1024").unwrap(), 1024);
-        assert_eq!(parse_bytes("2gi").unwrap(), 2 * 1024 * MIB);
-        assert!(parse_bytes("10XB").is_err());
-        assert!(parse_bytes("MiB").is_err());
     }
 
     #[test]

@@ -1,9 +1,8 @@
-use crate::commands::util::{
-    format_print_time, glob_match, humanize_ibytes, key_depth, parse_size,
-};
+use crate::commands::util::{format_print_time, glob_match, humanize_ibytes, key_depth};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
+use crate::flags::parse_size;
 use crate::flags::{TimeFilterFlags, VersionsFlag};
 use crate::location::{Location, parse_location};
 use crate::s3::{ListOptions, full_key, list_objects_with};
