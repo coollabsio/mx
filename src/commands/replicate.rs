@@ -713,7 +713,7 @@ fn list(args: ReplicateListArgs, json: bool) -> Result<()> {
 
 /// go-humanize `RelTime(now, now+uptime, "", "")` for a number of seconds (keeps Go's
 /// trailing space for the empty label, e.g. `2 minutes `).
-fn rel_time(seconds: i64) -> String {
+pub(crate) fn rel_time(seconds: i64) -> String {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
@@ -749,7 +749,7 @@ fn rel_time(seconds: i64) -> String {
 }
 
 /// mc `timeDurationToHumanizedDuration(d).String()`.
-fn humanized_duration(nanos: i64) -> String {
+pub(crate) fn humanized_duration(nanos: i64) -> String {
     let millis = nanos / 1_000_000;
     let secs = nanos as f64 / 1e9;
     if millis < 1000 {
@@ -777,7 +777,7 @@ fn humanized_duration(nanos: i64) -> String {
 }
 
 /// Go `time.Duration.String()`.
-fn go_duration_string(nanos: i64) -> String {
+pub(crate) fn go_duration_string(nanos: i64) -> String {
     if nanos == 0 {
         return "0s".to_string();
     }
@@ -1012,7 +1012,7 @@ fn since_nanos(time: &str) -> i64 {
 }
 
 /// mc `PrettyTable.buildRow`: `%-N.Ns` columns (cut with `...`) joined by ` | `.
-fn pretty_row(widths: &[usize], contents: &[&str]) -> String {
+pub(crate) fn pretty_row(widths: &[usize], contents: &[&str]) -> String {
     let columns = widths.len().min(contents.len());
     (0..columns)
         .map(|i| {
