@@ -61,7 +61,7 @@ fn wrong_argument_counts_print_help() {
     ] {
         run(args)
             .code(1)
-            .stdout(predicate::str::contains("Usage: mx idp "))
+            .stdout(predicate::str::contains("USAGE:\n  mx idp "))
             .stderr("");
     }
 }

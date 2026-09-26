@@ -10,7 +10,7 @@ use crate::output;
 use crate::s3::admin::{self, AdminClient};
 use crate::s3::admin_iam::{self as iam, GoJson, GoTime, IamPolicy};
 use anyhow::{Context, Result};
-use clap::{Args, CommandFactory, Subcommand};
+use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::io::{BufRead, IsTerminal, Write};
 
@@ -289,15 +289,7 @@ pub(crate) fn print_msg<T: Serialize>(json: bool, message: &T, text: &str) -> Re
 
 /// mc `showCommandHelpAndExit(ctx, 1)`: the command help on stdout, exit status 1.
 pub(crate) fn show_help(path: &[&str]) -> ! {
-    let mut cmd = crate::cli::Cli::command();
-    for name in path {
-        match cmd.find_subcommand(name) {
-            Some(sub) => cmd = sub.clone(),
-            None => break,
-        }
-    }
-    let _ = cmd.print_help();
-    std::process::exit(1);
+    crate::help::show_help_and_exit(path, 1)
 }
 
 /// A fatal message with a `%s` verb: mc formats it for text, but its JSON error keeps the

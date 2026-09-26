@@ -12,7 +12,7 @@ use crate::config::ConfigStore;
 use crate::s3::admin::{self, AdminClient};
 use crate::s3::admin_idp::{self, IdpConfig, IdpListItem};
 use anyhow::{Context, Result};
-use clap::{Args, CommandFactory, Subcommand};
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 #[derive(Debug, Args)]
@@ -42,16 +42,7 @@ pub fn run(args: IdpArgs, json: bool) -> Result<()> {
 
 /// mc `showCommandHelpAndExit(ctx, 1)`: the help of `mx <path...>` on stdout, exit status 1.
 pub(crate) fn show_help_and_exit(path: &[&str]) -> ! {
-    let mut cmd = crate::cli::Cli::command();
-    cmd.build();
-    for name in path {
-        match cmd.find_subcommand(name) {
-            Some(sub) => cmd = sub.clone(),
-            None => break,
-        }
-    }
-    let _ = cmd.print_help();
-    std::process::exit(1);
+    crate::help::show_help_and_exit(path, 1)
 }
 
 /// mc `newAdminClient(aliasedURL)`.

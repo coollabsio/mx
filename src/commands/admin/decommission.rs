@@ -11,7 +11,7 @@ use crate::output;
 use crate::s3::admin::{self, AdminClient};
 use crate::s3::admin_topo::{self, PoolDecommissionInfo, PoolStatus};
 use anyhow::{Context, Result};
-use clap::{Args, CommandFactory, Subcommand};
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 #[derive(Debug, Args)]
@@ -321,16 +321,7 @@ pub(crate) fn console_table(rows: &[Vec<String>], align_right: &[bool]) -> Strin
 /// mc `showCommandHelpAndExit(ctx, 1)`: prints the help of the command at `path` and exits
 /// with status 1.
 pub(crate) fn show_help(path: &[&str]) -> ! {
-    let mut command = crate::cli::Cli::command();
-    command.build();
-    for name in path {
-        match command.find_subcommand(name) {
-            Some(sub) => command = sub.clone(),
-            None => break,
-        }
-    }
-    let _ = command.print_help();
-    std::process::exit(1);
+    crate::help::show_help_and_exit(path, 1)
 }
 
 /// mc `newAdminClient` failure reported with a command-specific message, e.g.

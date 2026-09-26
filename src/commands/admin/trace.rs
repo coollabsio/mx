@@ -151,15 +151,7 @@ fn parse_duration_flag(value: &str) -> std::result::Result<i64, GoParseError> {
 
 /// mc `showCommandHelpAndExit(ctx, 1)`: the command's help on stdout, exit status 1.
 pub(crate) fn help_exit(path: &[&str]) -> Result<()> {
-    use clap::CommandFactory;
-    let mut cmd = crate::cli::Cli::command();
-    for name in path {
-        match cmd.find_subcommand(name) {
-            Some(sub) => cmd = sub.clone(),
-            None => break,
-        }
-    }
-    let _ = cmd.print_help();
+    crate::help::print_help(path);
     Err(Exit(1).into())
 }
 

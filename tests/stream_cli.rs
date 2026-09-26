@@ -45,7 +45,7 @@ fn missing_targets_print_help_and_exit_1() {
             .args(args)
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("Usage"));
+            .stdout(predicate::str::contains("USAGE:"));
     }
 }
 

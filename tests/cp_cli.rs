@@ -62,8 +62,8 @@ fn cp_help_lists_mc_flags() {
     ] {
         assert!(out.contains(flag), "missing {flag}");
     }
-    assert!(out.contains("-a, --preserve"));
-    assert!(out.contains("-r, --recursive"));
+    assert!(out.contains("--preserve, -a"));
+    assert!(out.contains("--recursive, -r"));
 }
 
 #[test]
@@ -208,11 +208,12 @@ fn cp_rejects_unsupported_combinations() {
             .failure()
             .stderr(predicate::str::contains(message));
     }
+    // Too few arguments: the help, exit status 1 (like mc).
     mx(home.path())
         .args(["cp", &file])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("required"));
+        .code(1)
+        .stdout(predicate::str::contains("USAGE:\n  mx cp [FLAGS] SOURCE"));
 }
 
 #[test]

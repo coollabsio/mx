@@ -1,11 +1,13 @@
 //! mc-style usage errors (mc `onUsageError` / `commandNotFound`).
 //!
 //! - Unknown or malformed flags: `PROG: <ERROR> Invalid command usage, flag provided but not
-//!   defined: -bogus`, a blank line and a `SUPPORTED FLAGS:` block rendered from the clap
-//!   command like urfave/cli (`--name value, -n value   usage (default: x) [$ENV]`).
+//!   defined: -bogus`, a blank line and mc's `SUPPORTED FLAGS:` block (from
+//!   [`crate::help`]; rendered from clap like urfave/cli for commands without an mc page).
+//!   Command groups print urfave's `Incorrect Usage.` instead.
 //! - Unknown commands: ``PROG: <ERROR> `x` is not a recognized command. Get help using
 //!   `--help` flag.`` with mc's "Did you mean one of these?" suggestions.
-//! - Missing arguments: the command help on stdout, exit status 1.
+//! - Missing arguments: the command help on stdout, exit status 1 (0 for a command group
+//!   without a subcommand).
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{Arg, ArgAction, Command, CommandFactory};
@@ -14,21 +16,44 @@ use std::error::Error as _;
 /// Prints `err` like mc and exits (help/version requests exit 0, everything else 1).
 pub fn usage_error(err: clap::Error, argv: &[String]) -> ! {
     let root = crate::cli::Cli::command();
-    let path = command_path(&root, argv);
+    let path = crate::help::command_path(argv).0;
+    let path_ref: Vec<&str> = path.iter().map(String::as_str).collect();
     match err.kind() {
-        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => err.exit(),
+        ErrorKind::DisplayVersion => err.exit(),
+        ErrorKind::DisplayHelp => {
+            // mc parses every flag first: an unknown flag wins over `--help`.
+            let rest: Vec<String> = argv
+                .iter()
+                .filter(|arg| *arg != "--help" && *arg != "-h")
+                .cloned()
+                .collect();
+            if let Err(other) = <crate::cli::Cli as clap::Parser>::try_parse_from(&rest)
+                && other.kind() == ErrorKind::UnknownArgument
+            {
+                usage_error(other, &rest);
+            }
+            crate::help::show_help_and_exit(&path_ref, 0);
+        }
         ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         | ErrorKind::MissingRequiredArgument
         | ErrorKind::MissingSubcommand
+        | ErrorKind::TooFewValues
             if !missing_flag(&err) =>
         {
-            // mc prints the command help and exits with status 1.
-            let mut cmd = find_command(root, &path);
-            let _ = cmd.print_help();
-            std::process::exit(1);
+            // mc prints the command help; a command group without a subcommand exits with
+            // status 0, missing arguments with 1.
+            let group =
+                find_command(root, &path).has_subcommands() || crate::help::is_group(&path_ref);
+            crate::help::show_help_and_exit(&path_ref, if group { 0 } else { 1 });
         }
         ErrorKind::InvalidSubcommand => {
             let name = context_string(&err, ContextKind::InvalidSubcommand).unwrap_or_default();
+            // The group whose subcommand is unknown: the path before the unknown name.
+            let before = argv
+                .iter()
+                .position(|arg| *arg == name)
+                .map_or(argv, |at| &argv[..at]);
+            let path = crate::help::command_path(before).0;
             let parent = find_command(root, &path);
             let names: Vec<String> = parent
                 .get_subcommands()
@@ -60,42 +85,37 @@ pub fn usage_error(err: clap::Error, argv: &[String]) -> ! {
         _ => {
             let cmd = find_command(root.clone(), &path);
             let reason = usage_reason(&err, &cmd, &root, argv);
-            let mut text = format!(
-                "{}: <ERROR> Invalid command usage, {reason}\n",
-                crate::output::prog_name()
-            );
-            if !path.is_empty() {
-                text.push_str("\nSUPPORTED FLAGS:\n");
-                text.push_str(&supported_flags(&cmd, &root, &path));
-            }
-            eprint!("{text}");
-            std::process::exit(1);
+            flag_error_exit(&path_ref, &reason)
         }
     }
 }
 
-/// Subcommand names in `argv` (after the program name), e.g. `["ilm", "rule", "add"]`.
-fn command_path(root: &Command, argv: &[String]) -> Vec<String> {
-    let mut path = Vec::new();
-    let mut current = root.clone();
-    for arg in argv.iter().skip(1) {
-        if arg == "--" {
-            break;
-        }
-        if arg.starts_with('-') {
-            continue;
-        }
-        let Some(sub) = current
-            .get_subcommands()
-            .find(|sub| sub.get_name() == arg || sub.get_all_aliases().any(|alias| alias == arg))
-            .cloned()
-        else {
-            continue;
-        };
-        path.push(sub.get_name().to_string());
-        current = sub;
+/// mc's report of a flag error (`reason` in Go `flag` wording) for the command at `path`:
+/// `Invalid command usage` with the `SUPPORTED FLAGS:` block for commands, urfave's own
+/// `Incorrect Usage.` for command groups. Exits with status 1.
+pub fn flag_error_exit(path: &[&str], reason: &str) -> ! {
+    let root = crate::cli::Cli::command();
+    let owned: Vec<String> = path.iter().map(|name| name.to_string()).collect();
+    let cmd = find_command(root.clone(), &owned);
+    let prog = crate::output::prog_name();
+    let rows = crate::help::supported_flags(path);
+    let incorrect = crate::help::incorrect_usage(path).or_else(|| {
+        // mx-only command groups: like mc's.
+        (!path.is_empty() && rows.is_none() && cmd.has_subcommands()).then_some(".")
+    });
+    if let Some(sep) = incorrect {
+        // urfave/cli reports the flag error itself.
+        print!("Incorrect Usage{sep} {reason}\n\n");
+        eprintln!("{prog}: <ERROR> {reason}");
+        std::process::exit(1);
     }
-    path
+    let mut text = format!("{prog}: <ERROR> Invalid command usage, {reason}\n");
+    if !path.is_empty() {
+        text.push_str("\nSUPPORTED FLAGS:\n");
+        text.push_str(&rows.unwrap_or_else(|| supported_flags(&cmd, &root)));
+    }
+    eprint!("{text}");
+    std::process::exit(1);
 }
 
 fn find_command(mut cmd: Command, path: &[String]) -> Command {
@@ -180,7 +200,7 @@ fn usage_reason(err: &clap::Error, cmd: &Command, root: &Command, argv: &[String
 fn typed_flag_name(display: &str, cmd: &Command, root: &Command, argv: &[String]) -> String {
     let first = display.split([' ', '=']).next().unwrap_or_default();
     let fallback = first.trim_start_matches('-').to_string();
-    let arg = all_flags(cmd, root, &[]).into_iter().find(|arg| {
+    let arg = all_flags(cmd, root).into_iter().find(|arg| {
         arg.get_long()
             .is_some_and(|long| format!("--{long}") == first)
             || arg
@@ -226,38 +246,21 @@ fn flag_names(arg: &Arg) -> Vec<String> {
     names
 }
 
-/// The command's visible flags and the global flags, in mc's order: mc appends the globals
-/// to most commands, but lists them first for `get`, `version enable`, `ilm tier` and
-/// `replicate` commands, and after the encryption flags for `put`.
-fn all_flags(cmd: &Command, root: &Command, path: &[String]) -> Vec<Arg> {
+/// The command's visible flags followed by the global flags.
+fn all_flags(cmd: &Command, root: &Command) -> Vec<Arg> {
     let visible = |arg: &Arg| {
         !arg.is_positional()
             && !arg.is_hide_set()
             && !matches!(arg.get_action(), ArgAction::Help | ArgAction::Version)
     };
-    let own: Vec<Arg> = cmd
-        .get_arguments()
+    cmd.get_arguments()
         .filter(|arg| !arg.is_global_set() && visible(arg))
+        .chain(
+            root.get_arguments()
+                .filter(|arg| arg.is_global_set() && visible(arg)),
+        )
         .cloned()
-        .collect();
-    let globals: Vec<Arg> = root
-        .get_arguments()
-        .filter(|arg| arg.is_global_set() && visible(arg))
-        .cloned()
-        .collect();
-    let path = path.join(" ");
-    let at = match path.as_str() {
-        "get" | "version enable" | "ilm tier add" | "ilm tier edit" | "ilm tier rm" => 0,
-        _ if path.starts_with("replicate") => 0,
-        "put" => own
-            .iter()
-            .take_while(|arg| arg.get_long().is_some_and(|l| l.starts_with("enc-")))
-            .count(),
-        _ => own.len(),
-    };
-    let mut flags = own;
-    flags.splice(at..at, globals);
-    flags
+        .collect()
 }
 
 /// urfave/cli `stringifyFlag`: (`--name value, -n value`, `usage (default: x) [$ENV]`).
@@ -304,10 +307,10 @@ pub fn flag_help(arg: &Arg) -> (String, String) {
     (names, usage)
 }
 
-/// The `SUPPORTED FLAGS:` block (mc `onUsageError`).
-pub fn supported_flags(cmd: &Command, root: &Command, path: &[String]) -> String {
-    let mut rows: Vec<(String, String)> =
-        all_flags(cmd, root, path).iter().map(flag_help).collect();
+/// The `SUPPORTED FLAGS:` block rendered from clap, for commands without an mc help page
+/// (see [`crate::help::supported_flags`]).
+pub fn supported_flags(cmd: &Command, root: &Command) -> String {
+    let mut rows: Vec<(String, String)> = all_flags(cmd, root).iter().map(flag_help).collect();
     rows.push(("--help, -h".to_string(), "show help".to_string()));
     let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0) + 2;
     rows.iter()
@@ -385,7 +388,7 @@ mod tests {
     fn renders_flags_like_urfave_cli() {
         let root = crate::cli::Cli::command();
         let ls = root.find_subcommand("ls").unwrap().clone();
-        let block = supported_flags(&ls, &root, &["ls".to_string()]);
+        let block = supported_flags(&ls, &root);
         let lines: Vec<&str> = block.lines().collect();
         assert_eq!(
             lines[0],

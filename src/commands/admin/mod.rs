@@ -133,10 +133,8 @@ pub fn run(args: AdminArgs, json: bool) -> Result<()> {
 }
 
 /// mc `deprecatedError`: fatal `Deprecated command. Please use 'mc <new_command>' instead.`
+/// (mc names itself literally, whatever the program name).
 pub fn deprecated(new_command: &str) -> Result<()> {
-    let cause = McError::new(format!(
-        "Please use '{} {new_command}' instead",
-        crate::output::prog_name()
-    ));
+    let cause = McError::new(format!("Please use 'mc {new_command}' instead"));
     Err(anyhow::Error::new(cause).context("Deprecated command"))
 }
