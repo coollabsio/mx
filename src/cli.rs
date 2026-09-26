@@ -12,23 +12,66 @@ use clap::{Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(version, about = "MaxIO Client", long_about = None)]
 pub struct Cli {
+    /// enable JSON lines formatted output
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// path to configuration folder
     #[arg(short = 'C', long = "config-dir", global = true, value_name = "PATH")]
     pub config_dir: Option<std::path::PathBuf>,
 
+    /// disable progress bar display
     #[arg(short = 'q', long, global = true)]
     pub quiet: bool,
 
+    /// disable mc internal pager and print to raw stdout (mx has no pager)
+    #[arg(long = "disable-pager", visible_alias = "dp", global = true)]
+    pub disable_pager: bool,
+
+    /// disable color theme (mx has no colors)
+    #[arg(long, global = true)]
+    pub no_color: bool,
+
+    /// enable debug output
+    #[arg(long, global = true)]
+    pub debug: bool,
+
+    /// disable SSL certificate verification
     #[arg(long, global = true)]
     pub insecure: bool,
 
+    /// resolves HOST:PORT to an IP address, e.g. minio.local:9000=10.10.75.1
     #[arg(long, global = true, value_name = "HOST:PORT=IP")]
     pub resolve: Vec<ResolveMapping>,
 
+    /// limits uploads to a maximum rate in KiB/s, MiB/s, GiB/s (default: unlimited)
+    #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate)]
+    pub limit_upload: Option<u64>,
+
+    /// limits downloads to a maximum rate in KiB/s, MiB/s, GiB/s (default: unlimited)
+    #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate)]
+    pub limit_download: Option<u64>,
+
+    /// add custom HTTP header to the request, 'key:value' format
+    #[arg(
+        short = 'H',
+        long = "custom-header",
+        global = true,
+        value_name = "KEY:VALUE",
+        value_parser = parse_custom_header
+    )]
+    pub custom_header: Vec<(String, String)>,
+
     #[command(subcommand)]
     pub command: Commands,
+}
+
+fn parse_rate(value: &str) -> anyhow::Result<u64> {
+    crate::net::parse_bytes(value)
+}
+
+fn parse_custom_header(value: &str) -> anyhow::Result<(String, String)> {
+    crate::net::parse_custom_header(value)
 }
 
 #[derive(Debug, Subcommand)]
