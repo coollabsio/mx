@@ -82,6 +82,8 @@ export MX_TEST_URL2="$url2"
 export MX_TEST_ACCESS_KEY2="$user"
 export MX_TEST_SECRET_KEY2="$password"
 export MX_TEST_KMS_KEY_ID=mx-test-key
+# Webhook notification target configured for server 1 in tests/minio.env.
+export MX_TEST_NOTIFY_ARN=arn:minio:sqs::MXTEST:webhook
 export MX_TEST_BUCKET_PREFIX=mx-live
 
 echo "live MinIO ready at $url and $url2"
