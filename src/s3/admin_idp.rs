@@ -243,16 +243,6 @@ pub struct PolicyEntitiesResult {
     pub policy_mappings: Option<Vec<PolicyEntities>>,
 }
 
-/// Values of a repeated query key in SigV4 canonical order. MinIO canonicalizes the query
-/// with Go's `url.Values.Encode` (keys sorted, values in request order) while the signer
-/// sorts values too: the two only agree when the values are sent sorted. The server sorts
-/// its results, so the request order does not show in the output.
-fn signing_order(values: &[String]) -> Vec<&str> {
-    let mut sorted: Vec<&str> = values.iter().map(String::as_str).collect();
-    sorted.sort_by_cached_key(|value| encode_component(value));
-    sorted
-}
-
 /// Go `omitempty` for a slice: nil or empty.
 fn vec_is_empty<T>(value: &Option<Vec<T>>) -> bool {
     value.as_ref().is_none_or(Vec::is_empty)
@@ -267,7 +257,7 @@ pub async fn ldap_policy_entities(
 ) -> Result<PolicyEntitiesResult> {
     let mut request = client.request("GET", "idp/ldap/policy-entities");
     for (key, values) in [("group", groups), ("policy", policies), ("user", users)] {
-        for value in signing_order(values) {
+        for value in values {
             request = request.query(key, value);
         }
     }
@@ -360,7 +350,7 @@ pub async fn list_access_keys_ldap_bulk(
     let mut request = client
         .request("GET", "idp/ldap/list-access-keys-bulk")
         .query("listType", opts.list_type.as_str());
-    for user in signing_order(users) {
+    for user in users {
         request = request.query("userDNs", user);
     }
     if opts.all {
@@ -384,7 +374,7 @@ pub async fn list_access_keys_openid_bulk(
     let mut request = client
         .request("GET", "idp/openid/list-access-keys-bulk")
         .query("listType", opts.list_type.as_str());
-    for user in signing_order(users) {
+    for user in users {
         request = request.query("users", user);
     }
     if opts.all {

@@ -850,14 +850,19 @@ fn encode_path(path: &str) -> String {
         .join("/")
 }
 
+/// Query string in SigV4 canonical order (keys, then values, sorted). MinIO rebuilds the
+/// canonical query with Go's `url.Values.Encode`, which sorts keys but keeps the request
+/// order of repeated values, so sending them sorted keeps both sides in agreement.
 fn encode_query(query: &[(&str, &str)]) -> String {
     if query.is_empty() {
         return String::new();
     }
-    let pairs: Vec<String> = query
+    let mut pairs: Vec<(String, String)> = query
         .iter()
-        .map(|(k, v)| format!("{}={}", encode_component(k), encode_component(v)))
+        .map(|(k, v)| (encode_component(k), encode_component(v)))
         .collect();
+    pairs.sort();
+    let pairs: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect();
     format!("?{}", pairs.join("&"))
 }
 
@@ -1707,6 +1712,11 @@ mod tests {
         assert_eq!(
             encode_query(&[("bucket", "a b"), ("replication", "")]),
             "?bucket=a%20b&replication="
+        );
+        // Repeated keys go out in canonical order so MinIO's re-encoding matches the signature.
+        assert_eq!(
+            encode_query(&[("users", "zoe"), ("listType", "all"), ("users", "amy")]),
+            "?listType=all&users=amy&users=zoe"
         );
         assert_eq!(encode_path("tier/WARM TIER"), "tier/WARM%20TIER");
     }

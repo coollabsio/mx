@@ -1,6 +1,4 @@
-//! Commands registered for mc parity but not implemented yet: each must parse and fail with
-//! "not implemented yet". Area agents delete their rows as they implement commands (and add
-//! real tests); delete a table (and its test) once it is empty.
+//! Help output lists the admin, idp, batch, sql and watch command groups like mc.
 
 use assert_cmd::Command;
 
@@ -52,28 +50,3 @@ fn help_lists_new_commands() {
         assert!(!admin.contains(hidden), "admin {hidden} should be hidden");
     }
 }
-
-fn assert_stubs(rows: &[&[&str]]) {
-    let home = tempfile::tempdir().expect("tempdir");
-    for args in rows {
-        let output = Command::cargo_bin("mx")
-            .expect("binary")
-            .env("HOME", home.path())
-            .args(*args)
-            .output()
-            .expect("run mx");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(
-            output.status.code(),
-            Some(1),
-            "mx {}: {stderr}",
-            args.join(" ")
-        );
-        assert!(
-            stderr.contains("is not implemented yet"),
-            "mx {}: {stderr}",
-            args.join(" ")
-        );
-    }
-}
-

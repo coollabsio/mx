@@ -53,11 +53,6 @@ pub fn alias_config(store: &ConfigStore, alias: &str) -> Result<AliasConfig> {
     store.alias(alias)
 }
 
-/// Placeholder result for commands that are registered but not implemented yet.
-pub fn not_implemented(command: &str) -> Result<()> {
-    anyhow::bail!("`{command}` is not implemented yet")
-}
-
 pub fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Runtime::new()?)
 }
