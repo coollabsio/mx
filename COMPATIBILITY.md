@@ -1,13 +1,20 @@
 # Compatibility
 
-`mx` is an independent client for common S3 workflows. It is not a MinIO product.
+`mx` is an independent Rust client that aims for full parity with MinIO's `mc`
+(pinned release in `tests/mc.version`). It is not a MinIO product.
 
-Status key: **Supported** means mc's flags and behavior are covered and tested
-against MinIO. **Partial** means the command works but some mc flags or
-output details are missing. **Preview** means the command exists but depends on
-server support that varies between S3-compatible servers.
+Status key: **Supported** means mc's flags, text and JSON output are implemented and
+tested against MinIO (most with a side-by-side case against the real mc).
+**Preview** means the command works but depends on server support that varies
+between S3-compatible servers. **Out of scope** is a deliberate decision.
+
+Not implemented (out of scope): `support`, `license` (AIStor/SUBNET) and the client
+self-update `update`. `support` and `license` are unknown commands, like any
+other name mc does not have.
 
 ## Command support
+
+### Core S3: objects and buckets
 
 | Command | Status | Notes |
 | --- | --- | --- |
@@ -29,56 +36,81 @@ server support that varies between S3-compatible servers.
 | `find` | Supported | Supports every mc flag, including `--exec`, `--print`, `--larger`, `--smaller`, `--metadata`, `--tags`, `--watch` (polling), `--versions`. Prints mc keys (`alias/bucket/key`, absolute local paths including folders) and mc's JSON (`type`/`etag` empty); patterns match the key minus the target as typed and `--maxdepth` truncates keys, like mc. |
 | `diff` | Supported | S3 aliases and local paths. mc output: `< FIRST_URL`, `> SECOND_URL`, `! SECOND_URL` (size differs or first is newer) with endpoint URLs / absolute paths, and `--json` `{first,second,diff}`. |
 | `share download`, `upload`, `list` | Supported | `-r`, `--version-id`, `-E/--expire` (default `168h`), `-T`. Presigned URLs carry the same query parameters as mc (no SDK `x-id`); JSON keeps `&` unescaped like mc. `upload` prints a `curl` command with a POST policy; its `-F` fields are sorted (mc's order is random). `list` uses mc's share database in `<config dir>/share/`. |
+| `od` | Supported | Single-stream upload and download measurement. mc output and errors (local sources shown as absolute paths). |
+| `undo` | Supported | `-r --force`, `--last`, `--action`, `--dry-run`. mc output and errors. |
+| `watch` | Supported | Bucket (`ALIAS/BUCKET[/PREFIX]`), all buckets (`ALIAS`) through the MinIO listen API, and local directories through inotify (Linux) with mc's event masks. `--events` (`put,delete,get,replica,ilm,bucket-creation,bucket-removal,scanner`), `--prefix`, `--suffix`, `--recursive`. mc lines `[TIME]   SIZE EVENT URL` and JSON (`events`, `source`); reconnects when the server closes the stream. A failed listen request is reported like mc (`errorIf`, exit 0). Runs until interrupted (SIGINT 130, SIGTERM 143 like mc). Local recursive watches may report a different number of directory `Get` events at startup than mc's notify library. |
+| `sql` | Supported | S3 Select (`SelectObjectContent`) via the AWS SDK event stream. `-e/--query`, `-r`, `--csv-input`, `--json-input`, `--compression`, `--csv-output`, `--csv-output-header` (`""` reads the object's first line), `--json-output`, `--enc-c`. mc's option parsing (abbreviations, `\n` escapes), serialization defaults (by extension, gzip/bzip2 by MIME type) and errors; per-object failures are reported and exit 0 like mc. Differences: the list of valid option keys in errors has a fixed order (mc prints a Go map in random order); folder listings pick objects by extension only (mc also reads the listed `content-type` user metadata). |
+
+### Bucket configuration
+
+| Command | Status | Notes |
+| --- | --- | --- |
 | `tag set`, `list`, `remove` | Supported | Object and bucket tags. `--version-id`, `--rewind`, `--versions`, `-r`, `--exclude-folders`. |
 | `version enable`, `suspend`, `info` | Supported | `--excluded-prefixes`, `--exclude-folders` (MinIO). Like mc, `enable`/`suspend` JSON has an empty `versioning` object (`status:""`). |
 | `anonymous set`, `get`, `set-json`, `get-json`, `list`, `links` | Supported | `private` is a synonym for `none`. Supports prefix policies. `-r/--recursive` is accepted before or after the operation like mc; only `links` uses it. |
+| `cors set`, `get`, `remove` | Preview | `set` accepts XML or JSON. Depends on server CORS support. |
+| `encrypt set`, `info`, `clear` | Supported | `set sse-s3 TARGET` or `set sse-kms KEY_ID TARGET`. `info` on a bucket without auto encryption fails with the server error, like mc. |
 | `ilm rule add`, `edit`, `ls`, `rm`, `export`, `import` | Supported | Supports every mc rule flag. `ls` tables use go-pretty alignment (numbers right, text left); `ls`/`export` JSON carry `updatedAt`. A bucket without lifecycle fails with the server error like mc. |
 | `ilm restore` | Supported | mc's flow and output: the status line is redrawn with mc's escape codes and cycling dots, the status of every selected object is checked even when its request failed, per-object errors are reported and the exit code stays 0 (JSON summary `status` is always `success`). `--version-id`/`--versions` are not checked against `-r` (mc's check never fires). `--days`, `-r`, `--version-id`, `--versions`, `--enc-c` (SSE-C key sent on the restore-status HEAD, like mc; RestoreObject itself has no SSE-C headers). Invalid keys fail with mc's `Unable to parse encryption keys.`; the cause text differs because mx never echoes the key. |
 | `ilm tier add`, `edit`, `update`, `ls`, `info`, `rm`, `check`, `verify` | Supported | MinIO admin API. All tier types (`minio`, `s3`, `azure` incl. service principal, `gcs`) with madmin's request JSON; mc's messages, errors and lipgloss tables (no terminal). Like mc, `rm`/`update` print an empty line. |
 | `retention set`, `clear`, `info` | Supported | Object and bucket default retention (`--default`). `-r`, `--versions`, `--version-id`, `--rewind`, `--bypass`. Object JSON has mc's `validity:""` and `error` (`null`, or the Go-marshaled server error). |
 | `legalhold set`, `clear`, `info` | Supported | Object legal hold. Works recursively and on versions. Single-object errors follow mc (`info` fatal, `set`/`clear` reported with exit 0). Intentional difference: `info -r --json` prints one document per object (mc prints nothing, a bug). |
 | `event add`, `rm`, `ls` | Supported | Bucket notifications. `--event`, `--prefix`, `--suffix`, `-p`. `rm --force` removes all notifications. |
-| `undo` | Supported | `-r --force`, `--last`, `--action`, `--dry-run`. mc output and errors. |
-| `od` | Supported | Single-stream upload and download measurement. mc output and errors (local sources shown as absolute paths). |
 | `quota set`, `info`, `clear` | Supported | MinIO admin API. Sizes parsed like go-humanize (`1GB` = 10^9, `1GiB` = 2^30). |
 | `replicate add`, `update`, `ls`, `status`, `resync`, `export`, `import`, `rm`, `backlog` | Supported | MinIO admin API. `status` (incl. `--nodes`), `ls`, `export` text and JSON match mc (JSON re-marshaled through minio-go/madmin types). `backlog` text in mc is an interactive bubbletea view: without a terminal mx fails like mc (`could not open a new TTY`); on a terminal mx shows an inline view with mc's columns (spinner while loading, `Total Unreplicated` summary, a 9-row scrollable table, `↑/k` `↓/j` `enter` `q`/ctrl+c). Styling approximates bubbles/lipgloss. `backlog --json` matches mc. |
-| `ping` | Supported | Uses the health endpoint. `-c`, `-e`, `-x/--exit`, `-i`, `-a/--distributed` and `--node` (node list from the admin ServerInfo API). Runs until interrupted when `-c` is not given. Text, summary table and JSON (Go `url.URL` endpoint) match mc; `dns` is always `0s`, and a failing ServerInfo call errors at once (mc retries forever). |
-| `ready` | Supported | `--cluster-read`, `--maintenance`. Retries until the server is ready. |
+
+### Admin
+
+| Command | Status | Notes |
+| --- | --- | --- |
+| `admin info` | Supported | mc layout: per-server block (uptime, version, network, drives, pools), pool table, usage and drive summary; `--offline`. `--json` re-marshals the full `madmin.InfoMessage` in Go field order; a failed request is `{"status":"error","error":...}` with exit 0, like mc. |
+| `admin service restart`, `unfreeze` (hidden `stop`, `freeze`) | Supported | `restart --dry-run`, `-w/--wait` (polls `/minio/health/cluster`). Restart text is a bubbletea view in mc: without a terminal mx fails like mc (`could not open a new TTY`); on a terminal mx prints the final summary. JSON matches mc (restarting/waiting/done states). Legacy API fallback for restart/unfreeze like mc. |
+| `admin update` | Supported | Optional release URL argument, `-y`; confirmation prompt on a terminal. Server results in mc's go-pretty table; errors are the server's. |
+| `admin config get`, `set`, `reset`, `history`, `restore`, `export`, `import` | Supported | Server config text as-is; `--json` parses it like madmin (`kv`, `envOverride`). Without `key=value`, `set`/`reset`/`get` print the server's key help through a Go-compatible tabwriter (`--env`). Like mc, JSON error messages keep the unformatted `%s` template. `history -n/--count`, `-c/--clear`. |
 | `admin user add`, `disable`, `enable`, `remove`, `list`, `info`, `policy` | Supported | MinIO admin API (madmin encrypted requests). `add` prompts for missing keys on a terminal, else reads them from stdin. mc text/JSON; `list` is sorted by access key (mc prints Go map order). `policy` prints the merged policy document. |
 | `admin user svcacct add`, `list`, `remove`, `info`, `edit`/`set`, `enable`, `disable`; `admin user sts info` | Supported | All mc flags (`--access-key --secret-key --policy --name --description --expiry`, hidden `--comment`, `info --policy`). Local policy files are checked like mc's `policy.ParseConfig` (Go JSON error texts); `--expiry` without a zone is read as UTC (mc: local time). |
 | `admin group add`, `remove`, `info`, `list`, `enable`, `disable` | Supported | mc text/JSON. |
 | `admin policy create`, `remove`, `list`, `info`, `attach`, `detach`, `entities` | Supported | `info -f/--policy-file` writes the server's policy bytes; `attach`/`detach` `-u/--user`, `-g/--group` (already applied changes succeed like mc); `entities` `-u -g -p` (repeatable). `list` is sorted by name. `add`/`set`/`unset`/`update` fail with mc's deprecation errors. |
 | `admin accesskey list`, `remove`, `info`, `create`, `edit`, `enable`, `disable`, `sts-revoke` | Supported | Builtin users. `list --users-only --temp-only --svcacc-only --self --all` (tries `--all`, falls back to own keys on `Access Denied.` like mc), `create`/`edit` `--expiry` / `--expiry-duration` (Go durations), `sts-revoke --all --self --token-type`. Relative expiry texts use go-humanize. Policy/action sets are unordered in mc (Go maps); mx keeps the server's order. On a terminal, `--json` indents embedded policies (mc keeps them compact). |
-| `watch` | Supported | Bucket (`ALIAS/BUCKET[/PREFIX]`), all buckets (`ALIAS`) through the MinIO listen API, and local directories through inotify (Linux) with mc's event masks. `--events` (`put,delete,get,replica,ilm,bucket-creation,bucket-removal,scanner`), `--prefix`, `--suffix`, `--recursive`. mc lines `[TIME]   SIZE EVENT URL` and JSON (`events`, `source`); reconnects when the server closes the stream. A failed listen request is reported like mc (`errorIf`, exit 0). Runs until interrupted (SIGINT 130, SIGTERM 143 like mc). Local recursive watches may report a different number of directory `Get` events at startup than mc's notify library. |
+| `admin replicate add`, `update` (`edit`), `remove` (`rm`), `info`, `status`, `resync start`, `status`, `cancel` | Supported | MinIO site replication admin API with madmin's requests (`add`/`update` bodies encrypted). All mc flags (`update --deployment-id --endpoint --mode --bucket-bandwidth --enable/--disable-ilm-expiry-replication`, hidden `--sync`; `remove --all --force`; `status --buckets --policies --users --groups --ilm-expiry-rules --all --bucket --policy --user --group --ilm-expiry-rule`). mc's argument checks, messages, tables and JSON (madmin types in Go field order). Site names in `status` tables are sorted (mc iterates Go maps, so its row order is random when several entities mismatch). `resync status` is mc's live view: nothing with `--json` or when site replication is disabled (like mc); without a terminal it fails like mc (`could not open a new TTY`); on a terminal mx redraws the view without colors until the resync completes or Ctrl-C. |
+| `admin decommission` (`decom`) `start`, `status`, `cancel` | Supported | `pools/*` admin API; `POOL` is the pool as given on the server command line (e.g. `http://server{5...8}/disk{1...4}` or `/data{5...8}`). mc's table, messages and JSON (four-space indent on a terminal, compact otherwise). `status TARGET POOL` of a pool that is not being drained reports mc's non-fatal error with exit status 0; a successful `cancel TARGET POOL` prints nothing. Intentional difference: `cancel TARGET` (no pool) lists the pools being drained; mc panics (index out of range) when a later pool is draining while an earlier one is not. |
+| `admin rebalance start`, `status`, `stop` | Supported | `rebalance/*` admin API (needs two or more pools). mc text, table and JSON (`status --json` is compact like mc's `json.Marshal`). |
+| `admin heal` | Supported | Background heal status (`ALIAS`, `-v`, `-a`, `--storage-class`) and heal sequences (`-r`, `--scan`, `--dry-run`, `--remove`, `--rewrite`, `--pool`, `--set`, `--force-start`, `--force-stop`, `--force`). Without a terminal (or with `-q`) mc's quiet lines `[Green  ->  Green] ITEM` and the `Healed:` summary; `--json` item documents and summary. On a terminal a redrawn status table (approximates mc's). Single-drive servers answer with mc's `XMinioAdminVersionMismatch` error. |
 | `admin trace` | Supported | Every mc flag: `-v`, `-a`, `--call` (types and aliases), `--status-code`, `--method`, `--funcname`, `--path`, `--node`, `--request-header`, `--request-query` (`!` negates), `-e`, `--response-duration`, `--filter-request/--filter-response --filter-size`, `--stats`, `--in`. Short and verbose text and JSON match mc (verbose headers are sorted; mc prints Go map order). Like mc, JSON is indented unless `--json` follows `admin` (or `MC_JSON`) on a non-terminal. `--stats`/`--in` render mc's statistics table without bubbletea (no spinner/keys); without a terminal they fail like mc (`could not open a new TTY`); `--in` does not read `.zst` files. Times are UTC. |
 | `admin scanner trace` | Supported | `-v`, `--funcname`, `--node`, `--path`, `--filter-*`; output as `admin trace`. Like mc, `--response-duration` is a boolean flag there (a value is a usage error). |
+| `admin scanner status` | Supported | `--json` streams `madmin.RealtimeMetrics` (`-n`, `--interval`, `--nodes`); like mc the documents are compact only when `--json` follows the command. Text is mc's live view (terminal only, like mc). `--bucket` stats and `--in` replay (not `.zst`). |
 | `admin logs` | Supported | `--last`, `--type`, `NODENAME`. mc text blocks and JSON (`madmin.LogInfo`); reconnects when the stream ends and exits quietly when the server cannot be reached, like madmin. |
-| `admin heal` | Supported | Background heal status (`ALIAS`, `-v`, `-a`, `--storage-class`) and heal sequences (`-r`, `--scan`, `--dry-run`, `--remove`, `--rewrite`, `--pool`, `--set`, `--force-start`, `--force-stop`, `--force`). Without a terminal (or with `-q`) mc's quiet lines `[Green  ->  Green] ITEM` and the `Healed:` summary; `--json` item documents and summary. On a terminal a redrawn status table (approximates mc's). Single-drive servers answer with mc's `XMinioAdminVersionMismatch` error. |
-| `admin top locks`, `admin top api` | Supported | Deprecated in mc: ``Please use 'mc support top locks'`` (`support` is not implemented). |
-| `cors set`, `get`, `remove` | Preview | `set` accepts XML or JSON. Depends on server CORS support. |
-| `encrypt set`, `info`, `clear` | Supported | `set sse-s3 TARGET` or `set sse-kms KEY_ID TARGET`. `info` on a bucket without auto encryption fails with the server error, like mc. |
+| `admin prometheus generate`, `metrics` | Supported | HS512 bearer token (100 years) signed with the alias secret, YAML/JSON scrape config, `--public`, `--api-version v2\|v3`, `--bucket`, mc's metric type validation. `metrics` prints the server text, `--json` the prom2json families (mc's family order is random). |
+| `admin kms key create`, `status`, `list` | Supported | `/minio/kms/v1` API. Like mc, `create` prints its confirmation only on a terminal. |
+| `admin cluster bucket import`, `export`; `admin cluster iam import`, `export` | Supported | Zip archives saved under mc's names (`ALIAS-BUCKET-metadata.zip`, `ALIAS-iam-info.zip`, `-o`), mode 0600, existing files moved aside with mc's timestamp suffix (UTC). Archives are validated like Go `zip.NewReader` before upload; import reports match mc. |
+| `admin top locks`, `admin top api` | Supported | Deprecated in mc: they only print ``Please use 'mc support top locks'`` (and `api`) like mc; `support` itself is out of scope. |
+| `admin tier`, `bucket`, `profile`, `subnet`, `health` (hidden) | Supported | Deprecated like mc: `admin tier info\|ls\|add\|edit\|verify\|rm` still run `ilm tier`, other forms point to the replacement (`ilm tier`, `quota`, `stat`, `replicate add\|update\|rm`, `support profile`, `support diag`, `support register`). |
+
+### Identity providers
+
+| Command | Status | Notes |
+| --- | --- | --- |
 | `idp ldap add`, `update`, `remove`, `list`, `info`, `enable`, `disable` | Supported | MinIO admin API (`idp-config`, with madmin's `426` fallback). `KEY=VALUE` args are joined like mc; the restart notice follows `x-minio-config-applied`. `list`/`info` render mc's lipgloss boxes (no colors) and 2-space `--json` on a TTY. Like mc, `--json` fatal messages keep the unformatted `%s` template. |
 | `idp ldap policy attach`, `detach`, `entities` | Supported | Encrypted policy association requests; mc text (`Attached Policies: [...]`, entity mappings wrapped at 80 columns) and JSON. |
 | `idp ldap accesskey list`, `info`, `create`, `create-with-login`, `edit`, `enable`, `disable`, `remove`, `sts-revoke` | Supported | mc's flag checks and messages (`--login` is deprecated, `--expiry` in local time, `--expiry-duration` via Go durations). Lists are sorted by DN (mc prints Go map order). `create-with-login` prompts on a terminal like mc (no colors); `sts-revoke` uses the builtin revoke endpoint like mc. Repeated query values (DNs, users) are sent sorted so MinIO's SigV4 check accepts them. |
 | `idp openid add`, `update`, `remove`, `list`, `info`, `enable`, `disable` | Supported | Same implementation as the LDAP commands, with named configurations (`TARGET [CFG_NAME] [CFG_PARAMS...]`). |
 | `idp openid accesskey list`, `info`, `edit`, `enable`, `disable`, `remove` | Supported | `TARGET[:CFGNAME]`, `--all-configs`; mc text and JSON. |
-| `admin info` | Supported | mc layout: per-server block (uptime, version, network, drives, pools), pool table, usage and drive summary; `--offline`. `--json` re-marshals the full `madmin.InfoMessage` in Go field order; a failed request is `{"status":"error","error":...}` with exit 0, like mc. |
-| `admin service restart`, `unfreeze` (hidden `stop`, `freeze`) | Supported | `restart --dry-run`, `-w/--wait` (polls `/minio/health/cluster`). Restart text is a bubbletea view in mc: without a terminal mx fails like mc (`could not open a new TTY`); on a terminal mx prints the final summary. JSON matches mc (restarting/waiting/done states). Legacy API fallback for restart/unfreeze like mc. |
-| `admin update` | Supported | Optional release URL argument, `-y`; confirmation prompt on a terminal. Server results in mc's go-pretty table; errors are the server's. |
-| `admin config get`, `set`, `reset`, `history`, `restore`, `export`, `import` | Supported | Server config text as-is; `--json` parses it like madmin (`kv`, `envOverride`). Without `key=value`, `set`/`reset`/`get` print the server's key help through a Go-compatible tabwriter (`--env`). Like mc, JSON error messages keep the unformatted `%s` template. `history -n/--count`, `-c/--clear`. |
-| `admin prometheus generate`, `metrics` | Supported | HS512 bearer token (100 years) signed with the alias secret, YAML/JSON scrape config, `--public`, `--api-version v2\|v3`, `--bucket`, mc's metric type validation. `metrics` prints the server text, `--json` the prom2json families (mc's family order is random). |
-| `admin kms key create`, `status`, `list` | Supported | `/minio/kms/v1` API. Like mc, `create` prints its confirmation only on a terminal. |
-| `admin scanner status` | Supported | `--json` streams `madmin.RealtimeMetrics` (`-n`, `--interval`, `--nodes`); like mc the documents are compact only when `--json` follows the command. Text is mc's live view (terminal only, like mc). `--bucket` stats and `--in` replay (not `.zst`). |
-| `admin cluster bucket import`, `export`; `admin cluster iam import`, `export` | Supported | Zip archives saved under mc's names (`ALIAS-BUCKET-metadata.zip`, `ALIAS-iam-info.zip`, `-o`), mode 0600, existing files moved aside with mc's timestamp suffix (UTC). Archives are validated like Go `zip.NewReader` before upload; import reports match mc. |
-| `admin tier`, `bucket`, `profile`, `subnet`, `health` (hidden) | Supported | Deprecated like mc: `admin tier info\|ls\|add\|edit\|verify\|rm` still run `ilm tier`, other forms point to the replacement (`ilm tier`, `quota`, `stat`, `replicate add\|update\|rm`, `support profile`, `support diag`, `support register`). |
-| `update` | Intentional difference | mx does not replace its own binary: reports `Unable to update ‘mx’.` like a failed mc update (exit 255). |
-| `admin replicate add`, `update` (`edit`), `remove` (`rm`), `info`, `status`, `resync start`, `status`, `cancel` | Supported | MinIO site replication admin API with madmin's requests (`add`/`update` bodies encrypted). All mc flags (`update --deployment-id --endpoint --mode --bucket-bandwidth --enable/--disable-ilm-expiry-replication`, hidden `--sync`; `remove --all --force`; `status --buckets --policies --users --groups --ilm-expiry-rules --all --bucket --policy --user --group --ilm-expiry-rule`). mc's argument checks, messages, tables and JSON (madmin types in Go field order). Site names in `status` tables are sorted (mc iterates Go maps, so its row order is random when several entities mismatch). `resync status` is mc's live view: nothing with `--json` or when site replication is disabled (like mc); without a terminal it fails like mc (`could not open a new TTY`); on a terminal mx redraws the view without colors until the resync completes or Ctrl-C. |
-| `admin decommission` (`decom`) `start`, `status`, `cancel` | Supported | `pools/*` admin API; `POOL` is the pool as given on the server command line (e.g. `http://server{5...8}/disk{1...4}` or `/data{5...8}`). mc's table, messages and JSON (four-space indent on a terminal, compact otherwise). `status TARGET POOL` of a pool that is not being drained reports mc's non-fatal error with exit status 0; a successful `cancel TARGET POOL` prints nothing. Intentional difference: `cancel TARGET` (no pool) lists the pools being drained; mc panics (index out of range) when a later pool is draining while an earlier one is not. |
-| `admin rebalance start`, `status`, `stop` | Supported | `rebalance/*` admin API (needs two or more pools). mc text, table and JSON (`status --json` is compact like mc's `json.Marshal`). |
-| `batch generate`, `start`, `list`/`ls`, `status`, `describe`, `cancel` | Supported | MinIO admin API (`start-job`, `list-jobs`, `status-job`, `describe-job`, `cancel-job`, batch-job realtime metrics). `generate` asks the server (`generate-job`, `list-supported-job-types`) and falls back to madmin's static `replicate`/`keyrotate`/`expire` templates like mc. `list` text is mc's tablewriter table with go-humanize ages; JSON keys are sorted like mc's map. `status --json` follows the job until it completes; text `status` is mc's live view on a terminal (spinner, then the final table), and without one fails like mc (`could not open a new TTY`). mc ignores `cancel --id` (the job ID is the second argument); mx accepts and ignores it too. |
-| `sql` | Supported | S3 Select (`SelectObjectContent`) via the AWS SDK event stream. `-e/--query`, `-r`, `--csv-input`, `--json-input`, `--compression`, `--csv-output`, `--csv-output-header` (`""` reads the object's first line), `--json-output`, `--enc-c`. mc's option parsing (abbreviations, `\n` escapes), serialization defaults (by extension, gzip/bzip2 by MIME type) and errors; per-object failures are reported and exit 0 like mc. Differences: the list of valid option keys in errors has a fixed order (mc prints a Go map in random order); folder listings pick objects by extension only (mc also reads the listed `content-type` user metadata). |
 
-## Global options
+### Batch jobs
+
+| Command | Status | Notes |
+| --- | --- | --- |
+| `batch generate`, `start`, `list`/`ls`, `status`, `describe`, `cancel` | Supported | MinIO admin API (`start-job`, `list-jobs`, `status-job`, `describe-job`, `cancel-job`, batch-job realtime metrics). `generate` asks the server (`generate-job`, `list-supported-job-types`) and falls back to madmin's static `replicate`/`keyrotate`/`expire` templates like mc. `list` text is mc's tablewriter table with go-humanize ages; JSON keys are sorted like mc's map. `status --json` follows the job until it completes; text `status` is mc's live view on a terminal (spinner, then the final table), and without one fails like mc (`could not open a new TTY`). mc ignores `cancel --id` (the job ID is the second argument); mx accepts and ignores it too. |
+
+### Health and client
+
+| Command | Status | Notes |
+| --- | --- | --- |
+| `ping` | Supported | Uses the health endpoint. `-c`, `-e`, `-x/--exit`, `-i`, `-a/--distributed` and `--node` (node list from the admin ServerInfo API). Runs until interrupted when `-c` is not given. Text, summary table and JSON (Go `url.URL` endpoint) match mc; `dns` is always `0s`, and a failing ServerInfo call errors at once (mc retries forever). |
+| `ready` | Supported | `--cluster-read`, `--maintenance`. Retries until the server is ready. |
+| `update` | Out of scope | mc's client self-update. mx does not replace its own binary: it fails like a failed mc update (``Unable to update ‘mx’.``, exit 255). |
+
+## Global options and client behavior
 
 - `--json`: like mc, one compact JSON document per line when stdout is not a
   terminal, one-space indented JSON on a terminal. Go HTML escaping (`\u003c`
@@ -170,38 +202,59 @@ start, and fails with Go's `read tcp LOCAL->REMOTE: i/o timeout`. mc only honors
 the command name (before it the subcommand's 10m default wins); mx honors both positions.
 Without the flags no deadline applies (mc defaults to 10m).
 
+
 ## Intentional differences from mc
 
-- `cp`/`mv` output: the old `Copied ...` text and the JSON `bytes` field were
-  replaced by mc-style lines, a summary, and compact JSON.
-- `rm` output now matches mc's lines and JSON. This is a breaking change from
-  earlier `mx` output.
-- `mv -r` removes local source directories that it empties. mc leaves them.
-- `mirror` on a terminal prints the same lines and summary as mc does without a
-  terminal (or with `-q`); mc shows a progress bar there instead.
-- `mirror -w` and `find --watch` rescan by polling. They do not use event
-  notifications.
-- `pipe`: mc reads `--json`/`--quiet` for its progress residue only when they follow the
-  command name, so `mc --json pipe` prints ` 0 B / ? ` before the JSON document. mx drops the
-  residue whenever `--json`/`-q` is set.
-- `cp`/`mv --json` `totalCount` is the number of planned copies. mc reads its URL counter
-  while the listing is still running, so its value varies between runs.
-- `find` on a local file prints the file only; mc also prints a `readdirent ...:
-  not a directory` error and exits 1.
-- `stat`, `ls --versions`, and similar output show dates in UTC.
+Only where mc's output is random, buggy or tied to mc itself:
+
+- Go map order: where mc prints a Go map (random order), mx sorts: `admin user list`,
+  `admin policy list`, `idp ldap` lists (by DN), `admin replicate status` site names,
+  `admin trace -v` headers, `sql` option keys in errors, `share upload` curl `-F` fields.
+  `admin accesskey` policy/action sets keep the server's order.
+- mc bugs not reproduced: `legalhold info -r --json` prints one document per object (mc
+  prints nothing); `admin decommission cancel TARGET` lists the draining pools (mc panics
+  when a later pool drains while an earlier one does not); `stat --versions` describes
+  delete markers (mc fails with `MethodNotAllowed`); `find` on a local file prints the
+  file (mc also errors with `readdirent`).
+- `pipe`: the ` 0 B / ? ` residue is dropped whenever `--json`/`-q` is set (mc only
+  checks them after the command name). mx also honors `--conn-*-deadline` before the
+  command name.
+- `cp`/`mv --json` `totalCount` is the number of planned copies (mc's value races with
+  its listing). `mv -r` removes local source directories that it empties.
+- `mirror` on a terminal prints mc's non-terminal lines and summary (no progress bar).
+  `mirror -w` and `find --watch` rescan by polling instead of using notifications.
+- `admin user svcacct --expiry` without a zone is UTC (mc: local time). Dates in
+  output are UTC.
+- The TLS trust prompt's saved certificate is trusted at once (mc fails its first probe).
+- `update` does not self-update (out of scope); the help pages differ only as listed
+  under Help above.
 
 ## Remaining gaps
 
-- Command output is compared (after normalizing timestamps, version IDs, signatures, ...) with the pinned mc release
-  (`tests/mc.version`) by `tests/live_mc_parity.rs`; all cases pass. Help output is
-  compared for every command by `tests/live_mc_parity_help.rs` (differences listed under
-  Global options). Some errors differ where mc depends on minio-go internals
-  (bucket location lookups).
-- Transport errors of S3 commands (TLS verification, deadlines) lack mc's
-  `Get "URL": ` prefix, and JSON errors do not embed Go's `url.Error` struct.
-- `replicate backlog` on a terminal approximates the bubbletea view (no lipgloss colors
-  or exact borders).
-- `share upload` sorts the curl `-F` fields; `ping` reports `dns` as `0s`.
+Known gaps are `#[ignore = "parity: ..."]` cases in `tests/live_mc_parity*.rs`:
+
+- Transport errors of S3 commands (TLS verification, deadlines, unreachable servers)
+  lack mc's `Get "URL": ` prefix (the SDK error carries no request URL; mc's first
+  request is minio-go's `GetBucketLocation`). Admin commands have the prefix.
+- JSON transport errors do not embed Go's `*url.Error` (`Op`, `URL`, nested
+  `net.OpError`, x509 certificate) under `cause.error` (S3 and admin commands).
+- Some other S3 errors differ where mc depends on minio-go internals (bucket location
+  lookups).
+
+Implemented but not fully verifiable against a server:
+
+- `admin user sts info`: only the error path (unknown key) is tested; the success path
+  needs STS credentials.
+- `ilm tier add azure|gcs`: tested up to MinIO's backend validation (no cloud accounts).
+- `ilm restore --enc-c` end to end: the live test is best effort and skips when MinIO
+  does not transition the SSE-C object.
+
+Terminal-only views approximate mc's bubbletea/lipgloss rendering (no colors, borders
+may differ; content and keys match): `replicate backlog`, `admin heal`, `admin service
+restart`, `admin replicate resync status`, `admin trace --stats`, `admin scanner
+status`, `batch status`. Their non-terminal behavior and `--json` match mc.
+`admin trace --in` / `admin scanner status --in` do not read `.zst` files. Local `watch`
+uses inotify (Linux only).
 
 ## Container and release binaries
 
@@ -212,6 +265,3 @@ Without the flags no deadline applies (mc defaults to 10m).
   `mc-linux-arm64`. See `.github/workflows/release.yml`.
 
 Unsupported options fail. The client does not silently ignore them.
-
-The project does not implement `mc admin`, AIStor license operations, IDP,
-support, batch, SQL, watch, update, or mount operations.
