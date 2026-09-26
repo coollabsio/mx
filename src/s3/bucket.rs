@@ -5,7 +5,7 @@
 //! `ExpiredObjectAllVersions`, raw CORS XML) are sent by replacing the serialized request body
 //! ([`RawBody`]) and read by capturing the raw response ([`Capture`]).
 
-use super::{ObjectInfo, build_client, delete_all_versions, delete_keys, list_object_infos};
+use super::{build_client, delete_all_versions, delete_keys, list_object_infos};
 use crate::config::model::AliasConfig;
 use anyhow::{Context, Result, anyhow, bail};
 use aws_sdk_s3::Client;
@@ -843,68 +843,6 @@ pub async fn delete_tags(
         client.delete_bucket_tagging().bucket(bucket).send().await?;
     }
     Ok(())
-}
-
-/// All versions and delete markers of exactly `key`, newest first. `ObjectInfo::key` is the
-/// full key.
-pub async fn list_key_versions(
-    client: &Client,
-    bucket: &str,
-    key: &str,
-) -> Result<Vec<ObjectInfo>> {
-    let mut key_marker: Option<String> = None;
-    let mut version_marker: Option<String> = None;
-    let mut items = Vec::new();
-    loop {
-        let response = client
-            .list_object_versions()
-            .bucket(bucket)
-            .prefix(key)
-            .set_key_marker(key_marker.take())
-            .set_version_id_marker(version_marker.take())
-            .send()
-            .await?;
-        for version in response.versions() {
-            if version.key() == Some(key) {
-                items.push(ObjectInfo {
-                    key: key.to_string(),
-                    size: version.size().unwrap_or(0),
-                    last_modified: version.last_modified().and_then(super::to_system_time),
-                    etag: version.e_tag().map(str::to_string),
-                    version_id: version.version_id().map(str::to_string),
-                    is_latest: version.is_latest().unwrap_or(false),
-                    ..Default::default()
-                });
-            }
-        }
-        for marker in response.delete_markers() {
-            if marker.key() == Some(key) {
-                items.push(ObjectInfo {
-                    key: key.to_string(),
-                    last_modified: marker.last_modified().and_then(super::to_system_time),
-                    version_id: marker.version_id().map(str::to_string),
-                    is_latest: marker.is_latest().unwrap_or(false),
-                    is_delete_marker: true,
-                    ..Default::default()
-                });
-            }
-        }
-        if !response.is_truncated().unwrap_or(false) {
-            break;
-        }
-        key_marker = response.next_key_marker().map(str::to_string);
-        version_marker = response.next_version_id_marker().map(str::to_string);
-        if key_marker.is_none() {
-            break;
-        }
-    }
-    items.sort_by(|left, right| {
-        right
-            .is_latest
-            .cmp(&left.is_latest)
-            .then_with(|| right.last_modified.cmp(&left.last_modified))
-    });
-    Ok(items)
 }
 
 // ---------------------------------------------------------------------------
