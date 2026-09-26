@@ -46,6 +46,11 @@ server support that varies between S3-compatible servers.
 | `ready` | Supported | `--cluster-read`, `--maintenance`. Retries until the server is ready. |
 | `cors set`, `get`, `remove` | Preview | `set` accepts XML or JSON. Depends on server CORS support. |
 | `encrypt set`, `info`, `clear` | Supported | `set sse-s3 TARGET` or `set sse-kms KEY_ID TARGET`. `info` on a bucket without auto encryption fails with the server error, like mc. |
+| `idp ldap add`, `update`, `remove`, `list`, `info`, `enable`, `disable` | Supported | MinIO admin API (`idp-config`, with madmin's `426` fallback). `KEY=VALUE` args are joined like mc; the restart notice follows `x-minio-config-applied`. `list`/`info` render mc's lipgloss boxes (no colors) and 2-space `--json` on a TTY. Like mc, `--json` fatal messages keep the unformatted `%s` template. |
+| `idp ldap policy attach`, `detach`, `entities` | Supported | Encrypted policy association requests; mc text (`Attached Policies: [...]`, entity mappings wrapped at 80 columns) and JSON. |
+| `idp ldap accesskey list`, `info`, `create`, `create-with-login`, `edit`, `enable`, `disable`, `remove`, `sts-revoke` | Supported | mc's flag checks and messages (`--login` is deprecated, `--expiry` in local time, `--expiry-duration` via Go durations). Lists are sorted by DN (mc prints Go map order). `create-with-login` prompts on a terminal like mc (no colors); `sts-revoke` uses the builtin revoke endpoint like mc. Repeated query values (DNs, users) are sent sorted so MinIO's SigV4 check accepts them. |
+| `idp openid add`, `update`, `remove`, `list`, `info`, `enable`, `disable` | Supported | Same implementation as the LDAP commands, with named configurations (`TARGET [CFG_NAME] [CFG_PARAMS...]`). |
+| `idp openid accesskey list`, `info`, `edit`, `enable`, `disable`, `remove` | Supported | `TARGET[:CFGNAME]`, `--all-configs`; mc text and JSON. |
 
 ## Global options
 
