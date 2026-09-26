@@ -200,20 +200,76 @@ fn stat_help_lists_mc_flags() {
 }
 
 #[test]
-fn du_and_tree_accept_rewind_and_reject_local_versions() {
+fn du_and_tree_ignore_versions_on_local_paths() {
+    // Like mc, local listings ignore --versions / --rewind.
+    let home = tempfile::tempdir().expect("tempdir");
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(dir.path().join("a.txt"), "abc").unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/a.txt"), "abc").unwrap();
     let path = dir.path().to_str().unwrap();
-    fails_with(&["du", "--versions", path], "only supported for S3 targets");
-    fails_with(
-        &["du", "--rewind", "1d", path],
-        "only supported for S3 targets",
-    );
-    fails_with(
-        &["tree", "--rewind", "1d", path],
-        "only supported for S3 targets",
-    );
+    let label = path.trim_matches('/');
+    mx(home.path())
+        .args(["du", "--versions", path])
+        .assert()
+        .success()
+        .stdout(format!("3B\t1 version\t{label}\n"));
+    mx(home.path())
+        .args(["du", "--rewind", "1d", "-r", path])
+        .assert()
+        .success()
+        .stdout(format!(
+            "3B\t1 object\t{label}/sub\n3B\t1 object\t{label}\n"
+        ));
+    mx(home.path())
+        .args(["tree", "--rewind", "1d", "-f", path])
+        .assert()
+        .success()
+        .stdout(format!("{path}\n└─ sub\n   └─ a.txt\n"));
     fails_with(&["du", "--rewind", "later", "local/b/"], "invalid time");
+}
+
+#[test]
+fn ls_lists_local_folders_like_mc() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("a.txt"), "abc").unwrap();
+    std::fs::write(dir.path().join("sub/b.txt"), "b").unwrap();
+    let path = dir.path().to_str().unwrap();
+    let out = mx(home.path())
+        .args(["ls", "-r", "--summarize", path])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(lines.len(), 5, "{text}");
+    assert!(
+        lines[0].starts_with('[') && lines[0].ends_with("]     3B a.txt"),
+        "{text}"
+    );
+    assert!(lines[1].ends_with("]     1B sub/b.txt"), "{text}");
+    assert_eq!(lines[2..], ["", "Total Size: 4 B", "Total Objects: 2"]);
+    let out = mx(home.path())
+        .args(["--json", "ls", path])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let docs: Vec<serde_json::Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(docs.len(), 2);
+    assert_eq!(docs[0]["key"], "a.txt");
+    assert_eq!(docs[0]["type"], "file");
+    assert_eq!(docs[1]["key"], "sub/");
+    assert_eq!(docs[1]["type"], "folder");
+    assert_eq!(docs[1]["url"], format!("{path}/"));
 }
 
 #[test]

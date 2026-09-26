@@ -1,18 +1,18 @@
-use crate::commands::stat::{human_bytes, rfc3339};
+use crate::commands::stat::{human_bytes, print_date};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::config::model::AliasConfig;
 use crate::error::nonfatal;
 use crate::flags::RewindFlag;
 use crate::location::{Location, parse_location};
-use crate::s3::{ListOptions, ObjectInfo, S3ListItem};
+use crate::s3::{ListOptions, ObjectInfo};
 use crate::target::TargetRef;
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
+use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
 use clap::Args;
 use serde::Serialize;
-use std::cmp::Ordering;
-use std::io::{self, Write};
-use std::time::SystemTime;
-use tabwriter::TabWriter;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Args)]
 #[command(mut_args(|a| if a.get_id().as_str() == "rewind" {
@@ -41,7 +41,9 @@ pub struct LsArgs {
     /// list files inside zip archive (MinIO servers only)
     #[arg(long)]
     pub zip: bool,
-    pub target: String,
+    /// targets to list (default: current folder)
+    #[arg(value_name = "TARGET")]
+    pub targets: Vec<String>,
 }
 
 /// Validates flag combinations for `ls`.
@@ -63,358 +65,526 @@ pub fn validate(args: &LsArgs, target: &TargetRef) -> Result<()> {
 
 pub fn run(args: LsArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
-    if let Location::Local(path) = parse_location(&args.target, store.config()) {
-        return list_local(&path.to_string_lossy());
-    }
-    let target = TargetRef::parse(&args.target)?;
-    validate(&args, &target)?;
     let rewind = args.rewind.at(SystemTime::now())?;
-    let alias = alias_config(&store, &target.alias)?;
-
-    let runtime = runtime()?;
-    let mut entries = list_entries(&runtime, &alias, &target, &args, rewind)
-        .map_err(|error| {
+    let targets = if args.targets.is_empty() {
+        vec![".".to_string()]
+    } else {
+        args.targets.clone()
+    };
+    if targets.iter().any(|target| target.trim().is_empty()) {
+        return Err(
+            anyhow::Error::new(crate::error::McError::invalid_argument())
+                .context("Unable to validate empty argument."),
+        );
+    }
+    let opts = ListOpts {
+        recursive: args.recursive,
+        incomplete: args.incomplete,
+        versions: args.versions,
+        rewind,
+        zip: args.zip,
+    };
+    let rt = runtime()?;
+    let mut failed = false;
+    for input in &targets {
+        if let Location::S3(target) = parse_location(input, store.config()) {
+            validate(&args, &target)?;
+        }
+        let listing = list(&store, &rt, input, &opts).map_err(|error| {
             // mc checks a bucket root with `bucketStat` first (``Bucket `b` does not exist.``);
             // other listings report the server's message.
-            let plain = target.key.is_none() && !args.recursive && !args.versions;
-            match &target.bucket {
-                Some(bucket)
-                    if plain
-                        && rewind.is_none()
-                        && !args.incomplete
-                        && crate::error::error_code(&error) == Some("NoSuchBucket") =>
+            match parse_location(input, store.config()) {
+                Location::S3(TargetRef {
+                    bucket: Some(bucket),
+                    key: None,
+                    ..
+                }) if !args.recursive
+                    && !args.versions
+                    && rewind.is_none()
+                    && !args.incomplete
+                    && crate::error::error_code(&error) == Some("NoSuchBucket") =>
                 {
-                    crate::error::McError::bucket_not_found(bucket).into()
+                    crate::error::McError::bucket_not_found(&bucket).into()
                 }
                 _ => error,
             }
-        })
-        .context(nonfatal("Unable to list folder."))?;
-    if let Some(class) = args.storage_class.as_deref() {
-        entries.retain(|entry| entry.matches_storage_class(class));
-    }
-    entries.sort_by(compare_entries);
-
-    let objects: Vec<_> = entries
-        .iter()
-        .filter(|entry| entry.kind == Kind::Object)
-        .collect();
-    let total_objects = objects.len();
-    let total_size: i64 = objects.iter().filter_map(|entry| entry.size).sum();
-    let show_versions = args.versions || rewind.is_some();
-
-    if json {
-        for entry in &entries {
-            crate::output::print_json(&ListMessage::from_entry(&args.target, entry))?;
-        }
+        });
+        let (objects, size) = match listing {
+            Ok(listing) => print_listing(&listing, args.storage_class.as_deref(), json)?,
+            Err(error) => {
+                crate::output::print_error(&error.context(nonfatal("Unable to list folder.")));
+                failed = true;
+                (0, 0)
+            }
+        };
         if args.summarize {
-            crate::output::print_json(&serde_json::json!({
-                "totalObjects": total_objects,
-                "totalSize": total_size,
-            }))?;
+            print_summary(objects, size, json)?;
         }
-        return Ok(());
     }
-
-    print_plain(&entries, show_versions)?;
-    if args.summarize {
-        println!(
-            "\nTotal Size: {}\nTotal Objects: {total_objects}",
-            human_bytes(total_size.max(0) as u64)
-        );
+    if failed {
+        return Err(crate::output::Exit(1).into());
     }
     Ok(())
 }
 
-/// mc lists local paths (and unknown aliases, which it treats as local paths) by reading the
-/// parent folder of the last path element. mx does not list local folders; a missing folder
-/// fails like mc, a prefix without matches lists nothing.
-fn list_local(input: &str) -> Result<()> {
-    let dir = if input.ends_with('/') {
-        input.trim_end_matches('/').to_string()
-    } else {
-        match input.rfind('/') {
-            Some(index) => input[..index].to_string(),
-            None => ".".to_string(),
+/// Listing options (mc `doListOptions` / `ListOptions`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ListOpts {
+    pub recursive: bool,
+    pub incomplete: bool,
+    /// Every version and delete marker.
+    pub versions: bool,
+    /// State as of this time (with `versions`: every version at or before it).
+    pub rewind: Option<SystemTime>,
+    pub zip: bool,
+}
+
+/// One listed entry (mc `ClientContent` plus its version ordinal).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Content {
+    /// Key relative to the listed folder; folders end with `/`.
+    pub key: String,
+    pub time: SystemTime,
+    pub size: i64,
+    /// ETag without quotes.
+    pub etag: String,
+    pub is_dir: bool,
+    pub storage_class: String,
+    pub version_id: String,
+    pub is_delete_marker: bool,
+    /// mc `versionOrdinal` (latest = highest; 1 for plain listings).
+    pub ordinal: usize,
+}
+
+impl Content {
+    fn folder(key: String, time: SystemTime, size: i64) -> Self {
+        Self {
+            key,
+            time,
+            size,
+            etag: String::new(),
+            is_dir: true,
+            storage_class: String::new(),
+            version_id: String::new(),
+            is_delete_marker: false,
+            ordinal: 1,
         }
+    }
+}
+
+/// Result of listing one target: mc's target URL (`url` in JSON) and the entries in mc order.
+#[derive(Debug, Clone)]
+pub(crate) struct Listing {
+    pub url: String,
+    pub contents: Vec<Content>,
+}
+
+/// Lists one target like mc `ls` (a folder target without a trailing `/` is listed as a
+/// folder): S3 targets, the alias root (buckets) and local paths.
+pub(crate) fn list(
+    store: &ConfigStore,
+    rt: &tokio::runtime::Runtime,
+    input: &str,
+    opts: &ListOpts,
+) -> Result<Listing> {
+    match parse_location(input, store.config()) {
+        Location::Local(_) => list_local(input, opts),
+        Location::S3(target) => {
+            let alias = alias_config(store, &target.alias)?;
+            rt.block_on(list_s3(&alias, &target, opts))
+        }
+    }
+}
+
+async fn list_s3(alias: &AliasConfig, target: &TargetRef, opts: &ListOpts) -> Result<Listing> {
+    let client = crate::s3::build_client(alias).await?;
+    let base = alias.url.trim_end_matches('/');
+    let options = ListOptions {
+        recursive: opts.recursive,
+        versions: opts.versions || opts.rewind.is_some(),
+        incomplete: opts.incomplete,
+        zip: opts.zip,
+        ..Default::default()
     };
-    let dir = if dir.is_empty() { "/".to_string() } else { dir };
-    if !std::path::Path::new(&dir).is_dir() {
-        return Err(anyhow::Error::new(crate::error::local_not_found(&dir))
-            .context(nonfatal("Unable to list folder.")));
-    }
-    let prefix = input.rsplit('/').next().unwrap_or_default();
-    let matches = std::fs::read_dir(&dir)?
-        .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().starts_with(prefix));
-    if matches {
-        return Err(crate::error::McError::new(format!(
-            "Listing local path `{input}` is not supported."
-        )))
-        .context(nonfatal("Unable to list folder."));
-    }
-    Ok(())
-}
-
-fn list_entries(
-    runtime: &tokio::runtime::Runtime,
-    alias: &crate::config::model::AliasConfig,
-    target: &TargetRef,
-    args: &LsArgs,
-    rewind: Option<SystemTime>,
-) -> Result<Vec<Entry>> {
-    Ok(match &target.bucket {
-        None => runtime
-            .block_on(crate::s3::list_target(alias, target, args.recursive))?
-            .into_iter()
-            .map(Entry::from_list_item)
-            .collect(),
-        Some(bucket) => {
-            let prefix = target.key_with_trailing_slash();
-            let options = ListOptions {
-                recursive: args.recursive,
-                versions: args.versions || rewind.is_some(),
-                incomplete: args.incomplete,
-                zip: args.zip,
-                ..Default::default()
-            };
-            let items = runtime.block_on(async {
-                let client = crate::s3::build_client(alias).await?;
-                crate::s3::list_objects_with(&client, bucket, prefix.as_deref(), &options).await
-            })?;
-            let show_versions = args.versions || rewind.is_some();
-            select_entries(items, show_versions, args.versions, rewind)
+    let Some(bucket) = &target.bucket else {
+        let buckets = crate::s3::list_bucket_infos(&client).await?;
+        let mut contents = Vec::new();
+        for (name, created) in buckets {
+            if !opts.recursive {
+                contents.push(Content::folder(
+                    format!("{name}/"),
+                    created.unwrap_or(UNIX_EPOCH),
+                    0,
+                ));
+                continue;
+            }
+            let items = crate::s3::list_raw(&client, &name, "", &options).await?;
+            contents.extend(
+                select(items, opts)
+                    .into_iter()
+                    .map(|(item, ordinal)| content(&name, "", item, ordinal)),
+            );
         }
-    })
+        return Ok(Listing {
+            url: format!("{base}/"),
+            contents,
+        });
+    };
+    let mut key = target.key_with_trailing_slash().unwrap_or_default();
+    if !key.is_empty()
+        && !key.ends_with('/')
+        && crate::s3::prefix_has_entries(&client, bucket, &format!("{key}/"), options.versions)
+            .await
+            .unwrap_or(false)
+    {
+        key.push('/');
+    }
+    let url = format!("{base}/{bucket}/{key}");
+    let prefix_path = &key[..key.rfind('/').map_or(0, |index| index + 1)];
+    // MinIO lists zip contents only below `archive.zip/`; mc keeps the keys relative to the
+    // target's folder (`archive.zip/inner.txt`).
+    let request = if opts.zip && !key.is_empty() && !key.ends_with('/') {
+        format!("{key}/")
+    } else {
+        key.clone()
+    };
+    let items = crate::s3::list_raw(&client, bucket, &request, &options).await?;
+    let contents = select(items, opts)
+        .into_iter()
+        .map(|(item, ordinal)| content("", prefix_path, item, ordinal))
+        .collect();
+    Ok(Listing { url, contents })
 }
 
-/// Turns a version listing into entries with mc version ordinals (latest = highest).
-/// Without `all_versions`, only the newest entry per key is kept and deleted keys are dropped
-/// (this is the `--rewind` view; the listing was already restricted to `<= rewind`).
-fn select_entries(
-    items: Vec<ObjectInfo>,
-    show_versions: bool,
-    all_versions: bool,
-    rewind: Option<SystemTime>,
-) -> Vec<Entry> {
-    if !show_versions {
-        return items.into_iter().map(Entry::from_object_info).collect();
+/// Version selection: `versions` keeps every version (at or before `rewind`), numbered newest
+/// highest; `rewind` alone keeps the newest version at that time unless it is a delete
+/// marker (numbered with the count of versions). Plain listings pass through.
+fn select(items: Vec<ObjectInfo>, opts: &ListOpts) -> Vec<(ObjectInfo, usize)> {
+    if !opts.versions && opts.rewind.is_none() {
+        return items.into_iter().map(|item| (item, 1)).collect();
     }
-    let items = match rewind {
+    let items = match opts.rewind {
         Some(at) => crate::s3::versions_before(items, at),
         None => items,
     };
-    let mut entries = Vec::new();
+    let mut out = Vec::new();
     let mut index = 0;
     while index < items.len() {
-        let end = if items[index].is_prefix {
-            index + 1
-        } else {
-            index
-                + items[index..]
-                    .iter()
-                    .take_while(|item| !item.is_prefix && item.key == items[index].key)
-                    .count()
-        };
-        let count = end - index;
-        for (position, item) in items[index..end].iter().enumerate() {
-            let mut entry = Entry::from_object_info(item.clone());
-            if !item.is_prefix {
-                entry.version_ordinal = Some(count - position);
-            }
-            if all_versions || item.is_prefix {
-                entries.push(entry);
-            } else {
+        if items[index].is_prefix {
+            out.push((items[index].clone(), 1));
+            index += 1;
+            continue;
+        }
+        let end = index
+            + items[index..]
+                .iter()
+                .take_while(|item| !item.is_prefix && item.key == items[index].key)
+                .count();
+        let mut group = items[index..end].to_vec();
+        if opts.rewind.is_some() {
+            group.sort_by_key(|item| std::cmp::Reverse(item.last_modified));
+        }
+        let count = group.len();
+        for (position, item) in group.into_iter().enumerate() {
+            if !opts.versions {
                 if !item.is_delete_marker {
-                    entries.push(entry);
+                    out.push((item, count));
                 }
                 break;
             }
+            out.push((item, count - position));
         }
         index = end;
     }
-    entries
+    out
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Kind {
-    Bucket,
-    Prefix,
-    Object,
-}
-
-#[derive(Debug, Clone)]
-struct Entry {
-    kind: Kind,
-    name: String,
-    size: Option<i64>,
-    last_modified: Option<String>,
-    etag: Option<String>,
-    storage_class: Option<String>,
-    version_id: Option<String>,
-    version_ordinal: Option<usize>,
-    is_delete_marker: bool,
-}
-
-impl Entry {
-    fn from_list_item(item: S3ListItem) -> Self {
-        match item {
-            S3ListItem::Bucket {
-                name,
-                last_modified,
-            } => Self::new(Kind::Bucket, name, last_modified),
-            S3ListItem::Prefix { name } => Self::new(Kind::Prefix, name, None),
-            S3ListItem::Object {
-                name,
-                size,
-                last_modified,
-                etag,
-                storage_class,
-                ..
-            } => Self {
-                size,
-                etag,
-                storage_class,
-                ..Self::new(Kind::Object, name, last_modified)
-            },
-        }
-    }
-
-    fn from_object_info(item: ObjectInfo) -> Self {
-        if item.is_prefix {
-            return Self::new(Kind::Prefix, item.key, None);
-        }
-        Self {
-            size: Some(item.size),
-            etag: item.etag,
-            storage_class: item.storage_class,
-            version_id: item.version_id,
-            is_delete_marker: item.is_delete_marker,
-            ..Self::new(Kind::Object, item.key, item.last_modified.map(rfc3339))
-        }
-    }
-
-    fn new(kind: Kind, name: String, last_modified: Option<String>) -> Self {
-        Self {
-            kind,
-            name,
-            size: None,
-            last_modified,
-            etag: None,
-            storage_class: None,
-            version_id: None,
-            version_ordinal: None,
-            is_delete_marker: false,
-        }
-    }
-
-    /// mc `--storage-class` filter: entries without a storage class always pass.
-    fn matches_storage_class(&self, class: &str) -> bool {
-        match self.storage_class.as_deref() {
-            Some(value) if !class.is_empty() && class != "*" => value == class,
-            _ => true,
-        }
-    }
-
-    /// `VERSION_ID vN PUT|DEL` like mc's version column.
-    fn version_text(&self) -> String {
-        match (&self.version_id, self.version_ordinal) {
-            (Some(id), Some(ordinal)) => {
-                let op = if self.is_delete_marker { "DEL" } else { "PUT" };
-                format!("{id} v{ordinal} {op}")
-            }
-            _ => "-".into(),
-        }
-    }
-}
-
-fn print_plain(entries: &[Entry], show_versions: bool) -> Result<()> {
-    let mut writer = TabWriter::new(io::stdout()).padding(2);
-    if show_versions {
-        writeln!(writer, "Type\tModified\tSize\tVersion\tName")?;
+/// Listed S3 entry; `bucket` prefixes keys of alias-root recursive listings.
+fn content(bucket: &str, prefix_path: &str, item: ObjectInfo, ordinal: usize) -> Content {
+    let key = item.key.strip_prefix(prefix_path).unwrap_or(&item.key);
+    let key = if bucket.is_empty() {
+        key.to_string()
     } else {
-        writeln!(writer, "Type\tModified\tSize\tName")?;
+        format!("{bucket}/{key}")
+    };
+    if item.is_prefix {
+        // mc reports common prefixes with the current time.
+        return Content::folder(key, SystemTime::now(), 0);
     }
+    let storage_class = match item.storage_class {
+        Some(class) => class,
+        // MinIO reports delete markers as STANDARD; the SDK drops the field.
+        None if item.is_delete_marker => "STANDARD".to_string(),
+        None => String::new(),
+    };
+    Content {
+        // mc reports folder-marker objects (`dir/`) as folders.
+        is_dir: key.ends_with('/'),
+        key,
+        time: item.last_modified.unwrap_or(UNIX_EPOCH),
+        size: item.size,
+        etag: item.etag.unwrap_or_default().trim_matches('"').to_string(),
+        storage_class,
+        version_id: item.version_id.unwrap_or_default(),
+        is_delete_marker: item.is_delete_marker,
+        ordinal,
+    }
+}
 
-    for entry in entries {
-        let (kind, modified, size, name) = plain_row(entry);
-        if show_versions {
-            let version = entry.version_text();
-            writeln!(writer, "{kind}\t{modified}\t{size}\t{version}\t{name}")?;
+// ---------------------------------------------------------------------------
+// local listing (mc fsClient)
+// ---------------------------------------------------------------------------
+
+/// Local folder listing like mc: a folder lists its entries, a file itself, anything else
+/// the entries of its parent folder starting with the path; `recursive` walks files only.
+fn list_local(input: &str, opts: &ListOpts) -> Result<Listing> {
+    let abs = crate::error::abs_path(input);
+    let is_dir = input.ends_with('/') || Path::new(&abs).is_dir();
+    let fpath = if is_dir && abs != "/" {
+        format!("{abs}/")
+    } else {
+        abs
+    };
+    let prefix_path = fpath[..fpath.rfind('/').map_or(0, |index| index + 1)].to_string();
+    let mut found = Vec::new();
+    if opts.recursive {
+        let (dir, file_prefix) = if fpath.ends_with('/') {
+            (fpath.clone(), String::new())
         } else {
-            writeln!(writer, "{kind}\t{modified}\t{size}\t{name}")?;
+            (prefix_path.clone(), fpath.clone())
+        };
+        walk(&dir, &file_prefix, &mut found)?;
+    } else if fpath.ends_with('/') {
+        let dir = if fpath == "/" {
+            "/"
+        } else {
+            fpath.trim_end_matches('/')
+        };
+        for (path, meta) in read_dir_sorted(dir)? {
+            found.push((path, meta));
+        }
+    } else if let Ok(meta) = std::fs::metadata(&fpath) {
+        found.push((fpath.clone(), meta));
+    } else {
+        let dir = if prefix_path == "/" {
+            "/"
+        } else {
+            prefix_path.trim_end_matches('/')
+        };
+        for (path, meta) in read_dir_sorted(dir)? {
+            if path.starts_with(&fpath) {
+                found.push((path, meta));
+            }
         }
     }
+    let contents = found
+        .into_iter()
+        .map(|(path, meta)| {
+            let mut key = path.strip_prefix(&prefix_path).unwrap_or(&path).to_string();
+            if meta.is_dir() {
+                key.push('/');
+            }
+            Content {
+                time: meta.modified().unwrap_or(UNIX_EPOCH),
+                size: meta.len() as i64,
+                is_dir: meta.is_dir(),
+                ..Content::folder(key, UNIX_EPOCH, 0)
+            }
+        })
+        .collect();
+    Ok(Listing {
+        url: fpath,
+        contents,
+    })
+}
 
-    writer.flush()?;
+/// Regular files and folders of `dir` (symlinks followed, broken ones skipped) as absolute
+/// paths, in mc's lexical order (folders compare with a trailing `/`).
+fn read_dir_sorted(dir: &str) -> Result<Vec<(String, std::fs::Metadata)>> {
+    let entries = std::fs::read_dir(dir).map_err(|error| crate::error::io_error(&error, dir))?;
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "lost+found" {
+            continue;
+        }
+        let path = if dir.ends_with('/') {
+            format!("{dir}{name}")
+        } else {
+            format!("{dir}/{name}")
+        };
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if meta.is_file() || meta.is_dir() {
+            out.push((path, meta));
+        }
+    }
+    out.sort_by_cached_key(|(path, meta)| {
+        if meta.is_dir() {
+            format!("{path}/")
+        } else {
+            path.clone()
+        }
+    });
+    Ok(out)
+}
+
+/// mc `listRecursiveInRoutine`: regular files below `dir` whose path starts with
+/// `file_prefix` (when set). Symlinked folders are not followed.
+fn walk(dir: &str, file_prefix: &str, out: &mut Vec<(String, std::fs::Metadata)>) -> Result<()> {
+    for (path, meta) in read_dir_sorted(dir)? {
+        let linked_dir = meta.is_dir()
+            && std::fs::symlink_metadata(&path).is_ok_and(|link| link.file_type().is_symlink());
+        if !file_prefix.is_empty() && !path.starts_with(file_prefix) {
+            if meta.is_dir() && !linked_dir && file_prefix.starts_with(&path) {
+                walk(&path, file_prefix, out)?;
+            }
+            continue;
+        }
+        if meta.is_dir() {
+            if !linked_dir {
+                walk(&path, file_prefix, out)?;
+            }
+        } else {
+            out.push((path, meta));
+        }
+    }
     Ok(())
 }
 
-fn plain_row(entry: &Entry) -> (&'static str, String, String, String) {
-    let modified = entry.last_modified.clone().unwrap_or_else(|| "-".into());
-    match entry.kind {
-        Kind::Bucket => ("BUCKET", modified, "-".into(), format!("{}/", entry.name)),
-        Kind::Prefix => ("PREFIX", "-".into(), "-".into(), entry.name.clone()),
-        Kind::Object => (
-            "OBJECT",
-            modified,
-            entry
-                .size
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".into()),
-            entry.name.clone(),
-        ),
+// ---------------------------------------------------------------------------
+// output
+// ---------------------------------------------------------------------------
+
+/// Prints a listing like mc `doList` (entries outside the `--storage-class` filter are
+/// skipped) and returns (entries, total size) for `--summarize`.
+pub(crate) fn print_listing(
+    listing: &Listing,
+    filter: Option<&str>,
+    json: bool,
+) -> Result<(i64, i64)> {
+    let filter = filter.unwrap_or_default();
+    let (mut objects, mut size) = (0, 0);
+    for content in &listing.contents {
+        if !content.storage_class.is_empty()
+            && !filter.is_empty()
+            && filter != "*"
+            && content.storage_class != filter
+        {
+            continue;
+        }
+        objects += 1;
+        size += content.size;
+        if json {
+            crate::output::print_json(&ContentMessage::new(content, &listing.url))?;
+        } else {
+            println!("{}", content_line(content));
+        }
     }
+    Ok((objects, size))
 }
 
-/// Buckets, then prefixes, then objects; by name. Stable, so versions keep newest-first order.
-fn compare_entries(left: &Entry, right: &Entry) -> Ordering {
-    left.kind
-        .cmp(&right.kind)
-        .then_with(|| left.name.cmp(&right.name))
+/// mc `contentMessage.String()`: `[DATE]   SIZE [CLASS] [VERSION vN PUT|DEL] KEY`.
+pub(crate) fn content_line(content: &Content) -> String {
+    let size = human_bytes(content.size.max(0) as u64).replace(' ', "");
+    let mut line = format!("[{}]{size:>7}", print_date(content.time));
+    if !content.storage_class.is_empty() {
+        line.push(' ');
+        line.push_str(&content.storage_class);
+    }
+    if !content.version_id.is_empty() {
+        let op = if content.is_delete_marker {
+            "DEL"
+        } else {
+            "PUT"
+        };
+        line.push_str(&format!(
+            " {} v{} {op}",
+            content.version_id, content.ordinal
+        ));
+    }
+    line.push(' ');
+    line.push_str(&content.key);
+    line
 }
 
+fn print_summary(objects: i64, size: i64, json: bool) -> Result<()> {
+    if !json {
+        println!(
+            "\nTotal Size: {}\nTotal Objects: {objects}",
+            human_bytes(size.max(0) as u64)
+        );
+    } else if crate::output::stdout_is_terminal() {
+        // mc marshals the summary with an empty indent.
+        println!("{{\n\"totalObjects\": {objects},\n\"totalSize\": {size}\n}}");
+    } else {
+        crate::output::print_json(&serde_json::json!({
+            "totalObjects": objects,
+            "totalSize": size,
+        }))?;
+    }
+    Ok(())
+}
+
+/// Go `time.Time` JSON encoding (RFC 3339 with trimmed nanoseconds), in UTC.
+pub(crate) fn go_time(time: SystemTime) -> String {
+    let (secs, nanos) = match time.duration_since(UNIX_EPOCH) {
+        Ok(value) => (value.as_secs() as i64, value.subsec_nanos()),
+        Err(_) => (0, 0),
+    };
+    let text = DateTime::from_secs(secs)
+        .fmt(DateTimeFormat::DateTime)
+        .unwrap_or_default();
+    let base = text.trim_end_matches('Z');
+    if nanos == 0 {
+        return format!("{base}Z");
+    }
+    let fraction = format!("{nanos:09}");
+    format!("{base}.{}Z", fraction.trim_end_matches('0'))
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// mc `contentMessage` JSON.
 #[derive(Debug, Serialize)]
-struct ListMessage<'a> {
+struct ContentMessage<'a> {
     status: &'static str,
-    target: &'a str,
     #[serde(rename = "type")]
     kind: &'static str,
-    name: &'a str,
-    #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
-    last_modified: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    etag: Option<&'a str>,
-    #[serde(rename = "storageClass", skip_serializing_if = "Option::is_none")]
-    storage_class: Option<&'a str>,
-    #[serde(rename = "versionId", skip_serializing_if = "Option::is_none")]
-    version_id: Option<&'a str>,
-    #[serde(rename = "versionOrdinal", skip_serializing_if = "Option::is_none")]
-    version_ordinal: Option<usize>,
+    #[serde(rename = "lastModified")]
+    last_modified: String,
+    size: i64,
+    key: &'a str,
+    etag: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    url: &'a str,
+    #[serde(rename = "versionId", skip_serializing_if = "str::is_empty")]
+    version_id: &'a str,
+    #[serde(rename = "versionOrdinal", skip_serializing_if = "is_zero")]
+    version_ordinal: usize,
     #[serde(rename = "isDeleteMarker", skip_serializing_if = "std::ops::Not::not")]
     is_delete_marker: bool,
+    #[serde(rename = "storageClass", skip_serializing_if = "str::is_empty")]
+    storage_class: &'a str,
 }
 
-impl<'a> ListMessage<'a> {
-    fn from_entry(target: &'a str, entry: &'a Entry) -> Self {
+impl<'a> ContentMessage<'a> {
+    fn new(content: &'a Content, url: &'a str) -> Self {
         Self {
             status: "success",
-            target,
-            kind: match entry.kind {
-                Kind::Bucket => "bucket",
-                Kind::Prefix => "prefix",
-                Kind::Object => "object",
-            },
-            name: &entry.name,
-            last_modified: entry.last_modified.as_deref(),
-            size: entry.size,
-            etag: entry.etag.as_deref(),
-            storage_class: entry.storage_class.as_deref(),
-            version_id: entry.version_id.as_deref(),
-            version_ordinal: entry.version_ordinal,
-            is_delete_marker: entry.is_delete_marker,
+            kind: if content.is_dir { "folder" } else { "file" },
+            last_modified: go_time(content.time),
+            size: content.size,
+            key: &content.key,
+            etag: &content.etag,
+            url,
+            version_id: &content.version_id,
+            version_ordinal: content.ordinal,
+            is_delete_marker: content.is_delete_marker,
+            storage_class: &content.storage_class,
         }
     }
 }
@@ -422,7 +592,7 @@ impl<'a> ListMessage<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::Duration;
 
     fn version(key: &str, secs: u64, id: &str, marker: bool) -> ObjectInfo {
         ObjectInfo {
@@ -437,64 +607,164 @@ mod tests {
 
     fn sample() -> Vec<ObjectInfo> {
         vec![
-            ObjectInfo {
-                key: "dir/".into(),
-                is_prefix: true,
-                ..Default::default()
-            },
             version("a", 30, "a3", false),
             version("a", 20, "a2", false),
             version("a", 10, "a1", false),
             version("b", 25, "b2", true),
             version("b", 5, "b1", false),
+            ObjectInfo {
+                key: "dir/".into(),
+                is_prefix: true,
+                ..Default::default()
+            },
         ]
     }
 
-    fn rows(entries: &[Entry]) -> Vec<String> {
-        entries
+    fn rows(items: &[(ObjectInfo, usize)]) -> Vec<String> {
+        items
             .iter()
-            .map(|entry| format!("{} {}", entry.name, entry.version_text()))
+            .map(|(item, ordinal)| {
+                format!(
+                    "{} {} v{ordinal}",
+                    item.key,
+                    item.version_id.as_deref().unwrap_or("-")
+                )
+            })
             .collect()
+    }
+
+    fn opts(versions: bool, rewind: Option<u64>) -> ListOpts {
+        ListOpts {
+            versions,
+            rewind: rewind.map(|secs| UNIX_EPOCH + Duration::from_secs(secs)),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn numbers_versions_newest_highest() {
-        let entries = select_entries(sample(), true, true, None);
         assert_eq!(
-            rows(&entries),
+            rows(&select(sample(), &opts(true, None))),
             [
-                "dir/ -",
-                "a a3 v3 PUT",
-                "a a2 v2 PUT",
-                "a a1 v1 PUT",
-                "b b2 v2 DEL",
-                "b b1 v1 PUT"
+                "a a3 v3",
+                "a a2 v2",
+                "a a1 v1",
+                "b b2 v2",
+                "b b1 v1",
+                "dir/ - v1"
             ]
         );
     }
 
     #[test]
     fn rewind_shows_state_at_time() {
-        let at = Some(UNIX_EPOCH + Duration::from_secs(22));
-        let entries = select_entries(sample(), true, false, at);
-        assert_eq!(rows(&entries), ["dir/ -", "a a2 v2 PUT", "b b1 v1 PUT"]);
-        let later = Some(UNIX_EPOCH + Duration::from_secs(26));
-        let entries = select_entries(sample(), true, false, later);
-        assert_eq!(rows(&entries), ["dir/ -", "a a2 v2 PUT"]);
-        let entries = select_entries(sample(), true, true, at);
         assert_eq!(
-            rows(&entries),
-            ["dir/ -", "a a2 v2 PUT", "a a1 v1 PUT", "b b1 v1 PUT"]
+            rows(&select(sample(), &opts(false, Some(22)))),
+            ["a a2 v2", "b b1 v1", "dir/ - v1"]
+        );
+        assert_eq!(
+            rows(&select(sample(), &opts(false, Some(26)))),
+            ["a a2 v2", "dir/ - v1"]
+        );
+        assert_eq!(
+            rows(&select(sample(), &opts(true, Some(22)))),
+            ["a a2 v2", "a a1 v1", "b b1 v1", "dir/ - v1"]
+        );
+    }
+
+    fn entry(key: &str, size: i64) -> Content {
+        Content {
+            time: UNIX_EPOCH + Duration::from_millis(1_704_164_645_250),
+            size,
+            is_dir: false,
+            ..Content::folder(key.into(), UNIX_EPOCH, 0)
+        }
+    }
+
+    #[test]
+    fn content_lines_match_mc() {
+        let mut file = entry("dir/a.txt", 2048);
+        file.storage_class = "STANDARD".into();
+        assert_eq!(
+            content_line(&file),
+            "[2024-01-02 03:04:05 UTC] 2.0KiB STANDARD dir/a.txt"
+        );
+        file.version_id = "v-1".into();
+        file.ordinal = 2;
+        file.is_delete_marker = true;
+        assert_eq!(
+            content_line(&file),
+            "[2024-01-02 03:04:05 UTC] 2.0KiB STANDARD v-1 v2 DEL dir/a.txt"
+        );
+        let folder = Content::folder("sub/".into(), UNIX_EPOCH, 0);
+        assert_eq!(
+            content_line(&folder),
+            "[1970-01-01 00:00:00 UTC]     0B sub/"
         );
     }
 
     #[test]
-    fn storage_class_filter_matches_mc() {
-        let mut entry = Entry::from_object_info(version("a", 1, "v", false));
-        assert!(entry.matches_storage_class("GLACIER"));
-        entry.storage_class = Some("STANDARD".into());
-        assert!(entry.matches_storage_class("STANDARD"));
-        assert!(entry.matches_storage_class("*"));
-        assert!(!entry.matches_storage_class("GLACIER"));
+    fn json_matches_mc_field_order() {
+        let mut file = entry("a.txt", 6);
+        file.etag = "abc".into();
+        let json = serde_json::to_string(&ContentMessage::new(&file, "http://h/b/")).unwrap();
+        assert_eq!(
+            json,
+            r#"{"status":"success","type":"file","lastModified":"2024-01-02T03:04:05.25Z","size":6,"key":"a.txt","etag":"abc","url":"http://h/b/","versionOrdinal":1}"#
+        );
+    }
+
+    #[test]
+    fn go_time_trims_fraction() {
+        assert_eq!(go_time(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            go_time(UNIX_EPOCH + Duration::new(1, 120_000_000)),
+            "1970-01-01T00:00:01.12Z"
+        );
+        assert_eq!(
+            go_time(UNIX_EPOCH + Duration::new(1, 5)),
+            "1970-01-01T00:00:01.000000005Z"
+        );
+    }
+
+    #[test]
+    fn lists_local_folders_like_mc() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        std::fs::create_dir_all(dir.path().join("d/sub")).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("d.txt"), "d").unwrap();
+        std::fs::write(dir.path().join("d/b.txt"), "bb").unwrap();
+        std::fs::write(dir.path().join("d/sub/c.txt"), "ccc").unwrap();
+        let keys = |input: &str, recursive: bool| {
+            let listing = list_local(
+                input,
+                &ListOpts {
+                    recursive,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            listing
+                .contents
+                .iter()
+                .map(|c| c.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&root, false), ["a.txt", "d.txt", "d/"]);
+        assert_eq!(keys(&format!("{root}/d"), false), ["b.txt", "sub/"]);
+        assert_eq!(keys(&format!("{root}/d."), false), ["d.txt"]);
+        assert_eq!(
+            keys(&root, true),
+            ["a.txt", "d.txt", "d/b.txt", "d/sub/c.txt"]
+        );
+        assert_eq!(keys(&format!("{root}/d/su"), true), ["sub/c.txt"]);
+        assert!(list_local(&format!("{root}/nope/x"), &ListOpts::default()).is_err());
+        assert!(
+            list_local(&format!("{root}/nope"), &ListOpts::default())
+                .unwrap()
+                .contents
+                .is_empty()
+        );
     }
 }

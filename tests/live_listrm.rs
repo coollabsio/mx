@@ -143,14 +143,14 @@ fn live_ls_stat_du_tree_versions_and_rewind() {
             .get_output()
             .stdout,
     );
-    let a_versions: Vec<_> = docs.iter().filter(|doc| doc["name"] == "a.txt").collect();
+    let a_versions: Vec<_> = docs.iter().filter(|doc| doc["key"] == "a.txt").collect();
     assert_eq!(a_versions.len(), 2);
     assert_eq!(a_versions[0]["versionId"], a2.as_str());
     assert_eq!(a_versions[0]["versionOrdinal"], 2);
     assert_eq!(a_versions[1]["versionOrdinal"], 1);
     assert!(
         docs.iter()
-            .any(|doc| doc["name"] == "dir/b.txt" && doc["isDeleteMarker"] == true)
+            .any(|doc| doc["key"] == "dir/b.txt" && doc["isDeleteMarker"] == true)
     );
 
     // ls --rewind: state at t1 (only a.txt v1) and t2 (a.txt v2 + dir/b.txt).
@@ -310,13 +310,19 @@ fn live_ls_stat_du_tree_versions_and_rewind() {
         .args(["du", "-r", "--versions", &live.bucket_target()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("10  3 versions"));
+        .stdout(predicate::str::ends_with(format!(
+            "10B\t3 versions\t{}\n",
+            live.bucket
+        )));
     live.cmd()
         .args(["du", "-r", "--rewind", &rfc3339(t1), &live.bucket_target()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("3  1 objects"));
-    let doc: Value = serde_json::from_slice(
+        .stdout(predicate::str::ends_with(format!(
+            "3B\t1 object\t{}\n",
+            live.bucket
+        )));
+    let docs = json_docs(
         &live
             .cmd()
             .args(["--json", "du", "-r", "--versions", &live.bucket_target()])
@@ -324,8 +330,9 @@ fn live_ls_stat_du_tree_versions_and_rewind() {
             .success()
             .get_output()
             .stdout,
-    )
-    .unwrap();
+    );
+    let doc = docs.last().unwrap();
+    assert_eq!(doc["prefix"], live.bucket.as_str());
     assert_eq!(doc["isVersions"], true);
 
     // tree --rewind shows the deleted object as it was at t2.
@@ -704,7 +711,10 @@ fn live_rm_bypass_governance_and_rb_force() {
         .args(["rb", "--force", &live.bucket_target()])
         .assert()
         .success()
-        .stdout(format!("Bucket `{}` removed successfully.\n", live.bucket));
+        .stdout(format!(
+            "Removed `{}` successfully.\n",
+            live.bucket_target()
+        ));
 }
 
 #[test]
@@ -739,8 +749,9 @@ fn live_rb_rules_and_site_wide_removal() {
         .assert()
         .success()
         .stdout(format!(
-            "Bucket `{}` removed successfully.\nBucket `{empty}` removed successfully.\n",
-            live.bucket
+            "Removed `{}` successfully.\nRemoved `{}/{empty}` successfully.\n",
+            live.bucket_target(),
+            live.alias
         ));
     // Missing bucket with --force is a no-op.
     live.cmd()
@@ -786,8 +797,12 @@ fn live_rb_rules_and_site_wide_removal() {
         .args(["rb", "--force", "--dangerous", &alias2])
         .assert()
         .success()
-        .stdout(predicate::str::contains(format!("Bucket `{b1}` removed")))
-        .stdout(predicate::str::contains(format!("Bucket `{b2}` removed")));
+        .stdout(predicate::str::contains(format!(
+            "Removed `{alias2}/{b1}` successfully."
+        )))
+        .stdout(predicate::str::contains(format!(
+            "Removed `{alias2}/{b2}` successfully."
+        )));
     live.cmd()
         .args(["ls", &alias2])
         .assert()

@@ -1,12 +1,11 @@
-use crate::commands::util::{key_depth, object_infos};
+use crate::commands::ls::{ListOpts, list};
+use crate::commands::stat::human_bytes;
 use crate::config::ConfigStore;
 use crate::flags::RewindFlag;
 use crate::location::{Location, parse_location};
-use crate::s3::{ListOptions, ObjectInfo};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
-use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 #[derive(Debug, Args)]
@@ -17,8 +16,8 @@ use std::time::SystemTime;
 }))]
 pub struct DuArgs {
     /// print the total for a folder prefix only if it is N or fewer levels below the command line argument (default: 0)
-    #[arg(short = 'd', long)]
-    pub depth: Option<usize>,
+    #[arg(short = 'd', long, allow_negative_numbers = true)]
+    pub depth: Option<i64>,
     /// recursively print the total for a folder prefix
     #[arg(short = 'r', long)]
     pub recursive: bool,
@@ -27,122 +26,175 @@ pub struct DuArgs {
     /// include all object versions
     #[arg(long)]
     pub versions: bool,
-    pub target: String,
-}
-
-/// Recursive listing for du/tree. With `--versions` / `--rewind` (S3 only) the result holds
-/// every version (at or before the rewind time) or the objects as of the rewind time; delete
-/// markers are never included.
-pub(crate) fn listing(
-    store: &ConfigStore,
-    input: &str,
-    versions: bool,
-    rewind: &RewindFlag,
-) -> Result<Vec<ObjectInfo>> {
-    let rewind = rewind.at(SystemTime::now())?;
-    if !versions && rewind.is_none() {
-        return Ok(object_infos(store, input)?.1);
-    }
-    let Location::S3(target) = parse_location(input, store.config()) else {
-        bail!("--versions and --rewind are only supported for S3 targets, not `{input}`.");
-    };
-    let alias = super::alias_config(store, &target.alias)?;
-    let bucket = target.require_bucket()?.to_string();
-    let prefix = target.key_with_trailing_slash();
-    let options = ListOptions {
-        recursive: true,
-        versions,
-        rewind,
-        ..Default::default()
-    };
-    let items = super::runtime()?.block_on(async {
-        let client = crate::s3::build_client(&alias).await?;
-        crate::s3::list_objects_with(&client, &bucket, prefix.as_deref(), &options).await
-    })?;
-    Ok(items
-        .into_iter()
-        .filter(|item| !item.is_delete_marker && !item.is_prefix)
-        .collect())
+    #[arg(required = true, value_name = "TARGET")]
+    pub targets: Vec<String>,
 }
 
 pub fn run(args: DuArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
-    let input = &args.target;
-    // mc `isAliasURLDir`: only folders (and paths ending in `/`) can be summarized.
-    let is_dir = input.ends_with('/')
-        || matches!(
-            super::util::stat_target(&store, input),
-            Ok(super::util::TargetKind::Folder)
-        )
-        || matches!(parse_location(input, store.config()), Location::S3(t) if t.key.is_none());
-    if !is_dir {
-        return Err(crate::error::McError::invalid_argument()).with_context(|| {
-            format!("Source `{input}` is not a folder. Only folders are supported by 'du' command.")
-        });
-    }
-    let items = listing(&store, input, args.versions, &args.rewind).with_context(|| {
-        crate::error::nonfatal(format!(
-            "Failed to find disk usage of `{input}` recursively."
-        ))
-    })?;
-    let depth = args
-        .depth
-        .unwrap_or(if args.recursive { usize::MAX } else { 1 });
-    let mut totals: BTreeMap<String, (i64, u64)> = BTreeMap::new();
-
-    for item in items {
-        let prefix = prefix_for_depth(&item.key, depth);
-        let entry = totals.entry(prefix).or_insert((0, 0));
-        entry.0 += item.size;
-        entry.1 += 1;
-    }
-
-    if totals.is_empty() {
-        totals.insert(args.target.clone(), (0, 0));
-    }
-
-    for (name, (size, count)) in totals {
-        if json {
-            crate::output::print_json(&DuMessage {
-                status: "success",
-                prefix: &name,
-                size,
-                objects: count,
-                is_versions: args.versions,
-            })?;
-        } else {
-            let label = if name.is_empty() { "." } else { name.as_str() };
-            let unit = if args.versions { "versions" } else { "objects" };
-            println!("{size}  {count} {unit}  {label}");
+    // mc: `-d 0` (the default) means 1 level, or everything with `-r` unless `-d` was given.
+    let depth = match args.depth {
+        Some(0) | None if !args.recursive => 1,
+        None => -1,
+        Some(depth) => depth,
+    };
+    let rewind = args.rewind.at(SystemTime::now())?;
+    let rt = super::runtime()?;
+    let mut failed = false;
+    for input in &args.targets {
+        // mc `isAliasURLDir`: only folders (and paths ending in `/`) can be summarized.
+        let is_dir = input.ends_with('/')
+            || matches!(
+                super::util::stat_target(&store, input),
+                Ok(super::util::TargetKind::Folder)
+            )
+            || matches!(parse_location(input, store.config()), Location::S3(t) if t.key.is_none());
+        if !is_dir {
+            return Err(crate::error::McError::invalid_argument()).with_context(|| {
+                format!(
+                    "Source `{input}` is not a folder. Only folders are supported by 'du' command."
+                )
+            });
         }
+        let du = Du {
+            store: &store,
+            rt: &rt,
+            opts: ListOpts {
+                versions: args.versions,
+                rewind,
+                ..Default::default()
+            },
+            local: matches!(parse_location(input, store.config()), Location::Local(_)),
+            json,
+        };
+        if let Err(error) = du.total(input, depth) {
+            crate::output::print_error(&error);
+            failed = true;
+        }
+    }
+    if failed {
+        return Err(crate::output::Exit(1).into());
     }
     Ok(())
 }
 
-fn prefix_for_depth(key: &str, depth: usize) -> String {
-    if depth == usize::MAX {
-        return String::new();
-    }
-    let parts: Vec<_> = key
-        .trim_matches('/')
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    if parts.is_empty() {
-        return String::new();
-    }
-    let take = depth
-        .min(key_depth(key).saturating_sub(1).max(1))
-        .min(parts.len());
-    parts[..take].join("/")
+struct Du<'a> {
+    store: &'a ConfigStore,
+    rt: &'a tokio::runtime::Runtime,
+    opts: ListOpts,
+    local: bool,
+    json: bool,
 }
 
+impl Du<'_> {
+    /// mc `du`: (size, objects) below `url`; prints the total unless `depth` is 0. Level 1
+    /// sums a recursive listing, deeper levels recurse into each folder first.
+    fn total(&self, url: &str, depth: i64) -> Result<(i64, i64)> {
+        let dir = if url.ends_with('/') {
+            url.to_string()
+        } else {
+            format!("{url}/")
+        };
+        let recursive = depth == 1;
+        let opts = ListOpts {
+            recursive,
+            ..self.opts.clone()
+        };
+        let listing = list(self.store, self.rt, &dir, &opts).with_context(|| {
+            crate::error::nonfatal(format!("Failed to find disk usage of `{url}` recursively."))
+        })?;
+        let (mut size, mut objects) = (0, 0);
+        for content in &listing.contents {
+            if content.is_dir && !recursive {
+                // mc descends with the absolute path of local folders.
+                let sub = if self.local {
+                    format!("{}{}", listing.url, content.key)
+                } else {
+                    format!("{dir}{}", content.key)
+                };
+                let (sub_size, sub_objects) =
+                    self.total(&sub, if depth > 0 { depth - 1 } else { depth })?;
+                size += sub_size;
+                objects += sub_objects;
+            } else if !content.is_delete_marker && !content.is_dir {
+                size += content.size;
+                objects += 1;
+            }
+        }
+        if depth != 0 {
+            let prefix = if self.local {
+                dir.trim_matches('/')
+            } else {
+                // `ALIAS/BUCKET/PREFIX/` -> `BUCKET/PREFIX`
+                dir.split_once('/')
+                    .map_or("", |(_, path)| path)
+                    .trim_matches('/')
+            };
+            let message = DuMessage {
+                prefix,
+                size,
+                objects,
+                status: "success",
+                is_versions: self.opts.versions,
+            };
+            if self.json {
+                crate::output::print_json(&message)?;
+            } else {
+                println!("{}", message.text());
+            }
+        }
+        Ok((size, objects))
+    }
+}
+
+/// mc `duMessage`.
 #[derive(Debug, Serialize)]
 struct DuMessage<'a> {
-    status: &'static str,
     prefix: &'a str,
     size: i64,
-    objects: u64,
+    objects: i64,
+    status: &'static str,
     #[serde(rename = "isVersions")]
     is_versions: bool,
+}
+
+impl DuMessage<'_> {
+    fn text(&self) -> String {
+        let unit = if self.is_versions {
+            "version"
+        } else {
+            "object"
+        };
+        let plural = if self.objects == 1 { "" } else { "s" };
+        format!(
+            "{}\t{} {unit}{plural}\t{}",
+            human_bytes(self.size.max(0) as u64).replace(' ', ""),
+            self.objects,
+            self.prefix
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DuMessage;
+
+    #[test]
+    fn text_matches_mc() {
+        let mut message = DuMessage {
+            prefix: "b/dir",
+            size: 2048,
+            objects: 1,
+            status: "success",
+            is_versions: false,
+        };
+        assert_eq!(message.text(), "2.0KiB\t1 object\tb/dir");
+        message.objects = 3;
+        message.is_versions = true;
+        assert_eq!(message.text(), "2.0KiB\t3 versions\tb/dir");
+        assert_eq!(
+            serde_json::to_string(&message).unwrap(),
+            r#"{"prefix":"b/dir","size":2048,"objects":3,"status":"success","isVersions":true}"#
+        );
+    }
 }

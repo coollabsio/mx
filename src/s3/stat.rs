@@ -200,12 +200,31 @@ pub struct BucketStat {
     /// e.g. `1DAYS`.
     pub lock_validity: String,
     pub replication: bool,
-    /// A bucket policy is set.
-    pub anonymous: bool,
+    /// Bucket policy document (empty when none is set).
+    pub policy: String,
     pub location: String,
     pub tags: Vec<(String, String)>,
     pub ilm: bool,
-    pub notification: bool,
+    /// Notification configuration (None when it could not be read).
+    pub notification: Option<NotificationConfig>,
+}
+
+/// minio-go `notification.Configuration` as mc prints it in `stat --json` (Go field names).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NotificationConfig {
+    pub lambda: Vec<NotificationTarget>,
+    pub topic: Vec<NotificationTarget>,
+    pub queue: Vec<NotificationTarget>,
+}
+
+/// One notification target (`LambdaConfig` / `TopicConfig` / `QueueConfig`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NotificationTarget {
+    pub id: String,
+    pub events: Vec<String>,
+    /// `(name, value)` key filter rules; None without a `Filter` element.
+    pub filter: Option<Vec<(String, String)>>,
+    pub arn: String,
 }
 
 /// Collects bucket properties. Fails only when the bucket itself cannot be read.
@@ -281,9 +300,7 @@ pub async fn stat_bucket(client: &Client, bucket: &str) -> Result<BucketStat> {
         stat.encryption_key_id = default.kms_master_key_id().unwrap_or_default().to_string();
     }
     if let Ok(response) = client.get_bucket_policy().bucket(bucket).send().await {
-        stat.anonymous = response
-            .policy()
-            .is_some_and(|policy| !policy.trim().is_empty());
+        stat.policy = response.policy().unwrap_or_default().to_string();
     }
     if let Ok(response) = client.get_bucket_tagging().bucket(bucket).send().await {
         stat.tags = response
@@ -307,9 +324,62 @@ pub async fn stat_bucket(client: &Client, bucket: &str) -> Result<BucketStat> {
         .send()
         .await
     {
-        stat.notification = !response.topic_configurations().is_empty()
-            || !response.queue_configurations().is_empty()
-            || !response.lambda_function_configurations().is_empty();
+        let filter = |filter: Option<&aws_sdk_s3::types::NotificationConfigurationFilter>| {
+            filter.map(|filter| {
+                filter
+                    .key()
+                    .map(|key| key.filter_rules())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|rule| {
+                        (
+                            rule.name()
+                                .map(|name| name.as_str().to_string())
+                                .unwrap_or_default(),
+                            rule.value().unwrap_or_default().to_string(),
+                        )
+                    })
+                    .collect()
+            })
+        };
+        let events = |events: &[aws_sdk_s3::types::Event]| {
+            events
+                .iter()
+                .map(|event| event.as_str().to_string())
+                .collect::<Vec<_>>()
+        };
+        stat.notification = Some(NotificationConfig {
+            lambda: response
+                .lambda_function_configurations()
+                .iter()
+                .map(|config| NotificationTarget {
+                    id: config.id().unwrap_or_default().to_string(),
+                    events: events(config.events()),
+                    filter: filter(config.filter()),
+                    arn: config.lambda_function_arn().to_string(),
+                })
+                .collect(),
+            topic: response
+                .topic_configurations()
+                .iter()
+                .map(|config| NotificationTarget {
+                    id: config.id().unwrap_or_default().to_string(),
+                    events: events(config.events()),
+                    filter: filter(config.filter()),
+                    arn: config.topic_arn().to_string(),
+                })
+                .collect(),
+            queue: response
+                .queue_configurations()
+                .iter()
+                .map(|config| NotificationTarget {
+                    id: config.id().unwrap_or_default().to_string(),
+                    events: events(config.events()),
+                    filter: filter(config.filter()),
+                    arn: config.queue_arn().to_string(),
+                })
+                .collect(),
+        });
     }
     Ok(stat)
 }

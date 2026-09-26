@@ -129,7 +129,16 @@ pub async fn list_objects_with(
             _ => versions,
         });
     }
-    let items = list_objects_raw(client, bucket, prefix, options.recursive, options.zip).await?;
+    let normalized_prefix = normalize_prefix(prefix);
+    let items = list_objects_raw(
+        client,
+        bucket,
+        normalized_prefix.as_deref(),
+        normalized_prefix.as_deref(),
+        options.recursive,
+        options.zip,
+    )
+    .await?;
     Ok(items
         .into_iter()
         .filter_map(|(item, modified)| match item {
@@ -430,21 +439,30 @@ pub async fn list_objects(
     prefix: Option<&str>,
     recursive: bool,
 ) -> Result<Vec<S3ListItem>> {
-    Ok(list_objects_raw(client, bucket, prefix, recursive, false)
-        .await?
-        .into_iter()
-        .map(|(item, _)| item)
-        .collect())
+    let normalized_prefix = normalize_prefix(prefix);
+    Ok(list_objects_raw(
+        client,
+        bucket,
+        normalized_prefix.as_deref(),
+        normalized_prefix.as_deref(),
+        recursive,
+        false,
+    )
+    .await?
+    .into_iter()
+    .map(|(item, _)| item)
+    .collect())
 }
 
+/// `request_prefix` is sent as-is; names are reported relative to `display_prefix`.
 async fn list_objects_raw(
     client: &Client,
     bucket: &str,
-    prefix: Option<&str>,
+    request_prefix: Option<&str>,
+    display_prefix: Option<&str>,
     recursive: bool,
     zip: bool,
 ) -> Result<Vec<(S3ListItem, Option<SystemTime>)>> {
-    let normalized_prefix = normalize_prefix(prefix);
     let mut continuation = None;
     let mut items = Vec::new();
 
@@ -453,7 +471,7 @@ async fn list_objects_raw(
         if !recursive {
             request = request.delimiter("/");
         }
-        if let Some(prefix) = &normalized_prefix {
+        if let Some(prefix) = request_prefix {
             request = request.prefix(prefix);
         }
         if let Some(token) = continuation {
@@ -475,7 +493,7 @@ async fn list_objects_raw(
             if let Some(raw) = prefix.prefix() {
                 items.push((
                     S3ListItem::Prefix {
-                        name: display_name(raw, normalized_prefix.as_deref()),
+                        name: display_name(raw, display_prefix),
                     },
                     None,
                 ));
@@ -486,7 +504,7 @@ async fn list_objects_raw(
             if let Some(key) = object.key() {
                 items.push((
                     S3ListItem::Object {
-                        name: display_name(key, normalized_prefix.as_deref()),
+                        name: display_name(key, display_prefix),
                         size: object.size(),
                         last_modified: object.last_modified().map(debug_timestamp),
                         etag: object.e_tag().map(str::to_string),
@@ -510,6 +528,111 @@ async fn list_objects_raw(
     }
 
     Ok(items)
+}
+
+/// Listing like mc's S3 client for `ls`/`tree`/`du`: `prefix` is sent as-is (no `/` added) and
+/// keys are absolute. Objects (or versions and delete markers, newest first per key) come
+/// before common prefixes. `options.rewind` is ignored; filter the versions instead.
+pub async fn list_raw(
+    client: &Client,
+    bucket: &str,
+    prefix: &str,
+    options: &ListOptions,
+) -> Result<Vec<ObjectInfo>> {
+    let prefix = Some(prefix).filter(|prefix| !prefix.is_empty());
+    let mut items = if options.incomplete {
+        let items = list_uploads_inner(client, bucket, prefix, None, options.recursive).await?;
+        match prefix.filter(|_| options.recursive && items.is_empty()) {
+            // MinIO only honors a prefix that names an object; list the bucket and filter.
+            Some(prefix) => list_uploads_inner(client, bucket, None, None, true)
+                .await?
+                .into_iter()
+                .filter(|item| item.key.starts_with(prefix))
+                .collect(),
+            None => items,
+        }
+    } else if options.versions {
+        list_versions_inner(client, bucket, prefix, None, options.recursive).await?
+    } else {
+        list_objects_raw(client, bucket, prefix, None, options.recursive, options.zip)
+            .await?
+            .into_iter()
+            .filter_map(|(item, modified)| match item {
+                S3ListItem::Prefix { name } => Some(ObjectInfo {
+                    key: name,
+                    is_prefix: true,
+                    is_latest: true,
+                    ..Default::default()
+                }),
+                S3ListItem::Object {
+                    name,
+                    size,
+                    etag,
+                    storage_class,
+                    ..
+                } => Some(ObjectInfo {
+                    key: name,
+                    size: size.unwrap_or(0),
+                    last_modified: modified,
+                    etag,
+                    storage_class,
+                    is_latest: true,
+                    ..Default::default()
+                }),
+                S3ListItem::Bucket { .. } => None,
+            })
+            .collect()
+    };
+    // Stable: keeps the server (or version) order within objects and within prefixes.
+    items.sort_by_key(|item| item.is_prefix);
+    Ok(items)
+}
+
+/// `true` when anything (an object, or with `versions` any version or delete marker) is
+/// stored under `prefix`. mc treats such a target as a folder.
+pub async fn prefix_has_entries(
+    client: &Client,
+    bucket: &str,
+    prefix: &str,
+    versions: bool,
+) -> Result<bool> {
+    if versions {
+        let response = client
+            .list_object_versions()
+            .bucket(bucket)
+            .prefix(prefix)
+            .max_keys(1)
+            .send()
+            .await
+            .s3(bucket, "")?;
+        return Ok(!response.versions().is_empty()
+            || !response.delete_markers().is_empty()
+            || !response.common_prefixes().is_empty());
+    }
+    let response = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix(prefix)
+        .max_keys(1)
+        .send()
+        .await
+        .s3(bucket, "")?;
+    Ok(!response.contents().is_empty() || !response.common_prefixes().is_empty())
+}
+
+/// Bucket names with their creation time.
+pub async fn list_bucket_infos(client: &Client) -> Result<Vec<(String, Option<SystemTime>)>> {
+    let response = client.list_buckets().send().await.s3("", "")?;
+    Ok(response
+        .buckets()
+        .iter()
+        .map(|bucket| {
+            (
+                bucket.name().unwrap_or_default().to_string(),
+                bucket.creation_date().and_then(to_system_time),
+            )
+        })
+        .collect())
 }
 
 /// `true` when the bucket has no objects, versions or delete markers.

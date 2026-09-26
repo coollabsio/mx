@@ -1,7 +1,6 @@
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::error::nonfatal;
-use crate::output;
 use crate::s3::S3ResultExt;
 use crate::target::TargetRef;
 use anyhow::{Context, Result, bail};
@@ -43,7 +42,7 @@ pub fn run(args: RemoveBucketArgs, json: bool) -> Result<()> {
     let targets = validate(&args)?;
     let store = ConfigStore::load_or_create()?;
     let rt = runtime()?;
-
+    let mut failed = false;
     for (input, target) in args.targets.iter().zip(&targets) {
         let alias = alias_config(&store, &target.alias)?;
         let client = rt.block_on(crate::s3::build_client(&alias))?;
@@ -63,6 +62,13 @@ pub fn run(args: RemoveBucketArgs, json: bool) -> Result<()> {
                 if !args.force {
                     let empty = crate::s3::bucket_is_empty(&client, &bucket)
                         .await
+                        .map_err(|error| {
+                            if crate::error::error_code(&error) == Some("NoSuchBucket") {
+                                crate::error::McError::bucket_not_found(&bucket).into()
+                            } else {
+                                error
+                            }
+                        })
                         .with_context(validate)?;
                     if !empty {
                         bail!(
@@ -80,34 +86,42 @@ pub fn run(args: RemoveBucketArgs, json: bool) -> Result<()> {
                     .await
                     .with_context(|| format!("Failed to remove `{input}`."))?;
                 Ok(true)
-            })?;
-            if !removed {
-                continue;
+            });
+            match removed {
+                Ok(true) => {}
+                Ok(false) => continue,
+                // mc reports validation errors and goes on with the next target.
+                Err(error) if error.downcast_ref::<crate::error::NonFatal>().is_some() => {
+                    crate::output::print_error(&error);
+                    failed = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
-            let bucket_target = format!("{}/{bucket}", target.alias);
+            let bucket_url = match &target.bucket {
+                Some(_) => input.clone(),
+                None => format!("{}/{bucket}", input.trim_end_matches('/')),
+            };
             if json {
                 crate::output::print_json(&BucketMessage {
                     status: "success",
-                    target: if target.bucket.is_some() {
-                        input
-                    } else {
-                        &bucket_target
-                    },
-                    bucket: &bucket,
+                    bucket: &bucket_url,
                 })?;
             } else {
-                output::print_plain(&format!("Bucket `{bucket}` removed successfully."));
+                println!("Removed `{bucket_url}` successfully.");
             }
         }
     }
-
+    if failed {
+        return Err(crate::output::Exit(1).into());
+    }
     Ok(())
 }
 
+/// mc `removeBucketMessage`.
 #[derive(Debug, Serialize)]
 struct BucketMessage<'a> {
     status: &'static str,
-    target: &'a str,
     bucket: &'a str,
 }
 

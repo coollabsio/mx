@@ -5,13 +5,16 @@ use crate::error::{McError, nonfatal};
 use crate::flags::{RewindFlag, VersionIdFlag, resolve_sse};
 use crate::location::{Location, parse_location};
 use crate::s3::S3ResultExt;
-use crate::s3::{BucketStat, ListOptions, ObjectInfo, ObjectStat, full_key, parse_header_pairs};
+use crate::s3::{
+    BucketStat, LifecycleConfig, ListOptions, NotificationConfig, NotificationTarget, ObjectInfo,
+    ObjectStat, full_key, parse_header_pairs,
+};
 use crate::target::TargetRef;
 use anyhow::{Context, Result, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,7 +102,7 @@ pub fn run(args: StatArgs, json: bool) -> Result<()> {
             .with_context(|| format!("Unable to stat `{input}`."))?;
         for entry in &entries {
             if json {
-                crate::output::print_json(&entry.json(input))?;
+                entry.print_json()?;
             } else {
                 println!("{}", entry.text());
             }
@@ -109,15 +112,60 @@ pub fn run(args: StatArgs, json: bool) -> Result<()> {
 }
 
 enum StatEntry {
-    Bucket(BucketStat),
+    Bucket(Box<BucketInfo>),
+    /// A folder; `time` is None for buckets listed at the alias root (no date).
     Folder {
         name: String,
+        time: Option<SystemTime>,
     },
     Object {
         name: String,
-        bucket: String,
-        stat: ObjectStat,
+        stat: Box<ObjectStat>,
     },
+}
+
+/// Everything mc prints for a bucket (`bucketInfoMessage`).
+struct BucketInfo {
+    stat: BucketStat,
+    lifecycle: Option<LifecycleConfig>,
+    usage: BucketUsage,
+}
+
+async fn bucket_info(
+    alias: &crate::config::model::AliasConfig,
+    client: &Client,
+    bucket: &str,
+) -> Result<StatEntry> {
+    let stat = crate::s3::stat_bucket(client, bucket).await?;
+    let lifecycle = crate::s3::get_lifecycle(alias, bucket)
+        .await
+        .ok()
+        .flatten()
+        .map(|info| info.config);
+    Ok(StatEntry::Bucket(Box::new(BucketInfo {
+        stat,
+        lifecycle,
+        usage: bucket_usage(alias, bucket).await,
+    })))
+}
+
+/// madmin `BucketUsageInfo` of `bucket` from the MinIO admin data usage API (zero values when
+/// unavailable, like mc).
+async fn bucket_usage(alias: &crate::config::model::AliasConfig, bucket: &str) -> BucketUsage {
+    let Ok(admin) = crate::s3::admin::AdminClient::new(alias) else {
+        return BucketUsage::default();
+    };
+    let Ok(response) = admin
+        .admin("GET", "datausageinfo", &[("capacity", "true")], Vec::new())
+        .await
+    else {
+        return BucketUsage::default();
+    };
+    serde_json::from_slice::<serde_json::Value>(&response.body)
+        .ok()
+        .and_then(|value| value.get("bucketsUsageInfo")?.get(bucket).cloned())
+        .and_then(|usage| serde_json::from_value(usage).ok())
+        .unwrap_or_default()
 }
 
 async fn collect(
@@ -133,12 +181,11 @@ async fn collect(
         for entry in response.buckets() {
             let name = entry.name().unwrap_or_default();
             if args.verbose {
-                entries.push(StatEntry::Bucket(
-                    crate::s3::stat_bucket(&client, name).await?,
-                ));
+                entries.push(bucket_info(alias, &client, name).await?);
             } else {
                 entries.push(StatEntry::Folder {
                     name: format!("{name}/"),
+                    time: None,
                 });
             }
         }
@@ -162,8 +209,8 @@ async fn collect(
         if args.recursive || target.trailing_slash {
             return list_entries(&client, &bucket, None, args, rewind, &relative, &sse_c).await;
         }
-        return match crate::s3::stat_bucket(&client, &bucket).await {
-            Ok(stat) => Ok(vec![StatEntry::Bucket(stat)]),
+        return match bucket_info(alias, &client, &bucket).await {
+            Ok(entry) => Ok(vec![entry]),
             Err(error) if crate::error::error_code(&error) == Some("NoSuchBucket") => {
                 // mc reports the missing bucket (`bucketStat`) and then a missing object.
                 crate::output::print_error(
@@ -185,7 +232,7 @@ async fn collect(
             sse_c(&key),
         )
         .await?;
-        return Ok(vec![object_entry(&bucket, stat, &relative)]);
+        return Ok(vec![object_entry(stat, &relative)]);
     }
     if args.recursive || key.ends_with('/') {
         return list_entries(
@@ -212,12 +259,12 @@ async fn collect(
         let mut entries = Vec::new();
         for version in versions {
             let stat = stat_version(&client, &bucket, &key, &version, sse_c(&key)).await?;
-            entries.push(object_entry(&bucket, stat, &relative));
+            entries.push(object_entry(stat, &relative));
         }
         return Ok(entries);
     }
     match crate::s3::stat_object_sse_c(&client, &bucket, &key, None, sse_c(&key)).await {
-        Ok(stat) => Ok(vec![object_entry(&bucket, stat, &relative)]),
+        Ok(stat) => Ok(vec![object_entry(stat, &relative)]),
         Err(error) if !crate::error::is_not_found(&error) => Err(error),
         Err(_) => {
             // Not an object: report it as a folder if it is a non-empty prefix. Like mc, a
@@ -243,16 +290,16 @@ async fn collect(
             }
             Ok(vec![StatEntry::Folder {
                 name: relative(&prefix),
+                time: Some(SystemTime::now()),
             }])
         }
     }
 }
 
-fn object_entry(bucket: &str, stat: ObjectStat, relative: &dyn Fn(&str) -> String) -> StatEntry {
+fn object_entry(stat: ObjectStat, relative: &dyn Fn(&str) -> String) -> StatEntry {
     StatEntry::Object {
         name: relative(&stat.key),
-        bucket: bucket.to_string(),
-        stat,
+        stat: Box::new(stat),
     }
 }
 
@@ -271,7 +318,9 @@ async fn list_entries(
         rewind,
         ..Default::default()
     };
-    let items = crate::s3::list_objects_with(client, bucket, prefix, &options).await?;
+    let mut items = crate::s3::list_objects_with(client, bucket, prefix, &options).await?;
+    // mc lists objects before common prefixes.
+    items.sort_by_key(|item| item.is_prefix);
     if items.is_empty() {
         return Err(McError::object_missing().into());
     }
@@ -282,11 +331,12 @@ async fn list_entries(
         if item.is_prefix {
             entries.push(StatEntry::Folder {
                 name: relative(&format!("{}/", key.trim_end_matches('/'))),
+                time: Some(SystemTime::now()),
             });
             continue;
         }
         let stat = stat_version(client, bucket, &key, &item, sse_c(&key)).await?;
-        entries.push(object_entry(bucket, stat, relative));
+        entries.push(object_entry(stat, relative));
     }
     Ok(entries)
 }
@@ -361,94 +411,63 @@ const ENCRYPTION_PREFIX: &str = "x-amz-server-side-encryption";
 impl StatEntry {
     fn text(&self) -> String {
         match self {
-            StatEntry::Bucket(bucket) => bucket_text(bucket),
-            StatEntry::Folder { name } => {
-                format!("{:<10}: {name}\n{:<10}: folder \n", "Name", "Type")
+            StatEntry::Bucket(info) => bucket_text(info),
+            StatEntry::Folder { name, time } => {
+                let mut out = format!("{:<10}: {name}\n", "Name");
+                if let Some(time) = time {
+                    let _ = writeln!(out, "{:<10}: {} ", "Date", print_date(*time));
+                }
+                let _ = writeln!(out, "{:<10}: folder ", "Type");
+                out
             }
-            StatEntry::Object { name, stat, .. } => object_text(name, stat),
+            StatEntry::Object { name, stat } => object_text(name, stat),
         }
     }
 
-    fn json(&self, target: &str) -> StatJson {
+    fn print_json(&self) -> Result<()> {
         match self {
-            StatEntry::Bucket(bucket) => StatJson {
+            StatEntry::Bucket(info) => crate::output::print_json(&bucket_json(info)),
+            StatEntry::Folder { name, time } => crate::output::print_json(&StatJson {
                 status: "success",
-                target: target.to_string(),
-                kind: "bucket",
-                bucket: Some(bucket.name.clone()),
-                name: bucket.name.clone(),
-                last_modified: bucket.created.map(rfc3339),
-                size: Some(0),
-                versioning: Some(VersioningJson {
-                    status: bucket.versioning.clone(),
-                    mfa_delete: bucket.mfa_delete.clone(),
-                }),
-                encryption: Some(EncryptionJson {
-                    algorithm: bucket.encryption_algorithm.clone(),
-                    key_id: bucket.encryption_key_id.clone(),
-                }),
-                object_lock: Some(LockJson {
-                    enabled: bucket.lock_enabled.clone(),
-                    mode: bucket.lock_mode.clone(),
-                    validity: bucket.lock_validity.clone(),
-                }),
-                replication: Some(ReplicationJson {
-                    enabled: bucket.replication,
-                }),
-                policy: Some(PolicyJson {
-                    kind: if bucket.anonymous { "custom" } else { "none" },
-                }),
-                location: Some(bucket.location.clone()),
-                tagging: (!bucket.tags.is_empty()).then(|| bucket.tags.iter().cloned().collect()),
-                ..Default::default()
-            },
-            StatEntry::Folder { name } => StatJson {
-                status: "success",
-                target: target.to_string(),
-                kind: "folder",
                 name: name.clone(),
+                last_modified: crate::commands::ls::go_time(time.unwrap_or(UNIX_EPOCH)),
+                kind: "folder",
                 ..Default::default()
-            },
-            StatEntry::Object { name, bucket, stat } => {
+            }),
+            StatEntry::Object { name, stat } => {
                 let expiration = stat.expiration.as_deref().map(parse_header_pairs);
                 let restore = stat.restore.as_deref().map(parse_header_pairs);
-                StatJson {
+                let go_time = crate::commands::ls::go_time;
+                crate::output::print_json(&StatJson {
                     status: "success",
-                    target: target.to_string(),
-                    kind: "file",
-                    bucket: Some(bucket.clone()),
-                    key: Some(stat.key.clone()),
                     name: name.clone(),
-                    size: Some(stat.size),
-                    last_modified: stat.last_modified.map(rfc3339),
-                    etag_legacy: stat.etag.clone(),
-                    etag: stat.etag.clone(),
-                    content_type: stat.content_type.clone(),
-                    storage_class: stat.storage_class.clone(),
-                    version_id: stat.version_id.clone(),
-                    delete_marker: stat.delete_marker,
-                    expires: stat.expires.as_deref().and_then(http_date).map(rfc3339),
+                    last_modified: go_time(stat.last_modified.unwrap_or(UNIX_EPOCH)),
+                    size: stat.size,
+                    etag: stat.etag.clone().unwrap_or_default(),
+                    kind: "file",
+                    expires: stat.expires.as_deref().and_then(http_date).map(go_time),
                     expiration: expiration
                         .as_ref()
                         .and_then(|pairs| pairs.get("expiry-date"))
                         .and_then(|value| http_date(value))
-                        .map(rfc3339),
+                        .map(go_time),
                     expiration_rule_id: expiration
                         .as_ref()
                         .and_then(|pairs| pairs.get("rule-id").cloned()),
                     replication_status: stat.replication_status.clone(),
                     metadata: (!stat.metadata.is_empty()).then(|| stat.metadata.clone()),
+                    version_id: stat.version_id.clone(),
+                    delete_marker: stat.delete_marker,
                     restore: restore.map(|pairs| RestoreJson {
                         ongoing: pairs.get("ongoing-request").is_some_and(|v| v == "true"),
                         expiry: pairs
                             .get("expiry-date")
                             .and_then(|value| http_date(value))
-                            .map(rfc3339),
+                            .map(go_time),
                     }),
                     checksum: (!stat.checksums.is_empty())
                         .then(|| stat.checksums.iter().cloned().collect()),
-                    ..Default::default()
-                }
+                })
             }
         }
     }
@@ -553,11 +572,29 @@ fn encryption_label(metadata: &BTreeMap<String, String>) -> Option<String> {
     Some("SSE-Unknown".into())
 }
 
-fn bucket_text(bucket: &BucketStat) -> String {
+/// mc `GetAccess` policy type: a canned policy, `custom`, or `none`.
+fn policy_type(bucket: &BucketStat) -> &'static str {
+    if bucket.policy.is_empty() {
+        return "none";
+    }
+    match crate::commands::anonymous::parse_policy(&bucket.policy) {
+        Ok(document) => {
+            match crate::commands::anonymous::get_policy(&document.statements, &bucket.name, "") {
+                crate::commands::anonymous::BucketPolicy::None => "custom",
+                policy => policy.as_str(),
+            }
+        }
+        // mc leaves the type empty when the policy cannot be parsed.
+        Err(_) => "",
+    }
+}
+
+/// mc `bucketInfoMessage.String()` without its final newline.
+fn bucket_text(info: &BucketInfo) -> String {
+    let bucket = &info.stat;
     let mut out = String::new();
     let _ = writeln!(out, "{:<10}: {}", "Name", bucket.name);
-    let created = bucket.created.unwrap_or_else(SystemTime::now);
-    let _ = writeln!(out, "{:<10}: {} ", "Date", print_date(created));
+    let _ = writeln!(out, "{:<10}: {} ", "Date", print_date(SystemTime::now()));
     let _ = writeln!(out, "{:<10}: {:<6} ", "Size", "N/A");
     let _ = writeln!(out, "{:<10}: folder ", "Type");
     let _ = writeln!(out);
@@ -587,17 +624,22 @@ fn bucket_text(bucket: &BucketStat) -> String {
         let _ = writeln!(out, "    RetentionMode: {}", bucket.lock_mode);
         let _ = writeln!(out, "    Retention Until Date: {}", bucket.lock_validity);
     }
-    if bucket.notification {
+    // mc only reports topic notifications here.
+    if bucket
+        .notification
+        .as_ref()
+        .is_some_and(|config| !config.topic.is_empty())
+    {
         let _ = writeln!(out, "  Notification: Set");
     }
     if bucket.replication {
         let _ = writeln!(out, "  Replication: Enabled");
     }
     let _ = writeln!(out, "  Location: {}", bucket.location);
-    let anonymous = if bucket.anonymous {
-        "Enabled"
-    } else {
+    let anonymous = if policy_type(bucket) == "none" {
         "Disabled"
+    } else {
+        "Enabled"
     };
     let _ = writeln!(out, "  Anonymous: {anonymous}");
     if !bucket.tags.is_empty() {
@@ -611,36 +653,105 @@ fn bucket_text(bucket: &BucketStat) -> String {
     }
     let ilm = if bucket.ilm { "Enabled" } else { "Disabled" };
     let _ = writeln!(out, "  ILM: {ilm}");
+    let _ = writeln!(out);
+    out.push_str(&usage_text(&info.usage));
+    out.pop();
     out
 }
 
+/// mc `Usage:` block (and the object size histogram when the server reports one).
+fn usage_text(usage: &BucketUsage) -> String {
+    let comma = |value: u64| crate::s3::admin::comma(value as i64);
+    let mut out = String::from("Usage:\n");
+    let _ = writeln!(out, "{:>16}: {}", "Total size", human_bytes(usage.size));
+    let _ = writeln!(
+        out,
+        "{:>16}: {}",
+        "Objects count",
+        comma(usage.objects_count)
+    );
+    let _ = writeln!(
+        out,
+        "{:>16}: {}",
+        "Versions count",
+        comma(usage.versions_count)
+    );
+    let _ = writeln!(out);
+    if let Some(histogram) = usage.sizes_histogram.as_ref().filter(|h| !h.is_empty()) {
+        out.push_str("Object sizes histogram:\n");
+        let width = histogram
+            .values()
+            .map(|value| {
+                if *value == 0 {
+                    0
+                } else {
+                    value.to_string().len()
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        for (name, value) in histogram {
+            let _ = writeln!(out, "   {value:>width$} object(s) {name}");
+        }
+    }
+    out
+}
+
+fn bucket_json(info: &BucketInfo) -> BucketJson<'_> {
+    let bucket = &info.stat;
+    BucketJson {
+        status: "success",
+        name: format!("{}/", bucket.name),
+        last_modified: crate::commands::ls::go_time(SystemTime::now()),
+        size: 0,
+        versioning: VersioningJson {
+            status: bucket.versioning.clone(),
+            mfa_delete: bucket.mfa_delete.clone(),
+        },
+        encryption: EncryptionJson {
+            algorithm: bucket.encryption_algorithm.clone(),
+            key_id: bucket.encryption_key_id.clone(),
+        },
+        object_lock: LockJson {
+            enabled: bucket.lock_enabled.clone(),
+            mode: bucket.lock_mode.clone(),
+            validity: bucket.lock_validity.clone(),
+        },
+        // mc never fills in the replication config here.
+        replication: ReplicationJson {
+            enabled: bucket.replication,
+            config: ReplicationConfigJson {
+                rules: None,
+                role: "",
+            },
+        },
+        policy: PolicyJson {
+            kind: policy_type(bucket),
+            policy: &bucket.policy,
+        },
+        location: &bucket.location,
+        tagging: (!bucket.tags.is_empty()).then(|| bucket.tags.iter().cloned().collect()),
+        ilm: IlmJson {
+            config: info.lifecycle.as_ref(),
+        },
+        notification: NotificationJson {
+            config: NotificationDoc::new(bucket.notification.as_ref()),
+        },
+        usage: &info.usage,
+    }
+}
+
+/// mc `statMessage` (objects and folders).
 #[derive(Debug, Default, Serialize)]
 struct StatJson {
     status: &'static str,
-    target: String,
+    name: String,
+    #[serde(rename = "lastModified")]
+    last_modified: String,
+    size: i64,
+    etag: String,
     #[serde(rename = "type")]
     kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bucket: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    key: Option<String>,
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<i64>,
-    #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
-    last_modified: Option<String>,
-    #[serde(rename = "eTag", skip_serializing_if = "Option::is_none")]
-    etag_legacy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    etag: Option<String>,
-    #[serde(rename = "contentType", skip_serializing_if = "Option::is_none")]
-    content_type: Option<String>,
-    #[serde(rename = "storageClass", skip_serializing_if = "Option::is_none")]
-    storage_class: Option<String>,
-    #[serde(rename = "versionID", skip_serializing_if = "Option::is_none")]
-    version_id: Option<String>,
-    #[serde(rename = "deleteMarker", skip_serializing_if = "std::ops::Not::not")]
-    delete_marker: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     expires: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -651,24 +762,14 @@ struct StatJson {
     replication_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     metadata: Option<BTreeMap<String, String>>,
+    #[serde(rename = "versionID", skip_serializing_if = "Option::is_none")]
+    version_id: Option<String>,
+    #[serde(rename = "deleteMarker", skip_serializing_if = "std::ops::Not::not")]
+    delete_marker: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     restore: Option<RestoreJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     checksum: Option<BTreeMap<String, String>>,
-    #[serde(rename = "Versioning", skip_serializing_if = "Option::is_none")]
-    versioning: Option<VersioningJson>,
-    #[serde(rename = "Encryption", skip_serializing_if = "Option::is_none")]
-    encryption: Option<EncryptionJson>,
-    #[serde(rename = "ObjectLock", skip_serializing_if = "Option::is_none")]
-    object_lock: Option<LockJson>,
-    #[serde(rename = "Replication", skip_serializing_if = "Option::is_none")]
-    replication: Option<ReplicationJson>,
-    #[serde(rename = "Policy", skip_serializing_if = "Option::is_none")]
-    policy: Option<PolicyJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    location: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tagging: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -677,6 +778,33 @@ struct RestoreJson {
     ongoing: bool,
     #[serde(rename = "ExpiryTime", skip_serializing_if = "Option::is_none")]
     expiry: Option<String>,
+}
+
+/// mc `bucketInfoMessage` JSON.
+#[derive(Debug, Serialize)]
+struct BucketJson<'a> {
+    status: &'static str,
+    name: String,
+    #[serde(rename = "lastModified")]
+    last_modified: String,
+    size: i64,
+    #[serde(rename = "Versioning")]
+    versioning: VersioningJson,
+    #[serde(rename = "Encryption")]
+    encryption: EncryptionJson,
+    #[serde(rename = "ObjectLock")]
+    object_lock: LockJson,
+    #[serde(rename = "Replication")]
+    replication: ReplicationJson,
+    #[serde(rename = "Policy")]
+    policy: PolicyJson<'a>,
+    location: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tagging: Option<BTreeMap<String, String>>,
+    ilm: IlmJson<'a>,
+    notification: NotificationJson<'a>,
+    #[serde(rename = "Usage")]
+    usage: &'a BucketUsage,
 }
 
 #[derive(Debug, Serialize)]
@@ -704,12 +832,184 @@ struct LockJson {
 #[derive(Debug, Serialize)]
 struct ReplicationJson {
     enabled: bool,
+    config: ReplicationConfigJson,
 }
 
 #[derive(Debug, Serialize)]
-struct PolicyJson {
+struct ReplicationConfigJson {
+    #[serde(rename = "Rules")]
+    rules: Option<Vec<()>>,
+    #[serde(rename = "Role")]
+    role: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct PolicyJson<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    policy: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct IlmJson<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<&'a LifecycleConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct NotificationJson<'a> {
+    config: NotificationDoc<'a>,
+}
+
+/// minio-go `notification.Configuration` (Go field names, null for empty lists).
+#[derive(Debug, Serialize)]
+struct NotificationDoc<'a> {
+    #[serde(rename = "XMLName")]
+    xml_name: XmlNameJson,
+    #[serde(rename = "LambdaConfigs")]
+    lambda: Option<Vec<NotificationTargetJson<'a>>>,
+    #[serde(rename = "TopicConfigs")]
+    topic: Option<Vec<NotificationTargetJson<'a>>>,
+    #[serde(rename = "QueueConfigs")]
+    queue: Option<Vec<NotificationTargetJson<'a>>>,
+}
+
+impl<'a> NotificationDoc<'a> {
+    fn new(config: Option<&'a NotificationConfig>) -> Self {
+        let targets = |list: &'a [NotificationTarget], field: &'static str| {
+            (!list.is_empty()).then(|| {
+                list.iter()
+                    .map(|target| NotificationTargetJson::new(target, field))
+                    .collect()
+            })
+        };
+        Self {
+            xml_name: XmlNameJson {
+                space: if config.is_some() {
+                    crate::s3::bucket::S3_XMLNS
+                } else {
+                    ""
+                },
+                local: if config.is_some() {
+                    "NotificationConfiguration"
+                } else {
+                    ""
+                },
+            },
+            lambda: config.and_then(|c| targets(&c.lambda, "Lambda")),
+            topic: config.and_then(|c| targets(&c.topic, "Topic")),
+            queue: config.and_then(|c| targets(&c.queue, "Queue")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct XmlNameJson {
+    #[serde(rename = "Space")]
+    space: &'static str,
+    #[serde(rename = "Local")]
+    local: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct NotificationTargetJson<'a> {
+    #[serde(rename = "ID")]
+    id: &'a str,
+    #[serde(rename = "Arn")]
+    arn: ArnJson,
+    #[serde(rename = "Events")]
+    events: &'a [String],
+    #[serde(rename = "Filter")]
+    filter: Option<FilterJson<'a>>,
+    /// `Lambda` / `Topic` / `Queue` -> ARN.
+    #[serde(flatten)]
+    target: BTreeMap<&'static str, &'a str>,
+}
+
+impl<'a> NotificationTargetJson<'a> {
+    fn new(target: &'a NotificationTarget, field: &'static str) -> Self {
+        Self {
+            id: &target.id,
+            arn: ArnJson::default(),
+            events: &target.events,
+            filter: target.filter.as_ref().map(|rules| FilterJson {
+                s3_key: S3KeyJson {
+                    rules: (!rules.is_empty()).then(|| {
+                        rules
+                            .iter()
+                            .map(|(name, value)| FilterRuleJson { name, value })
+                            .collect()
+                    }),
+                },
+            }),
+            target: BTreeMap::from([(field, target.arn.as_str())]),
+        }
+    }
+}
+
+/// minio-go `notification.Arn` is not read from XML, so it is always empty.
+#[derive(Debug, Default, Serialize)]
+struct ArnJson {
+    #[serde(rename = "Partition")]
+    partition: &'static str,
+    #[serde(rename = "Service")]
+    service: &'static str,
+    #[serde(rename = "Region")]
+    region: &'static str,
+    #[serde(rename = "AccountID")]
+    account_id: &'static str,
+    #[serde(rename = "Resource")]
+    resource: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct FilterJson<'a> {
+    #[serde(rename = "S3Key")]
+    s3_key: S3KeyJson<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct S3KeyJson<'a> {
+    #[serde(rename = "FilterRules")]
+    rules: Option<Vec<FilterRuleJson<'a>>>,
+}
+
+#[derive(Debug, Serialize)]
+struct FilterRuleJson<'a> {
+    #[serde(rename = "Name")]
+    name: &'a str,
+    #[serde(rename = "Value")]
+    value: &'a str,
+}
+
+/// madmin `BucketUsageInfo`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct BucketUsage {
+    size: u64,
+    #[serde(rename = "objectsPendingReplicationTotalSize")]
+    pending_size: u64,
+    #[serde(rename = "objectsFailedReplicationTotalSize")]
+    failed_size: u64,
+    #[serde(rename = "objectsReplicatedTotalSize")]
+    replicated_size: u64,
+    #[serde(rename = "objectReplicaTotalSize")]
+    replica_size: u64,
+    #[serde(rename = "objectsPendingReplicationCount")]
+    pending_count: u64,
+    #[serde(rename = "objectsFailedReplicationCount")]
+    failed_count: u64,
+    #[serde(rename = "versionsCount")]
+    versions_count: u64,
+    #[serde(rename = "objectsCount")]
+    objects_count: u64,
+    #[serde(rename = "deleteMarkersCount")]
+    delete_markers_count: u64,
+    #[serde(rename = "objectsSizesHistogram")]
+    sizes_histogram: Option<BTreeMap<String, u64>>,
+    #[serde(rename = "objectsVersionsHistogram")]
+    versions_histogram: Option<BTreeMap<String, u64>>,
 }
 
 #[cfg(test)]
@@ -785,22 +1085,67 @@ mod tests {
     }
 
     #[test]
-    fn bucket_text_lists_properties() {
-        let text = bucket_text(&BucketStat {
-            name: "b".into(),
-            created: Some(UNIX_EPOCH),
-            versioning: "Enabled".into(),
-            location: "us-east-1".into(),
-            lock_mode: "GOVERNANCE".into(),
-            lock_validity: "1DAYS".into(),
-            tags: vec![("k".into(), "v".into())],
-            ..Default::default()
-        });
-        assert!(text.starts_with("Name      : b\nDate      : 1970-01-01 00:00:00 UTC \n"));
-        assert!(text.contains("Size      : N/A    \n"));
+    fn bucket_text_lists_properties_and_usage() {
+        let mut info = BucketInfo {
+            stat: BucketStat {
+                name: "b".into(),
+                versioning: "Enabled".into(),
+                location: "us-east-1".into(),
+                lock_mode: "GOVERNANCE".into(),
+                lock_validity: "1DAYS".into(),
+                tags: vec![("k".into(), "v".into())],
+                ..Default::default()
+            },
+            lifecycle: None,
+            usage: BucketUsage {
+                size: 2048,
+                objects_count: 1234,
+                versions_count: 1234,
+                ..Default::default()
+            },
+        };
+        let text = bucket_text(&info);
+        assert!(text.starts_with("Name      : b\nDate      : "));
+        assert!(text.contains("Size      : N/A    \nType      : folder \n\nProperties:\n"));
         assert!(text.contains("  Versioning: Enabled\n"));
         assert!(text.contains("    RetentionMode: GOVERNANCE\n"));
         assert!(text.contains("  Anonymous: Disabled\n  Tagging: k:v\n"));
-        assert!(text.ends_with("  ILM: Disabled\n"));
+        assert!(text.ends_with(
+            "  ILM: Disabled\n\nUsage:\n      Total size: 2.0 KiB\n   Objects count: 1,234\n  Versions count: 1,234\n"
+        ));
+        info.usage.sizes_histogram = Some(BTreeMap::from([
+            ("A".to_string(), 0),
+            ("B".to_string(), 12),
+        ]));
+        assert!(bucket_text(&info).ends_with(
+            "Versions count: 1,234\n\nObject sizes histogram:\n    0 object(s) A\n   12 object(s) B"
+        ));
+    }
+
+    #[test]
+    fn bucket_json_matches_mc_shape() {
+        let info = BucketInfo {
+            stat: BucketStat {
+                name: "b".into(),
+                location: "us-east-1".into(),
+                notification: Some(NotificationConfig {
+                    queue: vec![NotificationTarget {
+                        id: "1".into(),
+                        events: vec!["s3:ObjectCreated:*".into()],
+                        filter: Some(vec![("prefix".into(), "p/".into())]),
+                        arn: "arn:minio:sqs::X:webhook".into(),
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            lifecycle: None,
+            usage: BucketUsage::default(),
+        };
+        let doc = serde_json::to_string(&bucket_json(&info)).unwrap();
+        assert!(doc.starts_with(r#"{"status":"success","name":"b/","lastModified":"#));
+        assert!(doc.contains(r#""Replication":{"enabled":false,"config":{"Rules":null,"Role":""}},"Policy":{"type":"none"},"location":"us-east-1","ilm":{},"notification""#));
+        assert!(doc.contains(r#""QueueConfigs":[{"ID":"1","Arn":{"Partition":"","Service":"","Region":"","AccountID":"","Resource":""},"Events":["s3:ObjectCreated:*"],"Filter":{"S3Key":{"FilterRules":[{"Name":"prefix","Value":"p/"}]}},"Queue":"arn:minio:sqs::X:webhook"}]"#));
+        assert!(doc.ends_with(r#""objectsSizesHistogram":null,"objectsVersionsHistogram":null}}"#));
     }
 }

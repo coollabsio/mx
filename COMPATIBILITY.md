@@ -12,10 +12,10 @@ server support that varies between S3-compatible servers.
 | Command | Status | Notes |
 | --- | --- | --- |
 | `alias set`, `list`, `remove`, `import`, `export` | Supported | Short names `s`, `ls`, `rm`, `i`, `e`. `list` includes `MC_HOST_*` aliases (Src `env`). Reads version 10 `~/.mc/config.json` files. Export matches the [mc alias export JSON schema](https://min.io/docs/minio/linux/reference/minio-mc/mc-alias-export.html). |
-| `ls` | Supported | `-r`, `--versions`, `--rewind`, `-I`, `--summarize`, `--storage-class` (filter), `--zip`. The default table output did not change. |
-| `mb` | Supported | `-p/--ignore-existing`, `--with-versioning`, `-l/--with-lock`, `--region`. |
-| `rb` | Supported | Takes multiple targets. `--force` deletes objects and versions first. `--force --dangerous ALIAS` removes all buckets. |
-| `stat` | Supported | mc layout. `-r`, `--versions`, `--version-id`, `--rewind`, `-v`, `--no-list`. JSON keeps `size`. `type` is `file` or `folder`. |
+| `ls` | Supported | `-r`, `--versions`, `--rewind`, `-I`, `--summarize`, `--storage-class` (filter), `--zip`. Multiple targets, default `.`. mc lines `[DATE]   SIZE CLASS [VERSION vN PUT\|DEL] KEY` and mc JSON (`type`, `key`, `etag`, `url`, `versionOrdinal`, ...). Local paths are listed like mc. Delete markers always show storage class `STANDARD` (MinIO reports it; the SDK drops it). Objects come before folders over the whole listing, mc orders them per 1000-key page. |
+| `mb` | Supported | `-p/--ignore-existing`, `--with-versioning`, `-l/--with-lock`, `--region`. Multiple targets. `ALIAS/BUCKET/DIR` creates the folder marker `DIR/` (and the bucket if needed), like mc. mc text and JSON (`bucket` is the target, `region` is empty). |
+| `rb` | Supported | Takes multiple targets. `--force` deletes objects and versions first. `--force --dangerous ALIAS` removes all buckets. mc text and JSON (`bucket` is `ALIAS/BUCKET`). |
+| `stat` | Supported | mc layout and JSON. `-r`, `--versions`, `--version-id`, `--rewind`, `-v`, `--no-list`. Buckets include the `Usage:` block (MinIO admin data usage; zero values elsewhere) and mc's JSON blocks (`ilm`, `notification`, `Usage`). `stat --versions` also describes delete markers; mc fails with `MethodNotAllowed`. |
 | `cat` | Supported | Takes multiple targets. `--rewind`, `--version-id`, `--zip`, `--offset`, `--tail`, `--part-number`, `--enc-c`. |
 | `head` | Supported | `-n`, `--rewind`, `--version-id`, `--zip`, `--enc-c`. Also works on local files. |
 | `get` | Supported | `--version-id`, `--enc-c`. |
@@ -24,8 +24,8 @@ server support that varies between S3-compatible servers.
 | `cp`, `mv` | Supported | Follow mc rules for multiple sources and `-r` in every direction: local↔S3, S3→S3 (also across servers), and local→local. Flags: `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--tags`, `--checksum`, `--disable-multipart`, `-a/--preserve` (mc-attrs), `--enc-c/--enc-s3/--enc-kms`, `--rewind`, `--version-id`, `--legal-hold`, `--retention-mode/--retention-duration`, `--zip`, `--max-workers` (`--rewind`, `--version-id`, `--legal-hold`, `--retention-*`, `--zip`, and `--max-workers` are `cp` only). Objects larger than 5 GiB use server-side multipart copy. They show a progress bar on a TTY. Otherwise they print mc's `` `SRC` -> `TGT` `` lines and a summary. |
 | `rm` | Supported | Takes multiple targets. `-r --force`, `--versions`, `--version-id`, `--non-current`, `--rewind`, `--dangerous`, `-I`, `--dry-run`, `--stdin`, `--older-than`, `--newer-than`, `--bypass`, `--purge`. Output lines and JSON match mc. |
 | `mirror` | Supported | Works in every direction, including from or to an alias root. Uses mc's change detection. `--overwrite`, `--remove`, `--dry-run`, `-w/--watch` (polling rescan), `--region`, `-a`, `--active-active`, `--disable-multipart`, `--exclude`, `--exclude-bucket`, `--exclude-storageclass`, `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--retry`, `--summary`, `--skip-errors`, `--max-workers`, `--checksum`, SSE flags. `--monitoring-address` is not supported. |
-| `du` | Supported | `-r`, `-d`, `--versions`, `--rewind`. S3 aliases and local paths. |
-| `tree` | Supported | `-f`, `-d`, `--rewind`. |
+| `du` | Supported | `-r`, `-d`, `--versions`, `--rewind`. Multiple targets. S3 aliases and local paths. mc lines `SIZE<TAB>N objects<TAB>PREFIX`, deepest folders first. Local paths ignore `--versions`/`--rewind` like mc. |
+| `tree` | Supported | `-f`, `-d`, `--rewind`, `--json` (recursive `ls` JSON, like mc). Multiple targets, default `.`. mc glyphs. |
 | `find` | Supported | Supports every mc flag, including `--exec`, `--print`, `--larger`, `--smaller`, `--metadata`, `--tags`, `--watch` (polling), `--versions`. Paths are relative by default. |
 | `diff` | Supported | S3 aliases and local paths. |
 | `share download`, `upload`, `list` | Supported | `-r`, `--version-id`, `-E/--expire` (default `168h`), `-T`. `upload` prints a `curl` command with a POST policy. `list` uses mc's share database in `<config dir>/share/`. |
@@ -110,8 +110,8 @@ server support that varies between S3-compatible servers.
 
 - `cp`/`mv`: no content-type guessing and no xattrs. `--tags` is not applied
   on a streamed copy between two servers.
-- Output is close to mc but not byte-for-byte identical. Missing: mc's `ls`
-  line format and some per-command JSON field sets. Some errors differ where mc
+- Output is close to mc but not byte-for-byte identical. Missing: some
+  per-command JSON field sets. Some errors differ where mc
   depends on minio-go internals (bucket location lookups).
 - No API auto-probing and no TLS trust prompt flow.
 

@@ -135,168 +135,135 @@ macro_rules! case {
 // ls
 // ---------------------------------------------------------------------------
 
+case!(ls_alias_root_text, text, seeded(), ["ls", "{alias}/"]);
+case!(ls_alias_root_json, json, seeded(), ["ls", "{alias}/"]);
+case!(ls_bucket_text, text, seeded(), ["ls", "{target}"]);
+case!(ls_bucket_json, json, seeded(), ["ls", "{target}"]);
+case!(ls_prefix_text, text, seeded(), ["ls", "{target}/dir/"]);
+case!(ls_prefix_json, json, seeded(), ["ls", "{target}/dir/"]);
+case!(ls_recursive_text, text, seeded(), ["ls", "-r", "{target}"]);
+case!(ls_recursive_json, json, seeded(), ["ls", "-r", "{target}"]);
 case!(
-    #[ignore = "parity: mc ls line format `[DATE]  SIZE NAME/`"]
-    ls_alias_root_text,
-    text,
-    seeded(),
-    ["ls", "{alias}/"]
-);
-case!(
-    #[ignore = "parity: JSON fields key/url/type=folder/versionOrdinal"]
-    ls_alias_root_json,
-    json,
-    seeded(),
-    ["ls", "{alias}/"]
-);
-case!(
-    #[ignore = "parity: mc ls line format `[DATE]  SIZE CLASS NAME`"]
-    ls_bucket_text,
-    text,
-    seeded(),
-    ["ls", "{target}"]
-);
-case!(
-    #[ignore = "parity: JSON fields key/url/type=file|folder/versionOrdinal, order"]
-    ls_bucket_json,
-    json,
-    seeded(),
-    ["ls", "{target}"]
-);
-case!(
-    #[ignore = "parity: mc ls line format `[DATE]  SIZE CLASS NAME`"]
-    ls_prefix_text,
-    text,
-    seeded(),
-    ["ls", "{target}/dir/"]
-);
-case!(
-    #[ignore = "parity: JSON fields key/url/type=file|folder/versionOrdinal, order"]
-    ls_prefix_json,
-    json,
-    seeded(),
-    ["ls", "{target}/dir/"]
-);
-case!(
-    #[ignore = "parity: mc ls line format `[DATE]  SIZE CLASS NAME`"]
-    ls_recursive_text,
-    text,
-    seeded(),
-    ["ls", "-r", "{target}"]
-);
-case!(
-    #[ignore = "parity: JSON fields key/url/type/versionOrdinal, unquoted etag"]
-    ls_recursive_json,
-    json,
-    seeded(),
-    ["ls", "-r", "{target}"]
-);
-case!(
-    #[ignore = "parity: mc ls line format with version id"]
     ls_versions_text,
     text,
     versioned(),
     ["ls", "-r", "--versions", "{target}"]
 );
 case!(
-    #[ignore = "parity: JSON fields key/url/type, unquoted etag"]
     ls_versions_json,
     json,
     versioned(),
     ["ls", "-r", "--versions", "{target}"]
 );
 case!(
-    #[ignore = "parity: mc ls line format `[DATE]  SIZE CLASS NAME`"]
     ls_summarize_text,
     text,
     seeded(),
     ["ls", "-r", "--summarize", "{target}"]
 );
 case!(
-    #[ignore = "parity: JSON fields key/url/type/versionOrdinal, unquoted etag"]
     ls_summarize_json,
     json,
     seeded(),
     ["ls", "-r", "--summarize", "{target}"]
 );
+case!(ls_object_text, text, seeded(), ["ls", "{target}/a.txt"]);
+case!(
+    ls_partial_prefix_json,
+    json,
+    seeded(),
+    ["ls", "{target}/di"]
+);
+case!(ls_local_text, text, seeded(), ["ls", "src"]);
+case!(ls_local_json, json, seeded(), ["ls", "src"]);
+case!(
+    ls_local_recursive_text,
+    text,
+    seeded(),
+    ["ls", "-r", "src/"]
+);
+case!(ls_local_missing_text, text, seeded(), ["ls", "src/nope/x"]);
 
 // ---------------------------------------------------------------------------
 // stat
 // ---------------------------------------------------------------------------
 
+/// Bucket usage comes from MinIO's background scanner, so its numbers depend on scan timing.
+fn scanned(p: Option<Parity>) -> Option<Parity> {
+    let mut p = p?;
+    p.normalizer
+        .rule(r"(Total size|Objects count|Versions count): .*", "$1: <N>")
+        .rule(
+            r"Object sizes histogram:\n(?: +\d+ object\(s\) \S+\n?)*",
+            "",
+        )
+        .rule(
+            r#""Usage":\{(?:[^{}]|\{[^{}]*\})*\}"#,
+            r#""Usage":"<USAGE>""#,
+        );
+    Some(p)
+}
+
 case!(
-    #[ignore = "parity: missing `Usage:` section"]
     stat_bucket_text,
     text,
-    seeded(),
+    scanned(seeded()),
     ["stat", "{target}"]
 );
 case!(
-    #[ignore = "parity: mc bucket stat JSON shape (Usage, ilm, notification, name=`b/`)"]
     stat_bucket_json,
     json,
-    seeded(),
+    scanned(seeded()),
     ["stat", "{target}"]
 );
-case!(stat_object_text, text, seeded(), ["stat", "{target}/a.txt"]);
 case!(
-    #[ignore = "parity: extra fields bucket/contentType/eTag/key/target"]
-    stat_object_json,
+    stat_bucket_versioned_json,
+    json,
+    scanned(versioned()),
+    ["stat", "{target}"]
+);
+case!(stat_folder_text, text, seeded(), ["stat", "{target}/dir"]);
+case!(stat_folder_json, json, seeded(), ["stat", "{target}/dir"]);
+case!(stat_prefix_text, text, seeded(), ["stat", "{target}/dir/"]);
+case!(
+    stat_recursive_json,
     json,
     seeded(),
-    ["stat", "{target}/a.txt"]
+    ["stat", "-r", "{target}/dir"]
 );
+case!(stat_object_text, text, seeded(), ["stat", "{target}/a.txt"]);
+case!(stat_object_json, json, seeded(), ["stat", "{target}/a.txt"]);
 
 // ---------------------------------------------------------------------------
 // mb / rb
 // ---------------------------------------------------------------------------
 
-case!(
-    #[ignore = "parity: message `Bucket created successfully `alias/bucket`.`"]
-    mb_text,
-    text,
-    empty(),
-    ["mb", "{target}-new"]
-);
-case!(
-    #[ignore = "parity: JSON bucket=`alias/bucket`, region field, no target"]
-    mb_json,
-    json,
-    empty(),
-    ["mb", "{target}-new"]
-);
-case!(
-    #[ignore = "parity: message `Bucket created successfully `alias/bucket`.`"]
-    mb_existing_p_text,
-    text,
-    empty(),
-    ["mb", "-p", "{target}"]
-);
-case!(
-    #[ignore = "parity: JSON bucket=`alias/bucket`, region field, no target"]
-    mb_existing_p_json,
-    json,
-    empty(),
-    ["mb", "-p", "{target}"]
-);
+case!(mb_text, text, empty(), ["mb", "{target}-new"]);
+case!(mb_json, json, empty(), ["mb", "{target}-new"]);
+case!(mb_existing_p_text, text, empty(), ["mb", "-p", "{target}"]);
+case!(mb_existing_p_json, json, empty(), ["mb", "-p", "{target}"]);
 case!(mb_existing_error_text, text, empty(), ["mb", "{target}"]);
 case!(mb_existing_error_json, json, empty(), ["mb", "{target}"]);
-case!(
-    #[ignore = "parity: message `Removed `alias/bucket` successfully.`"]
-    rb_text,
-    text,
-    empty(),
-    ["rb", "{target}"]
-);
-case!(
-    #[ignore = "parity: JSON bucket=`alias/bucket`, no target"]
-    rb_json,
-    json,
-    empty(),
-    ["rb", "{target}"]
-);
+case!(rb_text, text, empty(), ["rb", "{target}"]);
+case!(rb_json, json, empty(), ["rb", "{target}"]);
 case!(rb_not_empty_text, text, seeded(), ["rb", "{target}"]);
 case!(rb_not_empty_json, json, seeded(), ["rb", "{target}"]);
+case!(rb_force_text, text, seeded(), ["rb", "--force", "{target}"]);
+case!(rb_missing_text, text, bare(), ["rb", "{target}"]);
+case!(rb_missing_json, json, bare(), ["rb", "{target}"]);
+case!(
+    rb_missing_force_text,
+    text,
+    bare(),
+    ["rb", "--force", "{target}"]
+);
+case!(mb_folder_text, text, empty(), ["mb", "{target}/newdir"]);
+case!(
+    mb_multiple_json,
+    json,
+    bare(),
+    ["mb", "{target}", "{target}-2"]
+);
 
 // ---------------------------------------------------------------------------
 // rm
@@ -501,48 +468,29 @@ case!(
 // du / tree / find / diff
 // ---------------------------------------------------------------------------
 
+case!(du_text, text, seeded(), ["du", "{target}"]);
+case!(du_json, json, seeded(), ["du", "{target}"]);
+case!(du_depth_text, text, seeded(), ["du", "-d", "2", "{target}"]);
+case!(tree_text, text, seeded(), ["tree", "{target}"]);
+case!(tree_files_text, text, seeded(), ["tree", "-f", "{target}"]);
+case!(tree_json, json, seeded(), ["tree", "-f", "{target}"]);
+case!(du_recursive_text, text, seeded(), ["du", "-r", "{target}"]);
 case!(
-    #[ignore = "parity: mc prints one total line `38B<TAB>3 objects<TAB>BUCKET`"]
-    du_text,
-    text,
-    seeded(),
-    ["du", "{target}"]
-);
-case!(
-    #[ignore = "parity: mc prints one total doc with prefix=BUCKET"]
-    du_json,
+    du_versions_json,
     json,
-    seeded(),
-    ["du", "{target}"]
+    versioned(),
+    ["du", "-r", "--versions", "{target}"]
 );
+case!(du_local_text, text, seeded(), ["du", "src"]);
+case!(du_object_text, text, seeded(), ["du", "{target}/a.txt"]);
 case!(
-    #[ignore = "parity: mc -d format/ordering (`SIZE<TAB>N objects<TAB>BUCKET/dir`)"]
-    du_depth_text,
+    tree_depth_text,
     text,
     seeded(),
-    ["du", "-d", "2", "{target}"]
+    ["tree", "-d", "1", "{target}"]
 );
-case!(
-    #[ignore = "parity: mc tree glyphs `└─ dir`"]
-    tree_text,
-    text,
-    seeded(),
-    ["tree", "{target}"]
-);
-case!(
-    #[ignore = "parity: mc tree glyphs `├─ a.txt`"]
-    tree_files_text,
-    text,
-    seeded(),
-    ["tree", "-f", "{target}"]
-);
-case!(
-    #[ignore = "parity: --json unsupported; mc prints ls-style JSON docs"]
-    tree_json,
-    json,
-    seeded(),
-    ["tree", "-f", "{target}"]
-);
+case!(tree_local_text, text, seeded(), ["tree", "-f", "src"]);
+case!(tree_missing_text, text, bare(), ["tree", "{target}"]);
 case!(
     #[ignore = "parity: mc prints `alias/bucket/key`, mx relative keys"]
     find_name_text,

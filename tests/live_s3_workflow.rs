@@ -241,7 +241,7 @@ fn live_parity_commands_work_against_s3() {
         .args(["du", "-r", &bucket_target])
         .assert()
         .success()
-        .stdout(predicate::str::contains("objects"));
+        .stdout(predicate::str::contains(format!("\t1 object\t{bucket}\n")));
     live::mx()
         .env("HOME", home.path())
         .args(["find", &bucket_target, "--name", "*.txt"])
