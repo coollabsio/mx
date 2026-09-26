@@ -100,19 +100,13 @@ pub fn run(args: LsArgs, json: bool) -> Result<()> {
 
     if json {
         for entry in &entries {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&ListMessage::from_entry(&args.target, entry))?
-            );
+            crate::output::print_json(&ListMessage::from_entry(&args.target, entry))?;
         }
         if args.summarize {
-            println!(
-                "{}",
-                serde_json::to_string(&serde_json::json!({
-                    "totalObjects": total_objects,
-                    "totalSize": total_size,
-                }))?
-            );
+            crate::output::print_json(&serde_json::json!({
+                "totalObjects": total_objects,
+                "totalSize": total_size,
+            }))?;
         }
         return Ok(());
     }

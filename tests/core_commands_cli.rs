@@ -42,9 +42,10 @@ fn cat_rejects_json_output() {
     cmd.env("HOME", home.path())
         .args(["--json", "cat", "play/example/file.txt"]);
 
+    // With --json, the error is an mc error document on stdout.
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("does not support `--json`"));
+        .stdout(predicate::str::contains("does not support `--json`"));
 }
 
 #[test]

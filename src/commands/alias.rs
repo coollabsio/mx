@@ -25,9 +25,9 @@ pub enum AliasCommand {
         about = "remove an alias from configuration file"
     )]
     Remove(AliasRemoveArgs),
-    #[command(about = "import an alias from JSON")]
+    #[command(visible_alias = "i", about = "import an alias from JSON")]
     Import(AliasImportArgs),
-    #[command(about = "export an alias as JSON")]
+    #[command(visible_alias = "e", about = "export an alias as JSON")]
     Export(AliasExportArgs),
 }
 
@@ -122,12 +122,14 @@ fn list(args: AliasListArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let src = store.path().display().to_string();
 
+    // Includes `MC_HOST_*` / `MC_CONFIG_ENV_FILE` aliases (src `env` / the env file).
     let mut rows = Vec::new();
     for (alias, cfg) in &store.config().aliases {
+        let row_src = cfg.src.clone().unwrap_or_else(|| src.clone());
         rows.push(DisplayAlias::from_parts(
             alias.clone(),
             cfg.clone(),
-            src.clone(),
+            row_src,
         ));
     }
 
@@ -202,6 +204,7 @@ fn export(args: AliasExportArgs) -> Result<()> {
         api: config.api.clone(),
         path: config.path.clone(),
     };
+    // mc prints compact JSON here regardless of the terminal.
     println!("{}", serde_json::to_string(&document)?);
     Ok(())
 }
@@ -240,7 +243,7 @@ fn print_rows(rows: &[DisplayAlias], json: bool) -> Result<()> {
 
 fn print_message(message: &AliasMessage<'_>, plain: &str, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(message)?);
+        output::print_json(message)?;
     } else if !plain.is_empty() {
         output::print_plain(plain);
     }

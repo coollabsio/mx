@@ -11,7 +11,7 @@ server support that varies between S3-compatible servers.
 
 | Command | Status | Notes |
 | --- | --- | --- |
-| `alias set`, `list`, `remove`, `import`, `export` | Supported | Reads version 10 `~/.mc/config.json` files. Export matches the [mc alias export JSON schema](https://min.io/docs/minio/linux/reference/minio-mc/mc-alias-export.html). |
+| `alias set`, `list`, `remove`, `import`, `export` | Supported | Short names `s`, `ls`, `rm`, `i`, `e`. `list` includes `MC_HOST_*` aliases (Src `env`). Reads version 10 `~/.mc/config.json` files. Export matches the [mc alias export JSON schema](https://min.io/docs/minio/linux/reference/minio-mc/mc-alias-export.html). |
 | `ls` | Supported | `-r`, `--versions`, `--rewind`, `-I`, `--summarize`, `--storage-class` (filter), `--zip`. The default table output did not change. |
 | `mb` | Supported | `-p/--ignore-existing`, `--with-versioning`, `-l/--with-lock`, `--region`. |
 | `rb` | Supported | Takes multiple targets. `--force` deletes objects and versions first. `--force --dangerous ALIAS` removes all buckets. |
@@ -49,7 +49,23 @@ server support that varies between S3-compatible servers.
 
 ## Global options
 
-- `--json` (JSON lines output)
+- `--json`: like mc, one compact JSON document per line when stdout is not a
+  terminal, one-space indented JSON on a terminal. Go HTML escaping (`\u003c`
+  etc.) is kept.
+- Errors: `PROG: <ERROR> MESSAGE CAUSE.` on stderr with mc's punctuation rules
+  (`PROG` is the invoked name, e.g. `mc`), exit status 1. With `--json`, the mc
+  error document (`{"status":"error","error":{"message","cause":{"message","error"},"type"}}`)
+  goes to stdout, indented like mc. The anyhow context is the message; the
+  rest of the chain is the cause. Usage errors print
+  `PROG: <ERROR> Invalid command usage, ...` and exit 1.
+- `MC_*` environment variables: `MC_CONFIG_DIR`, `MC_QUIET`, `MC_DISABLE_PAGER`,
+  `MC_NO_COLOR`, `MC_JSON`, `MC_DEBUG`, `MC_RESOLVE` (comma separated),
+  `MC_INSECURE`, `MC_LIMIT_UPLOAD`, `MC_LIMIT_DOWNLOAD`. Booleans use Go
+  `ParseBool` (`1`/`true`/`t`, `0`/`false`/`f`, empty = false).
+- `MC_HOST_<alias>=https://ACCESS:SECRET[:TOKEN]@HOST[:PORT]` defines an alias
+  (API S3v4, path auto) that overrides the config file, like mc. Keys are taken
+  literally (no percent-decoding), the host is after the last `@`. It is never
+  saved. `MC_CONFIG_ENV_FILE` reads `MC_HOST_<alias>=URL` lines from a file.
 - `--config-dir` / `-C`
 - `--quiet` / `-q`
 - `--insecure` skips TLS certificate verification.
@@ -61,10 +77,10 @@ server support that varies between S3-compatible servers.
 - `--resolve HOST:PORT=IP` (repeatable)
 - `--disable-pager` / `--dp` and `--no-color` are accepted. They do nothing
   because `mx` has no pager and no colors.
-- `--version` / `-V`
+- `-v` / `--version` (and `-V`) print `PROG version X (commit-id=SHA)` plus
+  `Runtime:` and license lines, like mc.
 
-`--conn-read-deadline` and `--conn-write-deadline` are not supported. `MC_*`
-environment variables for global flags are not read yet.
+`--conn-read-deadline` and `--conn-write-deadline` are not supported.
 
 ## Intentional differences from mc
 
@@ -85,10 +101,8 @@ environment variables for global flags are not read yet.
 - `cp`/`mv`: no content-type guessing and no xattrs. `--tags` is not applied
   on a streamed copy between two servers.
 - Output is close to mc but not byte-for-byte identical. Missing: mc's `ls`
-  line format, compact one-line JSON on a non-TTY for every command, the
-  `mc: <ERROR>` error format, and JSON error objects.
-- No `MC_HOST_<alias>` environment aliases and no `MC_*` environment flags.
-- No `-v` version flag. Use `-V` / `--version`.
+  line format and some per-command JSON field sets. The JSON error `cause.error`
+  is always `{}`.
 - No API auto-probing and no TLS trust prompt flow.
 
 ## Coolify compatibility

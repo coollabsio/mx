@@ -113,16 +113,13 @@ fn print_message(
     json: bool,
 ) -> Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&AnonymousMessage {
-                operation,
-                status: "success",
-                bucket: target,
-                permission,
-                anonymous,
-            })?
-        );
+        crate::output::print_json(&AnonymousMessage {
+            operation,
+            status: "success",
+            bucket: target,
+            permission,
+            anonymous,
+        })?;
         return Ok(());
     }
     match operation {
@@ -133,7 +130,7 @@ fn print_message(
             "Access permission for `{target}` is set from `{permission}`"
         )),
         "get" => println!("Access permission for `{target}` is `{permission}`"),
-        _ => println!("{}", serde_json::to_string_pretty(&anonymous)?),
+        _ => println!("{}", crate::output::json_indent(&anonymous)?),
     }
     Ok(())
 }
@@ -263,13 +260,10 @@ fn list(target_arg: &str, json: bool) -> Result<()> {
     let target = load_target(target_arg)?;
     for (resource, allow) in access_rules(&target)? {
         if json {
-            println!(
-                "{}",
-                serde_json::to_string(&RuleMessage {
-                    resource: &resource,
-                    allow: &allow,
-                })?
-            );
+            crate::output::print_json(&RuleMessage {
+                resource: &resource,
+                allow: &allow,
+            })?;
         } else {
             println!("{resource} => {allow}");
         }
@@ -322,13 +316,10 @@ fn links(args: AnonymousLinksArgs, json: bool) -> Result<()> {
                 url
             };
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string(&LinkMessage {
-                        status: "success",
-                        url: &url,
-                    })?
-                );
+                crate::output::print_json(&LinkMessage {
+                    status: "success",
+                    url: &url,
+                })?;
             } else {
                 println!("{url}");
             }

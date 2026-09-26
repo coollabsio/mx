@@ -90,10 +90,17 @@ pub fn run(args: PipeArgs, json: bool) -> Result<()> {
     };
 
     if json {
-        println!(
-            "{{\"status\":\"success\",\"size\":{bytes},\"target\":{}}}",
-            serde_json::to_string(&args.target)?
-        );
+        #[derive(serde::Serialize)]
+        struct PipeMessage<'a> {
+            status: &'static str,
+            size: i64,
+            target: &'a str,
+        }
+        crate::output::print_json(&PipeMessage {
+            status: "success",
+            size: bytes,
+            target: &args.target,
+        })?;
     } else if !quiet {
         println!("{bytes} bytes -> `{}`", args.target);
     }

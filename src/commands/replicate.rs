@@ -292,7 +292,7 @@ fn print_json<T: Serialize>(op: &str, url: &str, body: T) -> Result<()> {
         url,
         body,
     };
-    println!("{}", serde_json::to_string_pretty(&message)?);
+    crate::output::print_json(&message)?;
     Ok(())
 }
 
@@ -920,15 +920,6 @@ fn resync_cancel(args: ResyncTargetArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// JSON with a one-space indent (Go `json.MarshalIndent(v, "", " ")`).
-fn go_indent_json(value: &impl serde::Serialize) -> Result<String> {
-    let mut buf = Vec::new();
-    let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
-    let mut serializer = serde_json::Serializer::with_formatter(&mut buf, formatter);
-    value.serialize(&mut serializer)?;
-    Ok(String::from_utf8(buf)?)
-}
-
 #[derive(Serialize)]
 struct ConfigBody<'a> {
     config: &'a ReplicationConfig,
@@ -945,7 +936,7 @@ fn export(args: ReplicateTargetArgs, json: bool) -> Result<()> {
     if config.rules.is_empty() {
         println!("No replication configuration found for {}.", args.target);
     } else {
-        println!("{}", go_indent_json(&config)?);
+        println!("{}", crate::output::json_indent(&config)?);
     }
     Ok(())
 }
@@ -1072,7 +1063,7 @@ fn backlog(args: ReplicateBacklogArgs, json: bool) -> Result<()> {
         .context("Unable to fetch replication backlog")?;
     if json {
         for entry in &entries {
-            println!("{}", go_indent_json(entry)?);
+            println!("{}", crate::output::json_indent(entry)?);
         }
         return Ok(());
     }
@@ -1170,6 +1161,9 @@ mod tests {
         assert_eq!(human_duration(7200), "2 hours");
         let empty = status_text(&json!({}), &[], &ReplicationConfig::default());
         assert_eq!(empty, "Replication is not configured.\n");
-        assert_eq!(go_indent_json(&json!({"a": 1})).unwrap(), "{\n \"a\": 1\n}");
+        assert_eq!(
+            crate::output::json_indent(&json!({"a": 1})).unwrap(),
+            "{\n \"a\": 1\n}"
+        );
     }
 }

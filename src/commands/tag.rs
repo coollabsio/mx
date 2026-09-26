@@ -256,14 +256,11 @@ struct TagResultMessage<'a> {
 
 fn print_result(action: &str, name: &str, version_id: Option<&str>, json: bool) -> Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&TagResultMessage {
-                status: "success",
-                name,
-                version_id: version_id.unwrap_or_default(),
-            })?
-        );
+        crate::output::print_json(&TagResultMessage {
+            status: "success",
+            name,
+            version_id: version_id.unwrap_or_default(),
+        })?;
     } else {
         output::print_plain(&format!("{action} {}.", display_name(name, version_id)));
     }
@@ -288,15 +285,12 @@ fn print_tags(
 ) -> Result<()> {
     let tags = tags.into_iter().collect::<BTreeMap<_, _>>();
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&TagListMessage {
-                tags,
-                status: "success",
-                url: name,
-                version_id: version_id.unwrap_or_default(),
-            })?
-        );
+        crate::output::print_json(&TagListMessage {
+            tags,
+            status: "success",
+            url: name,
+            version_id: version_id.unwrap_or_default(),
+        })?;
         return Ok(());
     }
     println!("{}", format_tags(&display_name(name, version_id), &tags));

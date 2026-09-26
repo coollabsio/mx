@@ -118,7 +118,7 @@ pub fn run(args: PutArgs, json: bool) -> Result<()> {
             outcome.size,
         );
         if json {
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            crate::output::print_json(&result)?;
         } else {
             println!(
                 "Uploaded `{}` -> `{}` successfully.",

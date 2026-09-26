@@ -77,18 +77,15 @@ pub fn run(args: RemoveBucketArgs, json: bool) -> Result<()> {
             }
             let bucket_target = format!("{}/{bucket}", target.alias);
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&BucketMessage {
-                        status: "success",
-                        target: if target.bucket.is_some() {
-                            input
-                        } else {
-                            &bucket_target
-                        },
-                        bucket: &bucket,
-                    })?
-                );
+                crate::output::print_json(&BucketMessage {
+                    status: "success",
+                    target: if target.bucket.is_some() {
+                        input
+                    } else {
+                        &bucket_target
+                    },
+                    bucket: &bucket,
+                })?;
             } else {
                 output::print_plain(&format!("Bucket `{bucket}` removed successfully."));
             }

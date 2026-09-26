@@ -56,7 +56,7 @@ pub fn cors_xml(contents: &str) -> Result<String> {
 
 fn print_status(message: &str, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::json!({"status": "success"}));
+        output::print_json(&serde_json::json!({"status": "success"}))?;
     } else {
         output::print_plain(message);
     }
@@ -103,12 +103,11 @@ fn get(args: TargetArg, json: bool) -> Result<()> {
             )
         })?;
     match (found, json) {
-        (Some((_, document)), true) => println!(
-            "{}",
-            serde_json::json!({"status": "success", "cors": document.to_mc_json()})
-        ),
+        (Some((_, document)), true) => output::print_json(
+            &serde_json::json!({"status": "success", "cors": document.to_mc_json()}),
+        )?,
         (Some((xml, _)), false) => println!("{}", xml.trim()),
-        (None, true) => println!("{}", serde_json::json!({"status": "not found"})),
+        (None, true) => output::print_json(&serde_json::json!({"status": "not found"}))?,
         (None, false) => println!("No bucket CORS configuration found."),
     }
     Ok(())

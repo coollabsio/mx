@@ -16,11 +16,11 @@ const VERSIONED: BucketOpts = BucketOpts {
     lock: false,
 };
 
+/// JSON documents on stdout: one per line, plus mc's (indented) error document on failure.
 fn json_lines(output: &[u8]) -> Vec<Value> {
-    String::from_utf8_lossy(output)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).expect("json line"))
+    serde_json::Deserializer::from_slice(output)
+        .into_iter::<Value>()
+        .map(|doc| doc.expect("json document"))
         .collect()
 }
 

@@ -2,7 +2,7 @@
 FROM rust:1.97-alpine AS build
 RUN apk add --no-cache build-base cmake perl
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \

@@ -72,7 +72,7 @@ pub fn run(args: StatArgs, json: bool) -> Result<()> {
             .with_context(|| format!("Unable to stat `{input}`."))?;
         for entry in &entries {
             if json {
-                println!("{}", serde_json::to_string(&entry.json(input))?);
+                crate::output::print_json(&entry.json(input))?;
             } else {
                 println!("{}", entry.text());
             }

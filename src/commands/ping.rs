@@ -165,20 +165,17 @@ pub fn run(args: PingArgs, json: bool) -> Result<()> {
         let time = format_time(elapsed);
         let counter = format!("{index:>3}");
         if json {
-            println!(
-                "{}",
-                serde_json::to_string(&PingResult {
-                    status: "success",
-                    counter: &counter,
-                    servers: vec![EndpointStat {
-                        endpoint: &endpoint,
-                        dns: "0s",
-                        status,
-                        error: error.as_deref().unwrap_or_default(),
-                        time: &time,
-                    }],
-                })?
-            );
+            crate::output::print_json(&PingResult {
+                status: "success",
+                counter: &counter,
+                servers: vec![EndpointStat {
+                    endpoint: &endpoint,
+                    dns: "0s",
+                    status,
+                    error: error.as_deref().unwrap_or_default(),
+                    time: &time,
+                }],
+            })?;
         } else {
             println!(
                 "{counter}: {}://{host}   status={status} time={time}",
@@ -201,13 +198,10 @@ pub fn run(args: PingArgs, json: bool) -> Result<()> {
 
 fn print_summary(summary: &BTreeMap<String, ServerStats>, json: bool) -> Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&PingSummary {
-                status: "success",
-                server_map: summary,
-            })?
-        );
+        crate::output::print_json(&PingSummary {
+            status: "success",
+            server_map: summary,
+        })?;
         return Ok(());
     }
     let rows = summary

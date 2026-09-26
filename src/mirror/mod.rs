@@ -827,7 +827,7 @@ impl Job {
                 event_time: &event.time,
                 event_type: event.kind,
             };
-            println!("{}", serde_json::to_string(&message).unwrap_or_default());
+            let _ = crate::output::print_json(&message);
         } else if event.time.is_empty() {
             crate::output::print_plain(&format!("`{source}` -> `{target}`"));
         } else {
@@ -851,7 +851,7 @@ impl Job {
                 event_time: &event.time,
                 event_type: "s3:ObjectRemoved:Delete",
             };
-            println!("{}", serde_json::to_string(&message).unwrap_or_default());
+            let _ = crate::output::print_json(&message);
         } else if event.time.is_empty() {
             crate::output::print_plain(&format!("Removed `{target}`"));
         } else {
@@ -866,7 +866,7 @@ impl Job {
                 "targetURL": target,
                 "retries": retries,
             });
-            println!("{message}");
+            let _ = crate::output::print_json(&message);
         } else {
             crate::output::print_plain(&format!(
                 "<INFO> Retries {retries}: source `{source}` >> target `{target}`"
@@ -876,19 +876,7 @@ impl Job {
 
     /// mc `errorIf`: JSON error document on stdout, or `<ERROR>` line on stderr.
     fn report_error(&self, message: &str, cause: &str) {
-        if self.options.json {
-            let error = serde_json::json!({
-                "status": "error",
-                "error": {
-                    "message": message,
-                    "type": "error",
-                    "cause": { "message": cause, "error": {} },
-                },
-            });
-            println!("{error}");
-        } else {
-            eprintln!("mx: <ERROR> {message} {cause}");
-        }
+        crate::output::error_if(message, cause);
     }
 
     fn print_summary(&self, elapsed: Duration) -> Result<()> {
@@ -907,7 +895,7 @@ impl Job {
                 "duration": elapsed.as_nanos() as u64,
                 "speed": speed,
             });
-            println!("{summary}");
+            crate::output::print_json(&summary)?;
             return Ok(());
         }
         use std::io::Write;

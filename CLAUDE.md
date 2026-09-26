@@ -9,7 +9,8 @@ Current implemented scope:
 - Objects/buckets: `ls mb rb stat cat head get put/out pipe rm cp mv mirror du find tree diff od undo`
 - Bucket config: `share tag version cors encrypt anonymous ilm (rule|tier|restore) retention legalhold event quota replicate`
 - Health: `ping ready`
-- Global flags: `--json -C -q --insecure --resolve --debug -H/--custom-header --limit-upload --limit-download --dp/--disable-pager --no-color -V`
+- Global flags: `--json -C -q --insecure --resolve --debug -H/--custom-header --limit-upload --limit-download --dp/--disable-pager --no-color -v/--version`, with `MC_*` env equivalents
+- Env aliases: `MC_HOST_<alias>` (overrides config, never saved) and `MC_CONFIG_ENV_FILE`, merged in `ConfigStore::config()` (`src/config/env_alias.rs`)
 - Not implemented: `admin license idp support batch sql watch update`
 
 Config behavior:
@@ -24,7 +25,8 @@ Module layout:
 
 - `src/cli.rs` top-level clap CLI (global flags + command list); each command's Args live in its module
 - `src/flags.rs` shared clap flag groups/parsers (SSE, rewind, version-id, durations, sizes, ...)
-- `src/globals.rs` process-wide settings from global flags; `src/output.rs` output helpers
+- `src/globals.rs` process-wide settings from global flags
+- `src/output.rs` shared output: `print_json(&T)` for every `--json` document (compact line on non-TTY, one-space indent on TTY), `json_indent` for text-mode JSON dumps, `error_if`/`print_error` (mc `errorIf`, non-fatal), `fatal` (mc `fatalIf`, used by `main`)
 - `src/net/` TLS trust (`tls.rs`), bandwidth limits (`throttle.rs`), `--debug` trace (`trace.rs`)
 - `src/s3/*.rs` S3 layer split by area, re-exported from `src/s3/mod.rs`: `client` (endpoint, `--resolve`, TLS, interceptors), `list`, `stat`, `delete`, `objects`, `multipart`, `io_ext`, `bucket`, `lifecycle`, `lock`, `notify`, `admin` (MinIO admin API), `replication`
 - `src/mirror/` mirror engine (`mod.rs`) + pure diff/plan logic (`diff.rs`)
@@ -53,9 +55,7 @@ Current command behavior (details in `COMPATIBILITY.md`):
 
 Known gaps vs full `mc`:
 
-- no mc `ls` line format, no compact one-line JSON on non-TTY everywhere
-- no `mc: <ERROR>` error format or JSON errors
-- no `MC_HOST_<alias>` env aliases, no `MC_*` env flags, no `-v` version flag
+- no mc `ls` line format; some per-command JSON field sets differ
 - no `--conn-read-deadline`/`--conn-write-deadline`, no `mirror --monitoring-address`
 - cp/mv: no content-type guessing, no xattrs, no tags on cross-server streamed copy
 - no API auto-probing, no TLS trust prompt flow

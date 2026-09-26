@@ -43,14 +43,11 @@ pub fn run(args: MakeBucketArgs, json: bool) -> Result<()> {
     ))?;
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&BucketMessage {
-                status: "success",
-                target: &args.target,
-                bucket: &bucket,
-            })?
-        );
+        crate::output::print_json(&BucketMessage {
+            status: "success",
+            target: &args.target,
+            bucket: &bucket,
+        })?;
     } else {
         println!("Bucket `{bucket}` created successfully.");
     }

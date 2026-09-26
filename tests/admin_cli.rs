@@ -184,7 +184,7 @@ fn quota_reports_server_errors() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "Unable to get bucket quota: The quota configuration does not exist",
+            "mx: <ERROR> Unable to get bucket quota. The quota configuration does not exist.",
         ));
     server.join().unwrap();
 }
@@ -253,10 +253,13 @@ fn tier_validates_arguments() {
         &["ilm", "tier", "rm", "local", "T", "--force"],
         "--dangerous",
     );
-    fail(
-        &["--json", "ilm", "tier", "info", "local", "T"],
-        "Incorrect number of arguments",
-    );
+    // With --json, errors are an mc error document on stdout.
+    mx(home.path())
+        .args(["--json", "ilm", "tier", "info", "local", "T"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("Incorrect number of arguments"))
+        .stdout(predicate::str::contains(r#""type": "fatal""#));
 }
 
 #[test]
@@ -602,7 +605,7 @@ fn replicate_rm_all_deletes_configuration() {
         .args(["--json", "replicate", "rm", "fake/b1", "--all", "--force"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""op": "rm""#));
+        .stdout(predicate::str::contains(r#""op":"rm""#));
     let requests = server.join().unwrap();
     assert_eq!(requests[1].line, "DELETE /b1?replication= HTTP/1.1");
 }

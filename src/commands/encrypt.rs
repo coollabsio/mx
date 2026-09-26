@@ -58,15 +58,12 @@ struct EncryptMessage<'a> {
 }
 
 fn print_json(op: &str, url: &str, encryption: Option<Encryption>) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string(&EncryptMessage {
-            op,
-            status: "success",
-            url,
-            encryption,
-        })?
-    );
+    crate::output::print_json(&EncryptMessage {
+        op,
+        status: "success",
+        url,
+        encryption,
+    })?;
     Ok(())
 }
 

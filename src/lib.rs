@@ -14,22 +14,39 @@ pub mod target;
 pub mod transfer;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
+/// Parses `args` and runs the command. Usage errors, `--help` and `--version` are printed here
+/// and exit the process (usage errors with status 1, like mc). Runtime errors are returned;
+/// `main` prints them with [`output::fatal`].
 pub fn run<I, T>(args: I) -> Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = cli::Cli::parse_from(flags::rewrite_argv(args));
+    let cli = match cli::Cli::try_parse_from(flags::rewrite_argv(args)) {
+        Ok(cli) => cli,
+        Err(err) => usage_error(err),
+    };
+    if cli.version {
+        print!("{}", version_text());
+        return Ok(());
+    }
+    if cli.command.is_none() {
+        // mc shows the app help and exits with status 1 when no command is given.
+        let _ = cli::Cli::command().print_help();
+        std::process::exit(1);
+    }
     resolve::configure(cli.resolve.clone());
     config::configure_dir(cli.config_dir.clone());
+    config::load_env_config_file()?;
     globals::init(globals::Globals {
         json: cli.json,
         quiet: cli.quiet,
         insecure: cli.insecure,
         debug: cli.debug,
-        no_color: cli.no_color,
+        // mc disables colors for JSON lines output.
+        no_color: cli.no_color || cli.json,
         disable_pager: cli.disable_pager,
         custom_headers: cli.custom_header.clone(),
         // 0 means unlimited, like mc.
@@ -38,4 +55,39 @@ where
         config_dir: cli.config_dir.clone(),
     });
     commands::run(cli)
+}
+
+/// Version text like mc's `printMCVersion`.
+pub fn version_text() -> String {
+    format!(
+        "{} version {} (commit-id={})\nRuntime: {} {}/{}\nLicense Apache-2.0 <https://www.apache.org/licenses/LICENSE-2.0>\n",
+        output::prog_name(),
+        env!("CARGO_PKG_VERSION"),
+        option_env!("MX_COMMIT_ID").unwrap_or("unknown"),
+        option_env!("MX_RUSTC_VERSION").unwrap_or("rustc"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}
+
+/// Help/version requests print normally (status 0). Other clap errors are printed as mc's
+/// `PROG: <ERROR> Invalid command usage, ...` and exit with status 1.
+fn usage_error(err: clap::Error) -> ! {
+    use clap::error::ErrorKind;
+    match err.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => err.exit(),
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            let _ = err.print();
+            std::process::exit(1);
+        }
+        _ => {
+            let rendered = err.render().to_string();
+            let text = rendered.strip_prefix("error: ").unwrap_or(&rendered);
+            eprint!(
+                "{}: <ERROR> Invalid command usage, {text}",
+                output::prog_name()
+            );
+            std::process::exit(1);
+        }
+    }
 }

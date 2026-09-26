@@ -175,7 +175,7 @@ fn require_name(name: &str) -> Result<()> {
 
 fn print_message(message: &TierMessage, text: String, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(message)?);
+        crate::output::print_json(message)?;
     } else {
         output::print_plain(&text);
     }
@@ -380,13 +380,10 @@ fn list(args: IlmTierAliasArgs, json: bool) -> Result<()> {
         return Ok(());
     }
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&TierList {
-                status: "success",
-                tiers: &tiers
-            })?
-        );
+        crate::output::print_json(&TierList {
+            status: "success",
+            tiers: &tiers,
+        })?;
         return Ok(());
     }
     tiers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -462,7 +459,7 @@ fn info(args: IlmTierInfoArgs, json: bool) -> Result<()> {
             }
             Err(err) => json!({ "status": "error", "error": format!("{err:#}") }),
         };
-        println!("{}", serde_json::to_string(&value)?);
+        crate::output::print_json(&value)?;
         return Ok(());
     }
     let infos = stats.context("Unable to get tier statistics")?;

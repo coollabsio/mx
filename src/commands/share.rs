@@ -345,16 +345,13 @@ fn print_share(
     json: bool,
 ) -> Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&ShareMessage {
-                status: "success",
-                url,
-                share,
-                time_left: time_left.as_nanos(),
-                content_type,
-            })?
-        );
+        crate::output::print_json(&ShareMessage {
+            status: "success",
+            url,
+            share,
+            time_left: time_left.as_nanos(),
+            content_type,
+        })?;
         return Ok(());
     }
     println!("URL: {url}");

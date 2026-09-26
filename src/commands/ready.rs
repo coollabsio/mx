@@ -82,7 +82,7 @@ pub fn run(args: HealthArgs, json: bool) -> Result<()> {
             Err(error) => message.error = Some(format!("{error:#}")),
         }
         if json {
-            println!("{}", serde_json::to_string(&message)?);
+            crate::output::print_json(&message)?;
         } else {
             println!("{}", message.text());
         }

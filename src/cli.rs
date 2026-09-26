@@ -7,49 +7,66 @@ use crate::commands::{
     tag, tree, undo, version,
 };
 use crate::resolve::ResolveMapping;
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
+// Global flags read `MC_*` environment variables like mc (urfave/cli `EnvVar`).
 #[derive(Debug, Parser)]
-#[command(version, about = "MaxIO Client", long_about = None)]
+#[command(about = "MaxIO Client", long_about = None, disable_version_flag = true)]
 pub struct Cli {
+    /// print the version
+    #[arg(short = 'v', long = "version", short_alias = 'V', action = ArgAction::SetTrue)]
+    pub version: bool,
+
     /// enable JSON lines formatted output
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "MC_JSON", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub json: bool,
 
     /// path to configuration folder
-    #[arg(short = 'C', long = "config-dir", global = true, value_name = "PATH")]
+    #[arg(
+        short = 'C',
+        long = "config-dir",
+        global = true,
+        value_name = "PATH",
+        env = "MC_CONFIG_DIR"
+    )]
     pub config_dir: Option<std::path::PathBuf>,
 
     /// disable progress bar display
-    #[arg(short = 'q', long, global = true)]
+    #[arg(short = 'q', long, global = true, env = "MC_QUIET", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub quiet: bool,
 
     /// disable mc internal pager and print to raw stdout (mx has no pager)
-    #[arg(long = "disable-pager", visible_alias = "dp", global = true)]
+    #[arg(long = "disable-pager", visible_alias = "dp", global = true, env = "MC_DISABLE_PAGER", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub disable_pager: bool,
 
     /// disable color theme (mx has no colors)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "MC_NO_COLOR", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub no_color: bool,
 
     /// enable debug output
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "MC_DEBUG", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub debug: bool,
 
     /// disable SSL certificate verification
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "MC_INSECURE", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub insecure: bool,
 
     /// resolves HOST:PORT to an IP address, e.g. minio.local:9000=10.10.75.1
-    #[arg(long, global = true, value_name = "HOST:PORT=IP")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "HOST:PORT=IP",
+        env = "MC_RESOLVE",
+        value_delimiter = ','
+    )]
     pub resolve: Vec<ResolveMapping>,
 
     /// limits uploads to a maximum rate in KiB/s, MiB/s, GiB/s (default: unlimited)
-    #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate)]
+    #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate, env = "MC_LIMIT_UPLOAD")]
     pub limit_upload: Option<u64>,
 
     /// limits downloads to a maximum rate in KiB/s, MiB/s, GiB/s (default: unlimited)
-    #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate)]
+    #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate, env = "MC_LIMIT_DOWNLOAD")]
     pub limit_download: Option<u64>,
 
     /// add custom HTTP header to the request, 'key:value' format
@@ -63,7 +80,16 @@ pub struct Cli {
     pub custom_header: Vec<(String, String)>,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+}
+
+/// Go `strconv.ParseBool` as used by urfave/cli for boolean `EnvVar`s; empty means false.
+pub fn parse_env_bool(value: &str) -> Result<bool, String> {
+    match value {
+        "" | "0" | "f" | "F" | "false" | "FALSE" | "False" => Ok(false),
+        "1" | "t" | "T" | "true" | "TRUE" | "True" => Ok(true),
+        _ => Err(format!("could not parse `{value}` as bool value")),
+    }
 }
 
 fn parse_rate(value: &str) -> anyhow::Result<u64> {

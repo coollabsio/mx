@@ -838,17 +838,14 @@ impl Session {
         }
         let target = task.target.display();
         if self.json {
-            println!(
-                "{}",
-                serde_json::to_string(&CopyMessage {
-                    status: "success",
-                    source: &source,
-                    target: &target,
-                    size: task.size,
-                    total_count: self.total_count,
-                    total_size: self.total_size,
-                })?
-            );
+            crate::output::print_json(&CopyMessage {
+                status: "success",
+                source: &source,
+                target: &target,
+                size: task.size,
+                total_count: self.total_count,
+                total_size: self.total_size,
+            })?;
         } else {
             println!("`{source}` -> `{target}`");
         }
@@ -1159,7 +1156,7 @@ pub(crate) fn run_session(paths: &[String], options: CopyOptions, json: bool) ->
         if !session.progress.is_bar() {
             let stat = session.progress.stat();
             if json {
-                println!("{}", serde_json::to_string(&stat)?);
+                crate::output::print_json(&stat)?;
             } else {
                 println!("{}", stat.table());
             }

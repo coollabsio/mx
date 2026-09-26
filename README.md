@@ -38,7 +38,6 @@ Not implemented:
 
 - `mc admin`, IDP, license, support
 - `batch`, `sql`, `watch`, `update`
-- `MC_HOST_<alias>` aliases and `MC_*` environment variables
 
 ## Global options
 
@@ -51,7 +50,8 @@ mx --resolve HOST:PORT=IP ...
 mx --debug ...
 mx -H 'X-Custom: value' ...
 mx --limit-upload 10MiB --limit-download 50MiB ...
-mx -V
+mx -v
+MC_HOST_myminio=https://ACCESS:SECRET@minio.example.com mx ls myminio
 ```
 
 `--insecure` skips TLS verification. CA certificates in

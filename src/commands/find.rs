@@ -454,21 +454,18 @@ impl Finder<'_> {
             None => entry.rel.clone(),
         };
         if self.json {
-            println!(
-                "{}",
-                serde_json::to_string(&FindMessage {
-                    status: "success",
-                    key: &text,
-                    size: entry.size,
-                    last_modified: entry.modified.map(|t| {
-                        crate::s3::from_system_time(t)
-                            .fmt(aws_sdk_s3::primitives::DateTimeFormat::DateTime)
-                            .unwrap_or_default()
-                    }),
-                    version_id: entry.version_id.as_deref(),
-                    is_delete_marker: entry.is_delete_marker,
-                })?
-            );
+            crate::output::print_json(&FindMessage {
+                status: "success",
+                key: &text,
+                size: entry.size,
+                last_modified: entry.modified.map(|t| {
+                    crate::s3::from_system_time(t)
+                        .fmt(aws_sdk_s3::primitives::DateTimeFormat::DateTime)
+                        .unwrap_or_default()
+                }),
+                version_id: entry.version_id.as_deref(),
+                is_delete_marker: entry.is_delete_marker,
+            })?;
         } else if self.args.print.is_none()
             && let Some(version) = &entry.version_id
         {

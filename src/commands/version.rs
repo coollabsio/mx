@@ -76,15 +76,12 @@ struct VersionMessage<'a> {
 }
 
 fn print_json(op: &str, target: &str, info: &VersioningInfo) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string(&VersionMessage {
-            op,
-            status: "success",
-            url: target,
-            versioning: info,
-        })?
-    );
+    crate::output::print_json(&VersionMessage {
+        op,
+        status: "success",
+        url: target,
+        versioning: info,
+    })?;
     Ok(())
 }
 

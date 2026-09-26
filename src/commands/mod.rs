@@ -40,15 +40,11 @@ use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
 
 use crate::cli::{Cli, Commands};
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
+/// Resolves an alias (config file, `MC_CONFIG_ENV_FILE`, or `MC_HOST_<alias>`).
 pub fn alias_config(store: &ConfigStore, alias: &str) -> Result<AliasConfig> {
-    store
-        .config()
-        .aliases
-        .get(alias)
-        .cloned()
-        .ok_or_else(|| anyhow!("No such alias `{alias}` found."))
+    store.alias(alias)
 }
 
 pub fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -57,8 +53,11 @@ pub fn runtime() -> Result<tokio::runtime::Runtime> {
 
 pub fn run(cli: Cli) -> Result<()> {
     let json = cli.json;
+    let Some(command) = cli.command else {
+        return Ok(());
+    };
 
-    match cli.command {
+    match command {
         Commands::Alias(args) => alias::run(args.command, json),
         Commands::Ls(args) => ls::run(args, json),
         Commands::Mb(args) => mb::run(args, json),

@@ -167,13 +167,13 @@ fn set_supports_json_output() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"success\""))
-        .stdout(predicate::str::contains("\"alias\": \"demo\""))
+        .stdout(predicate::str::contains("\"status\":\"success\""))
+        .stdout(predicate::str::contains("\"alias\":\"demo\""))
         .stdout(predicate::str::contains(
-            "\"URL\": \"http://localhost:9000\"",
+            "\"URL\":\"http://localhost:9000\"",
         ))
-        .stdout(predicate::str::contains("\"accessKey\": \"minio\""))
-        .stdout(predicate::str::contains("\"secretKey\": \"minio123\""));
+        .stdout(predicate::str::contains("\"accessKey\":\"minio\""))
+        .stdout(predicate::str::contains("\"secretKey\":\"minio123\""));
 }
 
 #[test]
@@ -195,10 +195,10 @@ fn list_supports_json_output() {
         .args(["--json", "alias", "list", "demo"]);
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"success\""))
-        .stdout(predicate::str::contains("\"alias\": \"demo\""))
-        .stdout(predicate::str::contains("\"src\": "))
-        .stdout(predicate::str::contains("\"path\": \"auto\""));
+        .stdout(predicate::str::contains("\"status\":\"success\""))
+        .stdout(predicate::str::contains("\"alias\":\"demo\""))
+        .stdout(predicate::str::contains("\"src\":"))
+        .stdout(predicate::str::contains("\"path\":\"auto\""));
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn remove_supports_json_output() {
         .args(["--json", "alias", "remove", "demo"]);
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"success\""))
-        .stdout(predicate::str::contains("\"alias\": \"demo\""))
+        .stdout(predicate::str::contains("\"status\":\"success\""))
+        .stdout(predicate::str::contains("\"alias\":\"demo\""))
         .stdout(predicate::str::contains("\"URL\"").not());
 }

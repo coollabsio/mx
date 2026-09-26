@@ -72,7 +72,7 @@ fn client_and_bucket(target: &str) -> Result<(AdminClient, String)> {
 
 fn print(message: &QuotaMessage, text: String, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(message)?);
+        crate::output::print_json(message)?;
     } else {
         output::print_plain(&text);
     }

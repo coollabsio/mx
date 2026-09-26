@@ -92,7 +92,8 @@ impl MirrorArgs {
         }
         if self.force {
             eprintln!(
-                "mx: <ERROR> `--force` is deprecated, please use `--overwrite` instead for the same functionality."
+                "{}: <ERROR> `--force` is deprecated, please use `--overwrite` instead for the same functionality.",
+                crate::output::prog_name()
             );
         }
         self.time.parsed()?;

@@ -79,16 +79,13 @@ pub fn run(args: DuArgs, json: bool) -> Result<()> {
 
     for (name, (size, count)) in totals {
         if json {
-            println!(
-                "{}",
-                serde_json::to_string(&DuMessage {
-                    status: "success",
-                    prefix: &name,
-                    size,
-                    objects: count,
-                    is_versions: args.versions,
-                })?
-            );
+            crate::output::print_json(&DuMessage {
+                status: "success",
+                prefix: &name,
+                size,
+                objects: count,
+                is_versions: args.versions,
+            })?;
         } else {
             let label = if name.is_empty() { "." } else { name.as_str() };
             let unit = if args.versions { "versions" } else { "objects" };

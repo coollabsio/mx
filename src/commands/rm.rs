@@ -161,17 +161,9 @@ pub fn run(args: RemoveArgs, json: bool) -> Result<()> {
     Err(last)
 }
 
-/// Prints an error the way `main` does, for failures that do not stop the command.
+/// Reports a failure that does not stop the command (mc `errorIf`).
 fn report(error: &anyhow::Error) {
-    let name = std::env::args()
-        .next()
-        .and_then(|path| {
-            std::path::Path::new(&path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "mx".to_string());
-    eprintln!("{name}: {error:#}");
+    crate::output::print_error(error);
 }
 
 struct Remover<'a> {
@@ -528,7 +520,7 @@ impl RemoveMessage {
             "modTime": self.mod_time.map(rfc3339),
             "dryRun": self.dry_run,
         });
-        serde_json::to_string_pretty(&value).unwrap_or_default()
+        crate::output::json_string(&value).unwrap_or_default()
     }
 }
 

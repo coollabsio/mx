@@ -535,14 +535,11 @@ struct RuleMessage<'a> {
 
 fn print_rule_message(text: String, target: &str, id: &str, json: bool) -> Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&RuleMessage {
-                status: "success",
-                target,
-                id,
-            })?
-        );
+        crate::output::print_json(&RuleMessage {
+            status: "success",
+            target,
+            id,
+        })?;
     } else {
         output::print_plain(&text);
     }
@@ -654,15 +651,12 @@ fn list(args: IlmRuleListArgs, json: bool) -> Result<()> {
         }
     });
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&ConfigMessage {
-                status: "success",
-                target: &args.target,
-                config: &info.config,
-                updated_at: info.updated_at.as_deref(),
-            })?
-        );
+        crate::output::print_json(&ConfigMessage {
+            status: "success",
+            target: &args.target,
+            config: &info.config,
+            updated_at: info.updated_at.as_deref(),
+        })?;
         return Ok(());
     }
     for table in rule_tables(&info.config) {
@@ -882,15 +876,12 @@ fn remove(args: IlmRuleRemoveArgs, json: bool) -> Result<()> {
     ))
     .context("Unable to set lifecycle rules")?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&RemoveMessage {
-                status: "success",
-                id: &id,
-                target: &args.target,
-                all: args.all,
-            })?
-        );
+        crate::output::print_json(&RemoveMessage {
+            status: "success",
+            id: &id,
+            target: &args.target,
+            all: args.all,
+        })?;
     } else if args.all {
         output::print_plain(&format!("Rules for `{}` removed.", args.target));
     } else {
@@ -905,17 +896,14 @@ fn remove(args: IlmRuleRemoveArgs, json: bool) -> Result<()> {
 fn export(target_arg: &str, json: bool) -> Result<()> {
     let info = fetch_existing(target_arg, "export")?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&ConfigMessage {
-                status: "success",
-                target: target_arg,
-                config: &info.config,
-                updated_at: info.updated_at.as_deref(),
-            })?
-        );
+        crate::output::print_json(&ConfigMessage {
+            status: "success",
+            target: target_arg,
+            config: &info.config,
+            updated_at: info.updated_at.as_deref(),
+        })?;
     } else {
-        println!("{}", serde_json::to_string_pretty(&info.config)?);
+        println!("{}", crate::output::json_indent(&info.config)?);
     }
     Ok(())
 }
@@ -958,13 +946,10 @@ fn import(target_arg: &str, json: bool) -> Result<()> {
         ))
         .context("Unable to set new lifecycle rules")?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(&ImportMessage {
-                status: "success",
-                target: target_arg,
-            })?
-        );
+        crate::output::print_json(&ImportMessage {
+            status: "success",
+            target: target_arg,
+        })?;
     } else {
         output::print_plain(&format!(
             "Lifecycle configuration imported successfully to `{target_arg}`."

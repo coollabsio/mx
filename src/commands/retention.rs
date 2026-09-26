@@ -252,7 +252,7 @@ pub(crate) fn short_duration(duration: Duration) -> String {
 }
 
 pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
-    println!("{}", serde_json::to_string(value)?);
+    crate::output::print_json(value)?;
     Ok(())
 }
 
