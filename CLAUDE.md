@@ -69,6 +69,8 @@ Testing requirements:
 - `tests/live_minio.sh [live_suite...]` starts 3 MinIO containers (2 plain + 1 TLS with a throwaway CA), KMS enabled, runs all or the named `tests/live_*.rs` suites, then removes them. Docker required.
   - Image from `tests/minio.image` (`pgsty/minio` community build; quay.io/minio images are no longer pullable); override with `MX_MINIO_IMAGE`.
   - Extra server env in `tests/minio.env` (webhook notify target for `event`).
+- mc parity: `tests/live_mc_parity.rs` runs the pinned upstream `mc` (`tests/mc.version`, built by `tests/mc_ref.sh` via docker into `target/mc-ref/mc`) and `mx` side by side and diffs normalized output (helpers in `tests/common/parity.rs`). Known gaps are `#[ignore = "parity: ..."]`; remove the ignore when fixing one.
+  - `MX_MC_PARITY=1 sh tests/live_minio.sh live_mc_parity [-- --ignored]`
 
 Useful commands:
 

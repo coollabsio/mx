@@ -10,6 +10,8 @@
 # Server 3 (only when openssl is available) serves TLS with a throwaway CA:
 #   MX_TEST_TLS_URL (https://127.0.0.1:PORT, same credentials) and MX_TEST_TLS_CA (CA PEM path).
 # Pass test names to run a subset: tests/live_minio.sh live_foundation
+# Harness args follow `--`: tests/live_minio.sh live_mc_parity -- --ignored
+# MX_MC_PARITY=1 builds the reference mc (tests/mc_ref.sh) for tests/live_mc_parity.rs.
 set -eu
 
 root="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
@@ -18,6 +20,15 @@ cd "$root"
 if ! command -v docker >/dev/null 2>&1; then
     echo 'docker is required for tests/live_minio.sh' >&2
     exit 1
+fi
+
+# mc parity suite (tests/live_mc_parity.rs): MX_MC_PARITY=1 builds the pinned reference mc
+# (tests/mc_ref.sh) and exports MX_MC_BIN; an already built one is picked up automatically.
+if [ "${MX_MC_PARITY:-0}" = 1 ]; then
+    MX_MC_BIN="$(sh tests/mc_ref.sh)"
+    export MX_MC_BIN
+elif [ -z "${MX_MC_BIN:-}" ] && [ -x "${CARGO_TARGET_DIR:-$root/target}/mc-ref/mc" ]; then
+    export MX_MC_BIN="${CARGO_TARGET_DIR:-$root/target}/mc-ref/mc"
 fi
 
 image="${MX_MINIO_IMAGE:-$(tr -d '[:space:]' < tests/minio.image)}"
@@ -132,9 +143,15 @@ fi
 
 echo "live MinIO ready at $url and $url2"
 
-if [ "$#" -gt 0 ]; then
-    tests="$*"
-else
+# Arguments after `--` go to the test harness (e.g. `live_mc_parity -- --ignored`).
+tests=""
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+    tests="$tests $1"
+    shift
+done
+if [ "$#" -gt 0 ]; then shift; fi
+
+if [ -z "$tests" ]; then
     tests="$(for file in tests/live_*.rs; do basename "$file" .rs; done)"
 fi
 
@@ -144,4 +161,4 @@ for name in $tests; do
 done
 
 # shellcheck disable=SC2086
-cargo test --locked $test_args -- --test-threads=1
+cargo test --locked $test_args -- --test-threads=1 "$@"
