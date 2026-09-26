@@ -16,27 +16,27 @@ fn mx(args: &[&str]) -> std::process::Output {
 #[test]
 fn deprecated_commands_point_to_replacements() {
     let cases: &[(&[&str], &str)] = &[
-        (&["admin", "inspect"], "mx support inspect"),
-        (&["admin", "idp", "x"], "mx idp ldap|openid"),
-        (&["admin", "speedtest", "play/"], "mx support perf"),
+        (&["admin", "inspect"], "mc support inspect"),
+        (&["admin", "idp", "x"], "mc idp ldap|openid"),
+        (&["admin", "speedtest", "play/"], "mc support perf"),
         (
             &["admin", "console", "--limit", "5", "-t", "MINIO", "x"],
-            "mx admin logs --last 5 --type minio x",
+            "mc admin logs --last 5 --type minio x",
         ),
         (
             &["admin", "policy", "add", "a", "b", "c"],
-            "mx admin policy create",
+            "mc admin policy create",
         ),
-        (&["admin", "policy", "set", "a"], "mx admin policy attach"),
-        (&["admin", "policy", "unset", "a"], "mx admin policy detach"),
+        (&["admin", "policy", "set", "a"], "mc admin policy attach"),
+        (&["admin", "policy", "unset", "a"], "mc admin policy detach"),
         (
             &["admin", "policy", "update", "a"],
-            "mx admin policy attach",
+            "mc admin policy attach",
         ),
-        (&["admin", "top", "api", "a"], "mx support top api"),
+        (&["admin", "top", "api", "a"], "mc support top api"),
         (
             &["admin", "top", "locks", "--stale", "a"],
-            "mx support top locks",
+            "mc support top locks",
         ),
     ];
     for (args, replacement) in cases {
@@ -56,6 +56,6 @@ fn deprecated_json_error() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "{\"status\":\"error\",\"error\":{\"message\":\"Deprecated command\",\"cause\":{\"message\":\"Please use 'mx admin policy create' instead\",\"error\":{}},\"type\":\"fatal\"}}\n"
+        "{\"status\":\"error\",\"error\":{\"message\":\"Deprecated command\",\"cause\":{\"message\":\"Please use 'mc admin policy create' instead\",\"error\":{}},\"type\":\"fatal\"}}\n"
     );
 }

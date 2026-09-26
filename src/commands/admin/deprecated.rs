@@ -108,16 +108,8 @@ fn not_a_command(name: &str, commands: &[&str]) -> Result<()> {
 }
 
 /// Help of a hidden command group (mc prints it and exits 0).
-fn group_help(name: &str, usage: &str, commands: &[(&str, &str)]) -> Result<()> {
-    let prog = crate::output::prog_name();
-    let width = commands.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
-    let mut text = format!(
-        "NAME:\n  {prog} {name} - {usage}\n\nUSAGE:\n  {prog} {name} COMMAND [COMMAND FLAGS | -h] [ARGUMENTS...]\n\nCOMMANDS:\n"
-    );
-    for (command, help) in commands {
-        text.push_str(&format!("  {command:<width$}  {help}\n"));
-    }
-    print!("{text}");
+fn group_help(path: &[&str]) -> Result<()> {
+    crate::help::print_help(path);
     Ok(())
 }
 
@@ -126,27 +118,11 @@ fn group_help(name: &str, usage: &str, commands: &[(&str, &str)]) -> Result<()> 
 fn bucket(args: &[String]) -> Result<()> {
     let first = args.first().map(String::as_str);
     match first {
-        None => group_help(
-            "admin bucket",
-            "manage buckets defined in the MinIO server",
-            &[
-                ("remote", "configure remote target buckets"),
-                ("quota", "manage bucket quota"),
-                ("info", "display bucket information"),
-            ],
-        ),
+        None => group_help(&["admin", "bucket"]),
         Some("quota") => deprecated("quota"),
         Some("info") => deprecated("stat"),
         Some("remote") => match args.get(1).map(String::as_str) {
-            None => group_help(
-                "admin bucket remote",
-                "configure remote target buckets",
-                &[
-                    ("add", "add a new remote target"),
-                    ("edit", "edit remote target"),
-                    ("remove, rm", "remove configured remote target"),
-                ],
-            ),
+            None => group_help(&["admin", "bucket", "remote"]),
             Some("add") => deprecated("replicate add"),
             Some("edit") => deprecated("replicate update"),
             Some("remove" | "rm") => deprecated("replicate rm"),
@@ -217,7 +193,7 @@ mod tests {
 
     #[test]
     fn points_to_replacements_like_mc() {
-        let prog = crate::output::prog_name();
+        let prog = "mc";
         assert_eq!(
             cause(stub("admin health", args(&["e", "--offline", "x"]))),
             format!("Please use '{prog} support diag e x --offline' instead")

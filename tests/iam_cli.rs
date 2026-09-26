@@ -141,7 +141,7 @@ fn missing_or_extra_arguments_show_help() {
             .args(args)
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("Usage"));
+            .stdout(predicate::str::contains("USAGE:"));
     }
 }
 

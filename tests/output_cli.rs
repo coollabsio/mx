@@ -88,7 +88,7 @@ fn usage_errors_exit_one_with_mc_prefix() {
     mx(home.path())
         .assert()
         .code(1)
-        .stdout(predicate::str::contains("Usage:"));
+        .stdout(predicate::str::contains("USAGE:"));
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn version_flags_print_mc_shaped_version() {
         .args(["stat", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("-v, --verbose"));
+        .stdout(predicate::str::contains("--verbose, -v"));
 }
 
 #[test]

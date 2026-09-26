@@ -919,9 +919,12 @@ fn help_lists_admin_subcommands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("check"));
+    // mx-only `resync cancel` is not listed (mc's help), but has its own page.
     mx(home.path())
-        .args(["replicate", "resync", "--help"])
+        .args(["replicate", "resync", "cancel", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("cancel"));
+        .stdout(predicate::str::contains(
+            "cancel an ongoing replication resync",
+        ));
 }

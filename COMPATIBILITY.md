@@ -94,9 +94,26 @@ server support that varies between S3-compatible servers.
   `cause.error` holds the Go-marshaled error (`{"Bucket":..}`, minio-go
   `ErrorResponse` fields). Like mc, an unknown alias is treated as a local path.
 - Usage errors: `PROG: <ERROR> Invalid command usage, flag provided but not
-  defined: -bogus` (Go wording) plus mc's `SUPPORTED FLAGS:` block; unknown
-  commands print mc's "not a recognized command" text with "Did you mean"
-  suggestions; missing arguments print the command help. All exit 1.
+  defined: -bogus` (Go wording) plus mc's `SUPPORTED FLAGS:` block (command groups:
+  urfave's `Incorrect Usage.`); unknown commands print mc's "not a recognized command"
+  text with "Did you mean" suggestions; missing arguments print the command help. All
+  exit 1.
+- Help: `--help`/`-h` on every command, command groups without a subcommand (exit 0),
+  missing arguments (exit 1), `mx` alone (exit 1) and urfave's `help` subcommand of
+  `cors`/`legalhold`/`retention`/`admin subnet` print mc's pages byte for byte (hidden
+  and deprecated commands included), with the invoked program name. The pages and flag
+  rows are captured from the pinned mc into `src/help/mc.txt` (`src/help/mod.rs`; regenerate
+  with `MX_HELP_REGEN=1`, see `tests/live_mc_parity_help.rs`, which compares every command
+  path). Differences: the top-level page omits the unimplemented `license`/`support`
+  commands, `--autocompletion` and its TIP, and names mx's copyright and Apache-2.0
+  license; the `--config-dir` default is mx's config dir (mc prints `~/.<program name>`);
+  urfave's `help` page shows mx's release as `VERSION`. Help lists mc's flags only: the
+  mx-only `ilm rule add --id` and the `put` alias `out` are not shown, and
+  `replicate resync cancel` (mx-only) has an mc-style page in `src/help/mx.txt` but is not
+  listed under `replicate resync`. mc flags mx does not accept yet (listed in help):
+  `anonymous -r/--recursive`, `ilm restore --enc-c`.
+- Deprecated commands name `mc` literally in their replacement hint like mc
+  (`Please use 'mc support inspect' instead.`).
 - `alias set` without `--api` probes the server like mc: S3v4 first, then S3v2
   (stored as `s3v4` / `s3v2`; the S3v2 error is reported when both fail, and
   unreachable servers fail). Access keys need 3+ and secret keys 8+ characters.
@@ -177,8 +194,9 @@ Without the flags no deadline applies (mc defaults to 10m).
 ## Remaining gaps
 
 - Command output is compared (after normalizing timestamps, version IDs, signatures, ...) with the pinned mc release
-  (`tests/mc.version`) by `tests/live_mc_parity.rs`; all cases pass. Help text is
-  not identical, and some errors differ where mc depends on minio-go internals
+  (`tests/mc.version`) by `tests/live_mc_parity.rs`; all cases pass. Help output is
+  compared for every command by `tests/live_mc_parity_help.rs` (differences listed under
+  Global options). Some errors differ where mc depends on minio-go internals
   (bucket location lookups).
 - Transport errors of S3 commands (TLS verification, deadlines) lack mc's
   `Get "URL": ` prefix, and JSON errors do not embed Go's `url.Error` struct.

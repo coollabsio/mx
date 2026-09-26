@@ -31,7 +31,9 @@ fn command_help_is_available_for_all_core_commands() {
         cmd.args([command, "--help"]);
         cmd.assert()
             .success()
-            .stdout(predicate::str::contains(format!("Usage: mx {command}")));
+            .stdout(predicate::str::contains(format!(
+                "NAME:\n  mx {command} - "
+            )));
     }
 }
 

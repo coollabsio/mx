@@ -337,7 +337,7 @@ fn missing_arguments_print_help() {
     ] {
         let out = home.run(&args);
         assert_eq!(out.status.code(), Some(1), "{args:?}");
-        assert!(text(&out.stdout).contains("Usage"), "{args:?}");
+        assert!(text(&out.stdout).contains("USAGE:"), "{args:?}");
     }
 }
 
@@ -345,32 +345,32 @@ fn missing_arguments_print_help() {
 fn hidden_deprecated_commands_match_mc() {
     let home = Home::new();
     let cases: &[(&[&str], &str)] = &[
-        (&["admin", "tier"], "mx ilm tier"),
-        (&["admin", "tier", "bogus"], "mx ilm tier"),
-        (&["admin", "profile"], "mx support profile"),
+        (&["admin", "tier"], "mc ilm tier"),
+        (&["admin", "tier", "bogus"], "mc ilm tier"),
+        (&["admin", "profile"], "mc support profile"),
         (
             &["admin", "profile", "start", "a"],
-            "mx support profile start",
+            "mc support profile start",
         ),
-        (&["admin", "subnet"], "mx support"),
-        (&["admin", "subnet", "register", "a"], "mx support register"),
-        (&["admin", "subnet", "health", "a"], "mx support diag a"),
-        (&["admin", "health"], "mx support diag"),
+        (&["admin", "subnet"], "mc support"),
+        (&["admin", "subnet", "register", "a"], "mc support register"),
+        (&["admin", "subnet", "health", "a"], "mc support diag a"),
+        (&["admin", "health"], "mc support diag"),
         (
-            &["admin", "health", "a", "--offline"],
-            "mx support diag a --offline",
+            &["admin", "health", "a", "--airgap"],
+            "mc support diag a --airgap",
         ),
-        (&["admin", "bucket", "quota", "a/b"], "mx quota"),
-        (&["admin", "bucket", "info", "a/b"], "mx stat"),
+        (&["admin", "bucket", "quota", "a/b"], "mc quota"),
+        (&["admin", "bucket", "info", "a/b"], "mc stat"),
         (
             &["admin", "bucket", "remote", "add", "a"],
-            "mx replicate add",
+            "mc replicate add",
         ),
         (
             &["admin", "bucket", "remote", "edit", "a"],
-            "mx replicate update",
+            "mc replicate update",
         ),
-        (&["admin", "bucket", "remote", "rm", "a"], "mx replicate rm"),
+        (&["admin", "bucket", "remote", "rm", "a"], "mc replicate rm"),
     ];
     for (args, replacement) in cases {
         let out = home.run(args);
@@ -392,7 +392,7 @@ fn hidden_deprecated_commands_match_mc() {
     let out = home.run(&["admin", "health", "a", "--json"]);
     assert_eq!(
         text(&out.stdout),
-        "{\"status\":\"error\",\"error\":{\"message\":\"Deprecated command\",\"cause\":{\"message\":\"Please use 'mx support diag a --json' instead\",\"error\":{}},\"type\":\"fatal\"}}\n"
+        "{\"status\":\"error\",\"error\":{\"message\":\"Deprecated command\",\"cause\":{\"message\":\"Please use 'mc support diag a --json' instead\",\"error\":{}},\"type\":\"fatal\"}}\n"
     );
 }
 

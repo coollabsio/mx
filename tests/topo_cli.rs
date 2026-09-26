@@ -102,7 +102,7 @@ fn wrong_argument_counts_show_help_with_status_1() {
             .args(args)
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("Usage:"))
+            .stdout(predicate::str::contains("USAGE:"))
             .stderr("");
     }
 }

@@ -11,7 +11,12 @@ use clap::{ArgAction, Parser, Subcommand};
 
 // Global flags read `MC_*` environment variables like mc (urfave/cli `EnvVar`).
 #[derive(Debug, Parser)]
-#[command(about = "MaxIO Client", long_about = None, disable_version_flag = true)]
+#[command(
+    about = "MaxIO Client",
+    long_about = None,
+    disable_version_flag = true,
+    disable_help_subcommand = true
+)]
 pub struct Cli {
     /// print the version
     #[arg(short = 'v', long = "version", short_alias = 'V', action = ArgAction::SetTrue)]

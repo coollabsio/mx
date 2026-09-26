@@ -29,5 +29,5 @@ fn ls_help_mentions_buckets_and_objects() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("list buckets and objects"))
-        .stdout(predicate::str::contains("Usage: mx ls"));
+        .stdout(predicate::str::contains("USAGE:\n  mx ls"));
 }

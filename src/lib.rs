@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod flags;
 pub mod globals;
+pub mod help;
 pub mod location;
 pub mod mirror;
 pub mod net;
@@ -16,7 +17,7 @@ pub mod transfer;
 pub mod usage;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 
 /// Parses `args` and runs the command. Usage errors, `--help` and `--version` are printed here
 /// and exit the process (usage errors with status 1, like mc). Runtime errors are returned;
@@ -27,6 +28,12 @@ where
     T: Into<std::ffi::OsString> + Clone,
 {
     let argv = flags::rewrite_argv(args);
+    help::intercept(
+        &argv
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    );
     let cli = match cli::Cli::try_parse_from(&argv) {
         Ok(cli) => cli,
         Err(err) => {
@@ -42,9 +49,9 @@ where
         return Ok(());
     }
     if cli.command.is_none() {
-        // mc shows the app help and exits with status 1 when no command is given.
-        let _ = cli::Cli::command().print_help();
-        std::process::exit(1);
+        // mc prints its (empty) update notice and the app help, and exits with status 1.
+        println!();
+        help::show_help_and_exit(&[], 1);
     }
     resolve::configure(cli.resolve.clone());
     config::configure_dir(cli.config_dir.clone());
