@@ -322,7 +322,7 @@ impl TimeFilterFlags {
 /// `--rewind` accepts a duration (now minus duration) or a timestamp.
 #[derive(Debug, Clone, Default, Args)]
 pub struct RewindFlag {
-    /// roll back object(s) to current version at specified time (duration like 1d or date)
+    /// roll back object(s) to current version at specified time
     #[arg(long, value_name = "TIME")]
     pub rewind: Option<String>,
 }
@@ -369,15 +369,15 @@ pub struct VersionsFlag {
 /// `--attr`, `--tags`, `--storage-class` (also `-sc` via [`rewrite_argv`]).
 #[derive(Debug, Clone, Default, Args)]
 pub struct MetadataFlags {
-    /// add custom metadata for the object, e.g. "key1=value1;key2=value2"
+    /// set storage class for new object(s) on target
+    #[arg(long = "storage-class", visible_alias = "sc", value_name = "CLASS")]
+    pub storage_class: Option<String>,
+    /// add custom metadata for the object
     #[arg(long, value_name = "KEY=VALUE;...")]
     pub attr: Option<String>,
-    /// apply tags to the uploaded object(s), e.g. "key1=value1&key2=value2"
+    /// apply one or more tags to the uploaded objects
     #[arg(long, value_name = "KEY=VALUE&...")]
     pub tags: Option<String>,
-    /// set storage class for new object(s) on target
-    #[arg(long = "storage-class", value_name = "CLASS")]
-    pub storage_class: Option<String>,
 }
 
 impl MetadataFlags {
@@ -477,15 +477,18 @@ impl Sse {
 /// `--enc-c`, `--enc-s3`, `--enc-kms`.
 #[derive(Debug, Clone, Default, Args)]
 pub struct EncFlags {
-    /// encrypt/decrypt objects using client provided keys: "ALIAS/BUCKET/PREFIX=KEY" (repeatable, comma-separated)
-    #[arg(long = "enc-c", value_name = "PATH=KEY")]
+    #[arg(
+        long = "enc-c",
+        value_name = "PATH=KEY",
+        help = "encrypt/decrypt objects using client provided keys. (multiple keys can be provided) Formats: RawBase64 or Hex."
+    )]
     pub enc_c: Vec<String>,
-    /// encrypt objects using server-side default keys: "ALIAS/BUCKET/PREFIX" (repeatable, comma-separated)
-    #[arg(long = "enc-s3", value_name = "PATH")]
-    pub enc_s3: Vec<String>,
-    /// encrypt objects using KMS keys: "ALIAS/BUCKET/PREFIX=KMS-KEY-ID" (repeatable, comma-separated)
+    /// encrypt/decrypt objects using specific server-side encryption keys. (multiple keys can be provided) [$MC_ENC_KMS]
     #[arg(long = "enc-kms", value_name = "PATH=KEY_ID")]
     pub enc_kms: Vec<String>,
+    /// encrypt/decrypt objects using server-side default keys and configurations. (multiple keys can be provided). [$MC_ENC_S3]
+    #[arg(long = "enc-s3", value_name = "PATH")]
+    pub enc_s3: Vec<String>,
 }
 
 impl EncFlags {
@@ -661,7 +664,7 @@ fn parse_checksum_arg(value: &str) -> Result<ChecksumAlgo, String> {
 /// `--checksum CRC64NVME|CRC32|CRC32C|SHA1|SHA256` (case-insensitive).
 #[derive(Debug, Clone, Default, Args)]
 pub struct ChecksumFlag {
-    /// add checksum to uploaded object: CRC64NVME, CRC32, CRC32C, SHA1, SHA256
+    /// Add checksum to uploaded object. Values: CRC64NVME, CRC32, CRC32C, SHA1 or SHA256. Requires server trailing headers (AWS, MinIO)
     #[arg(long, value_name = "ALGO", value_parser = parse_checksum_arg)]
     pub checksum: Option<ChecksumAlgo>,
 }

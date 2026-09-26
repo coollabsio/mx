@@ -52,12 +52,22 @@ server support that varies between S3-compatible servers.
 - `--json`: like mc, one compact JSON document per line when stdout is not a
   terminal, one-space indented JSON on a terminal. Go HTML escaping (`\u003c`
   etc.) is kept.
-- Errors: `PROG: <ERROR> MESSAGE CAUSE.` on stderr with mc's punctuation rules
+- Errors: `PROG: <ERROR> MESSAGE CAUSE` on stderr with mc's punctuation rules
   (`PROG` is the invoked name, e.g. `mc`), exit status 1. With `--json`, the mc
   error document (`{"status":"error","error":{"message","cause":{"message","error"},"type"}}`)
-  goes to stdout, indented like mc. The anyhow context is the message; the
-  rest of the chain is the cause. Usage errors print
-  `PROG: <ERROR> Invalid command usage, ...` and exit 1.
+  goes to stdout, compact unless stdout is a terminal. Messages follow each mc
+  command (`Unable to list folder.`, ``Unable to stat `x`.``, ``Unable to make
+  bucket `x`.``, ``Failed to remove `x`.``, `Unable to prepare URL for copying.`,
+  ...). Causes use mc's typed errors (``Bucket `b` does not exist.``, `Object does
+  not exist`, ``Requested path `/abs/path` not found``) or the server's message;
+  `cause.error` holds the Go-marshaled error (`{"Bucket":..}`, minio-go
+  `ErrorResponse` fields). Like mc, an unknown alias is treated as a local path.
+- Usage errors: `PROG: <ERROR> Invalid command usage, flag provided but not
+  defined: -bogus` (Go wording) plus mc's `SUPPORTED FLAGS:` block; unknown
+  commands print mc's "not a recognized command" text with "Did you mean"
+  suggestions; missing arguments print the command help. All exit 1.
+- `alias set` without `--api` probes the server like mc (and fails when it is
+  unreachable); access keys need 3+ and secret keys 8+ characters.
 - `MC_*` environment variables: `MC_CONFIG_DIR`, `MC_QUIET`, `MC_DISABLE_PAGER`,
   `MC_NO_COLOR`, `MC_JSON`, `MC_DEBUG`, `MC_RESOLVE` (comma separated),
   `MC_INSECURE`, `MC_LIMIT_UPLOAD`, `MC_LIMIT_DOWNLOAD`. Booleans use Go
@@ -101,8 +111,8 @@ server support that varies between S3-compatible servers.
 - `cp`/`mv`: no content-type guessing and no xattrs. `--tags` is not applied
   on a streamed copy between two servers.
 - Output is close to mc but not byte-for-byte identical. Missing: mc's `ls`
-  line format and some per-command JSON field sets. The JSON error `cause.error`
-  is always `{}`.
+  line format and some per-command JSON field sets. Some errors differ where mc
+  depends on minio-go internals (bucket location lookups).
 - No API auto-probing and no TLS trust prompt flow.
 
 ## Coolify compatibility

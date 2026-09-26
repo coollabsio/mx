@@ -17,6 +17,8 @@ fn fails_with(args: &[&str], message: &str) {
         .args([
             "alias",
             "set",
+            "--api",
+            "S3v4",
             "local",
             "http://127.0.0.1:1",
             "access",
@@ -98,8 +100,9 @@ fn rm_requires_a_target_unless_stdin() {
     mx(home.path())
         .args(["rm"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("TARGET"));
+        .code(1)
+        // Like mc: the command help on stdout.
+        .stdout(predicate::str::contains("TARGET"));
 }
 
 #[test]

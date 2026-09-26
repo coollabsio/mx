@@ -8,6 +8,11 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "older_than" => a.help("filter object(s) older than value in duration string (e.g. 7d10h31s)"),
+    "newer_than" => a.help("filter object(s) newer than value in duration string (e.g. 7d10h31s)"),
+    _ => a,
+}))]
 pub struct MirrorArgs {
     /// overwrite object(s) on target if it differs from source
     #[arg(long)]
@@ -57,12 +62,14 @@ pub struct MirrorArgs {
     #[command(flatten)]
     pub time: TimeFilterFlags,
     /// specify storage class for new object(s) on target
-    #[arg(long = "storage-class", value_name = "CLASS")]
+    #[arg(long = "storage-class", visible_alias = "sc", value_name = "CLASS")]
     pub storage_class: Option<String>,
     /// add custom metadata for all objects
     #[arg(long, value_name = "KEY=VALUE;...")]
     pub attr: Option<String>,
-    /// prometheus endpoint address (not supported by mx)
+    /// if specified, a new prometheus endpoint will be created to report mirroring activity. (eg: localhost:8081)
+    ///
+    /// not supported by mx
     #[arg(long, value_name = "ADDRESS")]
     pub monitoring_address: Option<String>,
     /// if specified, will enable retrying on a per object basis if errors occur
@@ -141,6 +148,10 @@ pub fn run(args: MirrorArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let source = parse_location(&args.source, store.config());
     let target = parse_location(&args.target, store.config());
+    if !options.keep_running() && !matches!(&source, Location::S3(t) if t.bucket.is_none()) {
+        crate::commands::util::stat_target(&store, &args.source)
+            .with_context(|| format!("Unable to stat source `{}`.", args.source))?;
+    }
 
     runtime()?.block_on(async {
         let source = match source {

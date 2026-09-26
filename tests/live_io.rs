@@ -381,7 +381,9 @@ fn live_put_multipart_storage_checksum_encryption() {
         .args(["put", "--if-not-exists", small_str, &live.url("once.txt")])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("PreconditionFailed"));
+        .stderr(predicate::str::contains(
+            "pre-conditions you specified did not hold",
+        ));
     live.cmd()
         .args([
             "put",
@@ -393,7 +395,9 @@ fn live_put_multipart_storage_checksum_encryption() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("PreconditionFailed"));
+        .stderr(predicate::str::contains(
+            "pre-conditions you specified did not hold",
+        ));
     live.cmd()
         .args([
             "put",

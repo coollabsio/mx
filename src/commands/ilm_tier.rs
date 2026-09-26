@@ -42,10 +42,10 @@ pub struct IlmTierAddArgs {
     pub alias: String,
     /// name of the remote tier target, e.g. WARM-TIER
     pub name: String,
-    /// remote tier endpoint, e.g. https://s3.amazonaws.com
+    /// remote tier endpoint. e.g https://s3.amazonaws.com
     #[arg(long)]
     pub endpoint: Option<String>,
-    /// remote tier region, e.g. us-west-2
+    /// remote tier region. e.g us-west-2
     #[arg(long)]
     pub region: Option<String>,
     /// AWS S3 or compatible object storage access-key

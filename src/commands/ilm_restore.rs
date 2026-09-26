@@ -14,6 +14,11 @@ use std::time::Duration;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "versions" => a.help("apply on versions"),
+    "version_id" => a.help("select a specific version id"),
+    _ => a,
+}))]
 pub struct IlmRestoreArgs {
     pub target: String,
     /// keep the restored copy for N days
@@ -23,9 +28,9 @@ pub struct IlmRestoreArgs {
     #[arg(short = 'r', long)]
     pub recursive: bool,
     #[command(flatten)]
-    pub version_id: VersionIdFlag,
-    #[command(flatten)]
     pub versions: VersionsFlag,
+    #[command(flatten)]
+    pub version_id: VersionIdFlag,
 }
 
 fn validate(args: &IlmRestoreArgs) -> Result<()> {
@@ -80,10 +85,7 @@ pub fn run(args: IlmRestoreArgs, json: bool) -> Result<()> {
         )) {
             Ok(()) => sent.push((key, version_id)),
             Err(error) => {
-                eprintln!(
-                    "mx: Unable to send restore request for `{}`: {error:#}",
-                    target.alias_path(&key)
-                );
+                crate::output::print_error(&error.context("Unable to send restore request."));
                 failed += 1;
             }
         }
@@ -107,15 +109,20 @@ pub fn run(args: IlmRestoreArgs, json: bool) -> Result<()> {
                     break;
                 }
                 Ok(None) => {
-                    eprintln!(
-                        "mx: Unable to check for restore status: `{}` did not receive restore request",
-                        target.alias_path(key)
+                    crate::output::error_if(
+                        "Unable to check for restore status",
+                        &format!(
+                            "`{}` did not receive restore request",
+                            target.alias_path(key)
+                        ),
                     );
                     failed += 1;
                     break;
                 }
                 Err(error) => {
-                    eprintln!("mx: Unable to check for restore status: {error:#}");
+                    crate::output::print_error(
+                        &error.context("Unable to check for restore status"),
+                    );
                     failed += 1;
                     break;
                 }

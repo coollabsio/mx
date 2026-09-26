@@ -11,6 +11,8 @@ fn home() -> tempfile::TempDir {
         .args([
             "alias",
             "set",
+            "--api",
+            "S3v4",
             "dead",
             "http://127.0.0.1:1",
             "access",
@@ -124,7 +126,7 @@ fn retention_rejects_bad_arguments() {
     fails_with(
         &home,
         &["retention", "info", "local-dir/file"],
-        "not an S3 alias path",
+        "No valid configuration found for 'local-dir' host alias.",
     );
     // `retention clear` has no --bypass (clear always bypasses governance, like mc).
     mx(&home)
@@ -164,7 +166,7 @@ fn legalhold_rejects_bad_arguments() {
     fails_with(
         &home,
         &["legalhold", "clear", "local-dir/file"],
-        "not an S3 alias path",
+        "No valid configuration found for 'local-dir' host alias.",
     );
 }
 

@@ -118,13 +118,56 @@ impl ErrorKind {
     }
 }
 
-/// Splits an anyhow error into mc's (message, cause): the outermost context is the message,
-/// the rest of the chain (joined with `: `) is the cause. A single-level error has no cause.
+/// One reported error, split like mc: `message` (command context), `cause` (error text),
+/// `detail` (Go-marshaled error value for JSON `cause.error`) and severity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Report {
+    pub message: String,
+    pub cause: String,
+    pub detail: crate::error::Detail,
+    pub kind: ErrorKind,
+}
+
+/// Splits an anyhow error into mc's parts: the outermost context is the message, the rest of
+/// the chain (joined with `: `) is the cause. A single-level error has no cause. The kind is
+/// [`ErrorKind::Error`] when the message is a [`crate::error::NonFatal`] context, else `Fatal`.
+/// SDK noise (`service error`, repeated texts) is dropped.
+pub fn report(err: &anyhow::Error) -> Report {
+    let mut chain = err.chain();
+    let first = chain.next();
+    let message = first.map(|e| e.to_string()).unwrap_or_default();
+    let kind = if err.downcast_ref::<crate::error::NonFatal>().is_some() {
+        ErrorKind::Error
+    } else {
+        ErrorKind::Fatal
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for cause in chain {
+        let text = cause.to_string();
+        if text == "service error" || text.is_empty() || parts.contains(&text) {
+            continue;
+        }
+        let mapped = cause.downcast_ref::<crate::error::McError>().is_some();
+        parts.push(text);
+        // mc's typed error is the whole cause; SDK sources below it only repeat it.
+        if mapped {
+            break;
+        }
+    }
+    Report {
+        message,
+        cause: parts.join(": "),
+        detail: crate::error::mc_error(err)
+            .map(|e| e.detail.clone())
+            .unwrap_or_default(),
+        kind,
+    }
+}
+
+/// (message, cause) of [`report`].
 pub fn split_error(err: &anyhow::Error) -> (String, String) {
-    let mut chain = err.chain().map(|e| e.to_string());
-    let message = chain.next().unwrap_or_default();
-    let cause = chain.collect::<Vec<_>>().join(": ");
-    (message, cause)
+    let report = report(err);
+    (report.message, report.cause)
 }
 
 /// mc `fatal` text: `MESSAGE CAUSE` with mc's punctuation rules (without the prefix).
@@ -144,7 +187,7 @@ pub fn format_fatal_text(message: &str, cause: &str) -> String {
             errmsg.push('.');
         }
     }
-    format!("{msg} {errmsg}").trim().to_string()
+    format!("{msg} {errmsg}")
 }
 
 /// mc error JSON document: `{"status":"error","error":{"message","cause":{"message","error"},"type"}}`.
@@ -166,43 +209,41 @@ pub struct ErrorBody<'a> {
 pub struct ErrorCause<'a> {
     pub message: &'a str,
     /// Go marshals the wrapped `error` value; plain Go errors encode as `{}`.
-    pub error: serde_json::Map<String, serde_json::Value>,
+    pub error: &'a crate::error::Detail,
 }
 
-pub fn error_json<'a>(message: &'a str, cause: &'a str, kind: ErrorKind) -> ErrorDocument<'a> {
+pub fn error_json(report: &Report) -> ErrorDocument<'_> {
     ErrorDocument {
         status: "error",
         error: ErrorBody {
-            message,
+            message: &report.message,
             cause: ErrorCause {
-                message: cause,
-                error: serde_json::Map::new(),
+                message: &report.cause,
+                error: &report.detail,
             },
-            kind: kind.as_str(),
+            kind: report.kind.as_str(),
         },
     }
 }
 
 /// Full error output (text line for stderr, or JSON document for stdout) without printing.
-/// mc prints error JSON indented (`MarshalIndent`) even on a non-terminal.
-pub fn format_error(message: &str, cause: &str, kind: ErrorKind, json: bool) -> String {
+/// JSON is compact unless stdout is a terminal, like mc.
+pub fn format_error(report: &Report, json: bool) -> String {
     if json {
-        return json_indent(&error_json(message, cause, kind)).unwrap_or_default();
+        return json_string(&error_json(report)).unwrap_or_default();
     }
-    let text = match kind {
-        ErrorKind::Fatal => format_fatal_text(message, cause),
+    let text = match report.kind {
+        ErrorKind::Fatal => format_fatal_text(&report.message, &report.cause),
         // mc `errorIf` joins message and cause with a space, no punctuation rules.
-        ErrorKind::Error => format!("{} {}", message.trim(), cause.trim())
-            .trim()
-            .to_string(),
+        ErrorKind::Error => format!("{} {}", report.message, report.cause),
     };
     format!("{}: <ERROR> {text}", prog_name())
 }
 
 /// Prints an error: JSON on stdout with `--json`, else `PROG: <ERROR> ...` on stderr.
-pub fn print_error_parts(message: &str, cause: &str, kind: ErrorKind) {
+pub fn print_report(report: &Report) {
     let json = crate::globals::json();
-    let text = format_error(message, cause, kind, json);
+    let text = format_error(report, json);
     if json {
         println!("{text}");
     } else {
@@ -210,23 +251,49 @@ pub fn print_error_parts(message: &str, cause: &str, kind: ErrorKind) {
     }
 }
 
-/// mc `errorIf` for a non-fatal error: reports it and lets the command continue.
+/// mc `errorIf` with plain texts: reports a non-fatal error and lets the command continue.
 pub fn error_if(message: &str, cause: &str) {
-    print_error_parts(message, cause, ErrorKind::Error);
+    print_report(&Report {
+        message: message.to_string(),
+        cause: cause.to_string(),
+        detail: Default::default(),
+        kind: ErrorKind::Error,
+    });
 }
 
-/// Non-fatal report of an anyhow error (message = outermost context, cause = the rest).
+/// mc `errorIf` for an anyhow error (message = outermost context, cause = the rest); the
+/// command continues.
 pub fn print_error(err: &anyhow::Error) {
-    let (message, cause) = split_error(err);
-    print_error_parts(&message, &cause, ErrorKind::Error);
+    if err.downcast_ref::<Exit>().is_some() {
+        return;
+    }
+    let mut report = report(err);
+    report.kind = ErrorKind::Error;
+    print_report(&report);
 }
 
-/// mc `fatalIf`: reports `err` as fatal and exits with status 1.
+/// Reports `err` (as `fatalIf`, or `errorIf` for a [`crate::error::NonFatal`] message) and
+/// exits with status 1. [`Exit`] errors exit silently with their status.
 pub fn fatal(err: &anyhow::Error) -> ! {
-    let (message, cause) = split_error(err);
-    print_error_parts(&message, &cause, ErrorKind::Fatal);
+    if let Some(Exit(code)) = err.downcast_ref::<Exit>() {
+        std::process::exit(*code);
+    }
+    print_report(&report(err));
     std::process::exit(1);
 }
+
+/// Error for a failure that was already reported (e.g. with [`print_error`]): `main` exits
+/// with the status without printing anything.
+#[derive(Debug, Clone, Copy)]
+pub struct Exit(pub i32);
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "exit status {}", self.0)
+    }
+}
+
+impl std::error::Error for Exit {}
 
 #[cfg(test)]
 mod tests {
@@ -269,11 +336,12 @@ mod tests {
             "Unable to list: connection refused."
         );
         assert_eq!(format_fatal_text("Unable:", "x."), "Unable: x.");
+        // mc prints `MSG CAUSE` without trimming: an empty cause leaves a trailing space.
         assert_eq!(
             format_fatal_text("No such alias `x` found.", ""),
-            "No such alias `x` found."
+            "No such alias `x` found. "
         );
-        assert_eq!(format_fatal_text("", "bad value"), "bad value");
+        assert_eq!(format_fatal_text("", "bad value"), " bad value");
     }
 
     #[test]
@@ -294,19 +362,41 @@ mod tests {
     }
 
     #[test]
-    fn error_formats_text_and_json() {
+    fn report_uses_mc_error_detail_and_nonfatal_kind() {
+        let err = Err::<(), _>(crate::error::McError::bucket_not_found("b"))
+            .context(crate::error::nonfatal("Unable to list folder."))
+            .unwrap_err();
+        let report = report(&err);
+        assert_eq!(report.kind, ErrorKind::Error);
+        assert_eq!(report.cause, "Bucket `b` does not exist.");
+        assert_eq!(
+            format_json(&error_json(&report), true).unwrap(),
+            r#"{"status":"error","error":{"message":"Unable to list folder.","cause":{"message":"Bucket `b` does not exist.","error":{"Bucket":"b"}},"type":"error"}}"#
+        );
         let prog = prog_name();
         assert_eq!(
-            format_error("Unable to list", "Access Denied", ErrorKind::Fatal, false),
+            format_error(&report, false),
+            format!("{prog}: <ERROR> Unable to list folder. Bucket `b` does not exist.")
+        );
+    }
+
+    #[test]
+    fn error_formats_text() {
+        let prog = prog_name();
+        let mut report = Report {
+            message: "Unable to list".into(),
+            cause: "Access Denied".into(),
+            detail: Default::default(),
+            kind: ErrorKind::Fatal,
+        };
+        assert_eq!(
+            format_error(&report, false),
             format!("{prog}: <ERROR> Unable to list. Access Denied.")
         );
+        report.kind = ErrorKind::Error;
         assert_eq!(
-            format_error("Failed to copy", "boom", ErrorKind::Error, false),
-            format!("{prog}: <ERROR> Failed to copy boom")
-        );
-        assert_eq!(
-            format_error("Unable to list", "boom", ErrorKind::Fatal, true),
-            "{\n \"status\": \"error\",\n \"error\": {\n  \"message\": \"Unable to list\",\n  \"cause\": {\n   \"message\": \"boom\",\n   \"error\": {}\n  },\n  \"type\": \"fatal\"\n }\n}"
+            format_error(&report, false),
+            format!("{prog}: <ERROR> Unable to list Access Denied")
         );
     }
 }

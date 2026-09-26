@@ -16,7 +16,12 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Args)]
-#[command(after_help = FIND_HELP)]
+#[command(after_help = FIND_HELP, mut_args(|a| match a.get_id().as_str() {
+    "versions" => a.help("include all objects versions"),
+    "older_than" => a.help("match all objects older than value in duration string (e.g. 7d10h31s)"),
+    "newer_than" => a.help("match all objects newer than value in duration string (e.g. 7d10h31s)"),
+    _ => a,
+}))]
 pub struct FindArgs {
     /// spawn an external process for each matching object (see FORMAT)
     #[arg(long, value_name = "COMMAND")]
@@ -46,17 +51,25 @@ pub struct FindArgs {
     /// match all objects smaller than specified size in units (see UNITS)
     #[arg(long, value_name = "SIZE")]
     pub smaller: Option<String>,
-    /// limit directory navigation to specified depth (0 = unlimited)
+    /// limit directory navigation to specified depth (default: 0)
     #[arg(long)]
     pub maxdepth: Option<usize>,
-    /// monitor a specified path for newly created object(s) (rescans every 2 seconds)
+    /// monitor a specified path for newly created object(s)
     #[arg(long)]
     pub watch: bool,
-    /// match metadata with RE2 regex pattern, KEY=REGEX (repeatable; S3 only)
-    #[arg(long, value_name = "KEY=REGEX")]
+    /// match metadata with RE2 regex pattern. Specify each with key=regex. MinIO server only.
+    #[arg(
+        long,
+        value_name = "KEY=REGEX",
+        help = "match metadata with RE2 regex pattern. Specify each with key=regex. MinIO server only."
+    )]
     pub metadata: Vec<String>,
-    /// match tags with RE2 regex pattern, KEY=REGEX (repeatable; S3 only)
-    #[arg(long, value_name = "KEY=REGEX")]
+    /// match tags with RE2 regex pattern. Specify each with key=regex. MinIO server only.
+    #[arg(
+        long,
+        value_name = "KEY=REGEX",
+        help = "match tags with RE2 regex pattern. Specify each with key=regex. MinIO server only."
+    )]
     pub tags: Vec<String>,
     #[arg(default_value = ".")]
     pub target: String,
@@ -546,7 +559,10 @@ fn run_exec(
         if !stderr.trim().is_empty() {
             eprintln!("{}", stderr.trim());
         }
-        eprintln!("mx: `{program}` failed: {}", output.status);
+        crate::output::error_if(
+            &format!("Unable to run `{program}`."),
+            &output.status.to_string(),
+        );
         std::process::exit(output.status.code().unwrap_or(1));
     }
     use std::io::Write;
@@ -560,6 +576,10 @@ fn open_source(store: &ConfigStore, input: &str, rt: &tokio::runtime::Runtime) -
     match parse_location(input, store.config()) {
         Location::S3(target) => {
             let alias = alias_config(store, &target.alias)?;
+            if target.bucket.is_some() {
+                super::util::stat_target(store, input)
+                    .with_context(|| format!("Unable to stat `{input}`."))?;
+            }
             let client = rt.block_on(crate::s3::build_client(&alias))?;
             Ok(Source::S3 {
                 alias_name: target.alias.clone(),
@@ -570,9 +590,8 @@ fn open_source(store: &ConfigStore, input: &str, rt: &tokio::runtime::Runtime) -
             })
         }
         Location::Local(root) => {
-            if !root.exists() {
-                bail!("Unable to stat `{input}`: no such file or directory");
-            }
+            super::util::stat_target(store, input)
+                .with_context(|| format!("Unable to stat `{input}`."))?;
             Ok(Source::Local {
                 root,
                 display: input.to_string(),

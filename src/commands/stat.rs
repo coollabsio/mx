@@ -1,7 +1,10 @@
 use crate::commands::cat::EncCFlag;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::error::{McError, nonfatal};
 use crate::flags::{RewindFlag, VersionIdFlag, resolve_sse};
+use crate::location::{Location, parse_location};
+use crate::s3::S3ResultExt;
 use crate::s3::{BucketStat, ListOptions, ObjectInfo, ObjectStat, full_key, parse_header_pairs};
 use crate::target::TargetRef;
 use anyhow::{Context, Result, bail};
@@ -14,17 +17,22 @@ use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "rewind" => a.help("stat on older version(s)"),
+    "version_id" => a.help("stat a specific object version"),
+    _ => a,
+}))]
 pub struct StatArgs {
-    /// stat all objects recursively
-    #[arg(short = 'r', long)]
-    pub recursive: bool,
+    #[command(flatten)]
+    pub rewind: RewindFlag,
     /// stat all versions
     #[arg(long)]
     pub versions: bool,
     #[command(flatten)]
     pub version_id: VersionIdFlag,
-    #[command(flatten)]
-    pub rewind: RewindFlag,
+    /// stat all objects recursively
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
     /// show extended bucket(s) stat
     #[arg(short = 'v', long)]
     pub verbose: bool,
@@ -65,6 +73,25 @@ pub fn run(args: StatArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let rt = runtime()?;
     for input in &args.targets {
+        if let Location::Local(path) = parse_location(input, store.config())
+            && !path.exists()
+        {
+            // mc treats unknown aliases as local paths and lists the parent folder.
+            let path = path.to_string_lossy();
+            let parent = match path.trim_end_matches('/').rfind('/') {
+                Some(0) => "/".to_string(),
+                Some(index) => path[..index].to_string(),
+                None => ".".to_string(),
+            };
+            if !std::path::Path::new(&parent).is_dir() {
+                crate::output::print_error(
+                    &anyhow::Error::new(crate::error::local_not_found(&parent))
+                        .context(nonfatal("Unable to list folder.")),
+                );
+            }
+            return Err(anyhow::Error::new(McError::object_missing()))
+                .with_context(|| format!("Unable to stat `{input}`."));
+        }
         let target = TargetRef::parse(input)?;
         let alias = alias_config(&store, &target.alias)?;
         let entries = rt
@@ -101,7 +128,7 @@ async fn collect(
 ) -> Result<Vec<StatEntry>> {
     let client = crate::s3::build_client(alias).await?;
     let Some(bucket) = target.bucket.clone() else {
-        let response = client.list_buckets().send().await?;
+        let response = client.list_buckets().send().await.s3("", "")?;
         let mut entries = Vec::new();
         for entry in response.buckets() {
             let name = entry.name().unwrap_or_default();
@@ -135,9 +162,18 @@ async fn collect(
         if args.recursive || target.trailing_slash {
             return list_entries(&client, &bucket, None, args, rewind, &relative, &sse_c).await;
         }
-        return Ok(vec![StatEntry::Bucket(
-            crate::s3::stat_bucket(&client, &bucket).await?,
-        )]);
+        return match crate::s3::stat_bucket(&client, &bucket).await {
+            Ok(stat) => Ok(vec![StatEntry::Bucket(stat)]),
+            Err(error) if crate::error::error_code(&error) == Some("NoSuchBucket") => {
+                // mc reports the missing bucket (`bucketStat`) and then a missing object.
+                crate::output::print_error(
+                    &anyhow::Error::new(McError::bucket_not_found(&bucket))
+                        .context(nonfatal("Unable to list folder.")),
+                );
+                Err(McError::object_missing().into())
+            }
+            Err(error) => Err(error),
+        };
     };
 
     if args.no_list || args.version_id.version_id.is_some() {
@@ -171,7 +207,7 @@ async fn collect(
             _ => versions,
         };
         if versions.is_empty() {
-            bail!("Object does not exist.");
+            return Err(McError::object_missing().into());
         }
         let mut entries = Vec::new();
         for version in versions {
@@ -182,8 +218,10 @@ async fn collect(
     }
     match crate::s3::stat_object_sse_c(&client, &bucket, &key, None, sse_c(&key)).await {
         Ok(stat) => Ok(vec![object_entry(&bucket, stat, &relative)]),
-        Err(error) => {
-            // Not an object: report it as a folder if it is a non-empty prefix.
+        Err(error) if !crate::error::is_not_found(&error) => Err(error),
+        Err(_) => {
+            // Not an object: report it as a folder if it is a non-empty prefix. Like mc, a
+            // listing failure is reported and the object is missing.
             let prefix = format!("{key}/");
             let children = client
                 .list_objects_v2()
@@ -191,9 +229,17 @@ async fn collect(
                 .prefix(&prefix)
                 .max_keys(1)
                 .send()
-                .await?;
+                .await
+                .s3(&bucket, "");
+            let children = match children {
+                Ok(children) => children,
+                Err(error) => {
+                    crate::output::print_error(&error.context(nonfatal("Unable to list folder.")));
+                    return Err(McError::object_missing().into());
+                }
+            };
             if children.contents().is_empty() && children.common_prefixes().is_empty() {
-                return Err(error);
+                return Err(McError::object_missing().into());
             }
             Ok(vec![StatEntry::Folder {
                 name: relative(&prefix),
@@ -227,7 +273,7 @@ async fn list_entries(
     };
     let items = crate::s3::list_objects_with(client, bucket, prefix, &options).await?;
     if items.is_empty() {
-        bail!("Object does not exist.");
+        return Err(McError::object_missing().into());
     }
     let base = prefix.unwrap_or_default();
     let mut entries = Vec::new();

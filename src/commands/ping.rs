@@ -2,7 +2,7 @@
 
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Args)]
 pub struct PingArgs {
-    /// perform liveliness check for count number of times (default: until interrupted)
+    /// perform liveliness check for count number of times (default: 0)
     #[arg(short = 'c', long)]
     pub count: Option<u64>,
-    /// exit after N consecutive ping errors
+    /// exit after N consecutive ping errors (default: 0)
     #[arg(short = 'e', long = "error-count")]
     pub error_count: Option<u64>,
     /// exit when server(s) responds and reports being online
@@ -22,10 +22,14 @@ pub struct PingArgs {
     /// wait interval between each request in seconds
     #[arg(short = 'i', long, default_value_t = 1)]
     pub interval: u64,
-    /// ping all the servers in the cluster (requires the MinIO admin API; not supported)
+    /// ping all the servers in the cluster, use it when you have direct access to nodes/pods
+    ///
+    /// requires the MinIO admin API; not supported by mx
     #[arg(short = 'a', long)]
     pub distributed: bool,
-    /// ping the specified node (requires the MinIO admin API; not supported)
+    /// ping the specified node
+    ///
+    /// requires the MinIO admin API; not supported by mx
     #[arg(long)]
     pub node: Option<String>,
     pub target: String,
@@ -127,7 +131,8 @@ pub fn run(args: PingArgs, json: bool) -> Result<()> {
     }
     let store = ConfigStore::load_or_create()?;
     let alias_name = args.target.split('/').next().unwrap_or_default();
-    let alias = alias_config(&store, alias_name)?;
+    let alias = alias_config(&store, alias_name)
+        .with_context(|| format!("Unable to initialize admin client for `{}`.", args.target))?;
     let url = url::Url::parse(&alias.url)?;
     let host = match url.port() {
         Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),

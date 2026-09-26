@@ -37,6 +37,8 @@ fn set_writes_alias_to_mx_config() {
     cmd.env("HOME", home.path()).args([
         "alias",
         "set",
+        "--api",
+        "S3v4",
         "demo",
         "http://localhost:9000",
         "minio",
@@ -159,6 +161,8 @@ fn set_supports_json_output() {
         "--json",
         "alias",
         "set",
+        "--api",
+        "S3v4",
         "demo",
         "http://localhost:9000",
         "minio",
@@ -183,6 +187,8 @@ fn list_supports_json_output() {
     cmd.env("HOME", home.path()).args([
         "alias",
         "set",
+        "--api",
+        "S3v4",
         "demo",
         "http://localhost:9000",
         "minio",
@@ -208,6 +214,8 @@ fn remove_supports_json_output() {
     cmd.env("HOME", home.path()).args([
         "alias",
         "set",
+        "--api",
+        "S3v4",
         "demo",
         "http://localhost:9000",
         "minio",

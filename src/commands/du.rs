@@ -3,18 +3,25 @@ use crate::config::ConfigStore;
 use crate::flags::RewindFlag;
 use crate::location::{Location, parse_location};
 use crate::s3::{ListOptions, ObjectInfo};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| if a.get_id().as_str() == "rewind" {
+    a.help("include all object versions no later than specified date")
+} else {
+    a
+}))]
 pub struct DuArgs {
-    #[arg(short = 'r', long)]
-    pub recursive: bool,
+    /// print the total for a folder prefix only if it is N or fewer levels below the command line argument (default: 0)
     #[arg(short = 'd', long)]
     pub depth: Option<usize>,
+    /// recursively print the total for a folder prefix
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
     #[command(flatten)]
     pub rewind: RewindFlag,
     /// include all object versions
@@ -60,7 +67,24 @@ pub(crate) fn listing(
 
 pub fn run(args: DuArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
-    let items = listing(&store, &args.target, args.versions, &args.rewind)?;
+    let input = &args.target;
+    // mc `isAliasURLDir`: only folders (and paths ending in `/`) can be summarized.
+    let is_dir = input.ends_with('/')
+        || matches!(
+            super::util::stat_target(&store, input),
+            Ok(super::util::TargetKind::Folder)
+        )
+        || matches!(parse_location(input, store.config()), Location::S3(t) if t.key.is_none());
+    if !is_dir {
+        return Err(crate::error::McError::invalid_argument()).with_context(|| {
+            format!("Source `{input}` is not a folder. Only folders are supported by 'du' command.")
+        });
+    }
+    let items = listing(&store, input, args.versions, &args.rewind).with_context(|| {
+        crate::error::nonfatal(format!(
+            "Failed to find disk usage of `{input}` recursively."
+        ))
+    })?;
     let depth = args
         .depth
         .unwrap_or(if args.recursive { usize::MAX } else { 1 });

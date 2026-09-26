@@ -65,6 +65,9 @@ impl ConfigStore {
                     view.aliases.insert(alias, cfg);
                 }
                 Err(err) => {
+                    // Keep the name known so targets using it are not treated as local
+                    // paths; `alias()` reports the error.
+                    view.aliases.entry(alias.clone()).or_default();
                     env_errors.insert(alias, err);
                 }
             }
@@ -125,11 +128,18 @@ impl ConfigStore {
         if let Some(err) = self.env_errors.get(alias) {
             bail!("{err}");
         }
-        self.config
-            .aliases
-            .get(alias)
-            .cloned()
-            .ok_or_else(|| anyhow!("No such alias `{alias}` found."))
+        self.config.aliases.get(alias).cloned().ok_or_else(|| {
+            // mc `expandAlias` failure (commands add their own message).
+            crate::error::McError::new(format!(
+                "No valid configuration found for '{alias}' host alias."
+            ))
+            .into()
+        })
+    }
+
+    /// True when `alias` comes from an invalid `MC_HOST_<alias>` variable.
+    pub fn is_invalid_env_alias(&self, alias: &str) -> bool {
+        self.env_errors.contains_key(alias)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -181,6 +191,21 @@ pub fn save_config(path: &Path, config: &ConfigV10) -> Result<()> {
         .map_err(|err| err.error)
         .with_context(|| format!("Unable to persist config to `{}`.", path.display()))?;
     Ok(())
+}
+
+/// The config directory used without `--config-dir`: `~/.mx`, or `~/.mc` when only that one
+/// has a config file.
+pub fn default_dir() -> PathBuf {
+    let Ok(home) = home_dir() else {
+        return PathBuf::from(MX_DIR_NAME);
+    };
+    let mx = home.join(MX_DIR_NAME);
+    let mc = home.join(MC_DIR_NAME);
+    if !mx.join(CONFIG_FILE_NAME).exists() && mc.join(CONFIG_FILE_NAME).exists() {
+        mc
+    } else {
+        mx
+    }
 }
 
 fn home_dir() -> Result<PathBuf> {

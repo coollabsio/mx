@@ -1,6 +1,7 @@
 //! Extra S3 helpers for cat/head/get/put/pipe/find (area E).
 
 use super::to_system_time;
+use crate::s3::S3ResultExt;
 use anyhow::{Result, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{ConfigBag, Intercept, RuntimeComponents};
@@ -77,7 +78,8 @@ pub async fn version_at(
             .set_key_marker(key_marker.take())
             .set_version_id_marker(version_marker.take())
             .send()
-            .await?;
+            .await
+            .s3(bucket, "")?;
         for version in response.versions() {
             if version.key() == Some(key) {
                 consider(
@@ -125,7 +127,8 @@ pub async fn object_metadata(
         .key(key)
         .set_version_id(version_id.map(str::to_string))
         .send()
-        .await?;
+        .await
+        .s3_object(bucket, key)?;
     let mut map = HashMap::new();
     for (name, value) in [
         ("content-type", head.content_type()),
@@ -157,7 +160,8 @@ pub async fn object_tags(
         .key(key)
         .set_version_id(version_id.map(str::to_string))
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(response
         .tag_set
         .into_iter()

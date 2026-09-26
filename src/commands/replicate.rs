@@ -66,46 +66,46 @@ pub struct ReplicateTargetArgs {
 #[derive(Debug, Args)]
 pub struct ReplicateAddArgs {
     pub target: String,
-    /// remote bucket: `https://ACCESSKEY:SECRETKEY@host:port/bucket` or `ALIAS/BUCKET`
-    #[arg(long)]
-    pub remote_bucket: Option<String>,
     /// id for the rule, should be a unique value
     #[arg(long)]
     pub id: Option<String>,
-    /// format '<key1>=<value1>&<key2>=<value2>'
+    /// format '<key1>=<value1>&<key2>=<value2>&<key3>=<value3>', multiple values allowed for multiple key/value pairs
     #[arg(long)]
     pub tags: Option<String>,
-    /// storage class for destination (STANDARD or REDUCED_REDUNDANCY)
+    /// storage class for destination, valid values are either "STANDARD" or "REDUCED_REDUNDANCY"
     #[arg(long)]
     pub storage_class: Option<String>,
     /// disable the rule
     #[arg(long)]
     pub disable: bool,
-    /// priority of the rule, should be unique
+    /// priority of the rule, should be unique and is a required field
     #[arg(long, default_value_t = 0)]
     pub priority: i64,
-    /// comma separated list of: delete-marker, delete, existing-objects, metadata-sync
+    /// remote bucket, should be a unique value for the configuration
+    #[arg(long)]
+    pub remote_bucket: Option<String>,
+    /// comma separated list to enable replication of soft deletes, permanent deletes, existing objects and metadata sync
     #[arg(
         long,
         default_value = "delete-marker,delete,existing-objects,metadata-sync"
     )]
     pub replicate: String,
-    /// bucket path lookup supported by the remote server: auto, on, off
+    /// bucket path lookup supported by the server. Valid options are ['auto', 'on', 'off']'
     #[arg(long, default_value = "auto")]
     pub path: String,
-    /// region of the destination bucket
+    /// region of the destination bucket (optional)
     #[arg(long)]
     pub region: Option<String>,
-    /// bandwidth limit in bytes per second (K,M,G,T for metric and Ki,Mi,Gi,Ti for IEC units)
+    /// set bandwidth limit in bytes per second (K,B,G,T for metric and Ki,Bi,Gi,Ti for IEC units)
     #[arg(long)]
     pub bandwidth: Option<String>,
-    /// enable synchronous replication for this target
+    /// enable synchronous replication for this target. default is async
     #[arg(long)]
     pub sync: bool,
     /// health check interval in seconds
     #[arg(long, default_value_t = 60)]
     pub healthcheck_seconds: u64,
-    /// disable proxying in active-active replication
+    /// disable proxying in active-active replication. If unset, default behavior is to proxy
     #[arg(long)]
     pub disable_proxy: bool,
 }
@@ -113,40 +113,40 @@ pub struct ReplicateAddArgs {
 #[derive(Debug, Args)]
 pub struct ReplicateUpdateArgs {
     pub target: String,
-    /// id of the rule to modify
+    /// id for the rule, should be a unique value
     #[arg(long)]
     pub id: Option<String>,
-    /// format '<key1>=<value1>&<key2>=<value2>'
+    /// format '<key1>=<value1>&<key2>=<value2>&<key3>=<value3>', multiple values allowed for multiple key/value pairs
     #[arg(long)]
     pub tags: Option<String>,
-    /// storage class for destination (STANDARD or REDUCED_REDUNDANCY)
+    /// storage class for destination, valid values are ['STANDARD', 'REDUCED_REDUNDANCY']
     #[arg(long)]
     pub storage_class: Option<String>,
-    /// rule status: enable or disable
+    /// change rule status, valid values are ['enable', 'disable']
     #[arg(long)]
     pub state: Option<String>,
-    /// priority of the rule, should be unique
+    /// priority of the rule, should be unique and is a required field (default: 0)
     #[arg(long)]
     pub priority: Option<i64>,
-    /// remote bucket: `https://ACCESSKEY:SECRETKEY@host:port/bucket` or `ALIAS/BUCKET`
+    /// destination bucket, should be a unique value for the configuration
     #[arg(long)]
     pub remote_bucket: Option<String>,
-    /// comma separated list of: delete-marker, delete, existing-objects, metadata-sync ("" disables all)
+    /// comma separated list to enable replication of soft deletes, permanent deletes, existing objects and metadata sync. Valid options are "delete-marker","delete","existing-objects","metadata-sync" and ""'
     #[arg(long)]
     pub replicate: Option<String>,
-    /// synchronous replication: enable or disable
+    /// enable synchronous replication for this target, valid values are ['enable', 'disable']. (default: "disable")
     #[arg(long)]
     pub sync: Option<String>,
-    /// proxying in active-active replication: enable or disable
+    /// enable proxying in active-active replication, valid values are ['enable', 'disable'] (default: "enable")
     #[arg(long)]
     pub proxy: Option<String>,
-    /// bandwidth limit in bytes per second
+    /// Set bandwidth limit in bytes per second (K,B,G,T for metric and Ki,Bi,Gi,Ti for IEC units)
     #[arg(long)]
     pub bandwidth: Option<String>,
-    /// health check interval in seconds
+    /// health check duration in seconds (default: 60)
     #[arg(long)]
     pub healthcheck_seconds: Option<u64>,
-    /// bucket path lookup supported by the remote server: auto, on, off
+    /// bucket path lookup supported by the server, valid options are ['on', 'off', 'auto'] (default: "auto")
     #[arg(long)]
     pub path: Option<String>,
 }
@@ -154,7 +154,7 @@ pub struct ReplicateUpdateArgs {
 #[derive(Debug, Args)]
 pub struct ReplicateListArgs {
     pub target: String,
-    /// show rules by status: enabled or disabled
+    /// show rules by status. Valid options are [enabled,disabled]
     #[arg(long)]
     pub status: Option<String>,
 }
@@ -162,7 +162,9 @@ pub struct ReplicateListArgs {
 #[derive(Debug, Args)]
 pub struct ReplicateStatusArgs {
     pub target: String,
-    /// show replication speed for all nodes (not supported by mx)
+    /// show replication speed for all nodes
+    ///
+    /// not supported by mx
     #[arg(short = 'n', long)]
     pub nodes: bool,
 }
@@ -170,15 +172,15 @@ pub struct ReplicateStatusArgs {
 #[derive(Debug, Args)]
 pub struct ReplicateRemoveArgs {
     pub target: String,
-    /// id of the rule to remove
+    /// id for the rule, should be a unique value
     #[arg(long)]
     pub id: Option<String>,
-    /// remove all replication configuration rules of the bucket (requires --force)
-    #[arg(long)]
-    pub all: bool,
     /// force remove all the replication configuration rules on the bucket
     #[arg(long)]
     pub force: bool,
+    /// remove all replication configuration rules of the bucket, force flag enforced
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Args)]
@@ -187,13 +189,13 @@ pub struct ReplicateBacklogArgs {
     /// unique role ARN
     #[arg(long)]
     pub arn: Option<String>,
-    /// include replicated versions (with --full)
+    /// include replicated versions
     #[arg(short = 'v', long)]
     pub verbose: bool,
-    /// show most recent failures for one or more nodes: 'all' or a node name
+    /// show most recent failures for one or more nodes. Valid values are 'all', or node name
     #[arg(short = 'n', long, default_value = "all")]
     pub nodes: String,
-    /// list all unreplicated versions of the bucket instead of recent failures
+    /// list and show all replication failures for bucket
     #[arg(short = 'a', long)]
     pub full: bool,
 }
@@ -217,12 +219,12 @@ pub enum ResyncCommand {
 #[derive(Debug, Args)]
 pub struct ResyncStartArgs {
     pub target: String,
+    /// replicate back objects older than value in duration string (e.g. 7d10h31s)
+    #[arg(long)]
+    pub older_than: Option<String>,
     /// remote bucket ARN
     #[arg(long)]
     pub remote_bucket: Option<String>,
-    /// re-replicate objects older than this duration (e.g. 7d10h31s)
-    #[arg(long)]
-    pub older_than: Option<String>,
 }
 
 #[derive(Debug, Args)]

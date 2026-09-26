@@ -35,7 +35,7 @@ pub enum EventCommand {
 pub struct EventAddArgs {
     pub target: String,
     pub arn: String,
-    /// filter specific type of events: put, delete, get, replica, ilm, scanner
+    /// filter specific type of event. Defaults to all event
     #[arg(long, default_value = DEFAULT_EVENTS)]
     pub event: String,
     /// filter event associated to the specified prefix
@@ -56,12 +56,13 @@ pub struct EventRmArgs {
     /// force removing all bucket notifications
     #[arg(long)]
     pub force: bool,
-    /// only remove the configuration with these events (default put,delete,get when --prefix
-    /// or --suffix is given)
+    /// filter specific type of event. Defaults to all event (default: "put,delete,get")
     #[arg(long)]
     pub event: Option<String>,
+    /// filter event associated to the specified prefix
     #[arg(long)]
     pub prefix: Option<String>,
+    /// filter event associated to the specified suffix
     #[arg(long)]
     pub suffix: Option<String>,
 }

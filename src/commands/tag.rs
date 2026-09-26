@@ -22,11 +22,39 @@ pub struct TagArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum TagCommand {
-    #[command(about = "set tags for a bucket and object(s)")]
+    #[command(
+        about = "set tags for a bucket and object(s)",
+        mut_args(|a| match a.get_id().as_str() {
+            "version_id" => a.help("set tags on a specific object version"),
+            "rewind" => a.help("set tags on a specific object version at specific time"),
+            "versions" => a.help("set tags on multiple versions for an object"),
+            "recursive" => a.help("recursivley set tags for all objects of subdirs"),
+            "exclude_folders" => a.help("exclude setting tags on folder objects"),
+            _ => a,
+        })
+    )]
     Set(TagSetArgs),
-    #[command(about = "list tags of a bucket or an object")]
+    #[command(
+        about = "list tags of a bucket or an object",
+        mut_args(|a| match a.get_id().as_str() {
+            "version_id" => a.help("list tags of particular object version"),
+            "rewind" => a.help("list tags of particular object version at specified time"),
+            "versions" => a.help("list tags on all versions for an object"),
+            "recursive" => a.help("recursivley show tags for all objects"),
+            _ => a,
+        })
+    )]
     List(TagSelectArgs),
-    #[command(about = "remove tags assigned to a bucket or an object")]
+    #[command(
+        about = "remove tags assigned to a bucket or an object",
+        mut_args(|a| match a.get_id().as_str() {
+            "version_id" => a.help("remove tags on a specific object version"),
+            "rewind" => a.help("remove tags on an object version at specified time"),
+            "versions" => a.help("remove tags on multiple versions of an object"),
+            "recursive" => a.help("recursivley remove tags for all objects"),
+            _ => a,
+        })
+    )]
     Remove(TagSelectArgs),
 }
 
@@ -72,13 +100,15 @@ pub fn run(command: TagCommand, json: bool) -> Result<()> {
             }
             let tags = parse_tags(&args.tags)?;
             for_each_target(&args.target, &args.select, args.exclude_folders, |ctx| {
-                ctx.rt.block_on(crate::s3::put_tags(
-                    ctx.client,
-                    ctx.bucket,
-                    ctx.key,
-                    ctx.version_id,
-                    &tags,
-                ))?;
+                ctx.rt
+                    .block_on(crate::s3::put_tags(
+                        ctx.client,
+                        ctx.bucket,
+                        ctx.key,
+                        ctx.version_id,
+                        &tags,
+                    ))
+                    .with_context(|| format!("Failed to set tags for {}", ctx.name))?;
                 print_result("Tags set for", &ctx.name, ctx.version_id, json)
             })
         }
@@ -92,12 +122,13 @@ pub fn run(command: TagCommand, json: bool) -> Result<()> {
                         ctx.bucket,
                         ctx.key,
                         ctx.version_id,
-                    ))?
+                    ))
+                    .with_context(|| format!("Unable to fetch tags for {}", ctx.name))?
                     .ok_or_else(|| {
-                        anyhow!(
-                            "No tags found for {}: check 'mx tag set --help' on how to set tags",
-                            display_name(&ctx.name, ctx.version_id)
-                        )
+                        anyhow::Error::new(crate::error::McError::new(
+                            "check 'mc tag set --help' on how to set tags",
+                        ))
+                        .context(format!("No tags found  for {}", ctx.name))
                     })?;
                 print_tags(&ctx.name, ctx.version_id, tags, json)
             })
@@ -105,12 +136,14 @@ pub fn run(command: TagCommand, json: bool) -> Result<()> {
         TagCommand::Remove(args) => {
             validate(&args.select, true)?;
             for_each_target(&args.target, &args.select, false, |ctx| {
-                ctx.rt.block_on(crate::s3::delete_tags(
-                    ctx.client,
-                    ctx.bucket,
-                    ctx.key,
-                    ctx.version_id,
-                ))?;
+                ctx.rt
+                    .block_on(crate::s3::delete_tags(
+                        ctx.client,
+                        ctx.bucket,
+                        ctx.key,
+                        ctx.version_id,
+                    ))
+                    .with_context(|| format!("Unable to remove tags for {}", ctx.name))?;
                 print_result("Tags removed for", &ctx.name, ctx.version_id, json)
             })
         }

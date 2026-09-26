@@ -7,6 +7,7 @@ use super::client::same_endpoint_and_credentials;
 use super::{build_client, upload_stream};
 use crate::config::model::AliasConfig;
 use crate::flags::{ChecksumAlgo, Sse};
+use crate::s3::S3ResultExt;
 use anyhow::{Context, Result, anyhow, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
@@ -316,9 +317,10 @@ pub async fn put_object_with(
             .customize()
             .config_override(checksum_override())
             .send()
-            .await?
+            .await
+            .s3_object(bucket, "")?
     } else {
-        request.send().await?
+        request.send().await.s3_object(bucket, "")?
     };
     Ok(PutOutcome {
         size: Some(size),
@@ -438,9 +440,10 @@ pub async fn get_object(
             .customize()
             .mutate_request(add_zip_extract_header)
             .send()
-            .await?)
+            .await
+            .s3_object(bucket, key)?)
     } else {
-        Ok(request.send().await?)
+        Ok(request.send().await.s3_object(bucket, key)?)
     }
 }
 
@@ -578,7 +581,7 @@ pub async fn server_side_copy(
     if let Some(algorithm) = put.checksum {
         request = request.checksum_algorithm(algorithm.to_sdk());
     }
-    let response = request.send().await?;
+    let response = request.send().await.s3_object(target.bucket, "")?;
     Ok(PutOutcome {
         size: None,
         etag: response
@@ -687,7 +690,8 @@ pub async fn multipart_copy(
             .key(source.key)
             .set_version_id(source_options.version_id.clone())
             .send()
-            .await?;
+            .await
+            .s3(source.bucket, "")?;
         put.tags = tagging
             .tag_set()
             .iter()
@@ -706,7 +710,7 @@ pub async fn multipart_copy(
     if let Some(algorithm) = effective_checksum(&put) {
         request = request.checksum_algorithm(algorithm.to_sdk());
     }
-    let created = request.send().await?;
+    let created = request.send().await.s3_object(target.bucket, "")?;
     let upload_id = created
         .upload_id()
         .context("S3 did not return a multipart upload ID")?
@@ -750,8 +754,9 @@ pub async fn multipart_copy(
                     .sse_customer_key(encoded)
                     .sse_customer_key_md5(md5);
             }
+            let task_bucket = target.bucket.to_string();
             tasks.spawn(async move {
-                let response = request.send().await?;
+                let response = request.send().await.s3_object(&task_bucket, "")?;
                 let result = response.copy_part_result();
                 Ok::<_, anyhow::Error>(
                     CompletedPart::builder()
@@ -796,7 +801,7 @@ pub async fn multipart_copy(
                 .sse_customer_key(encoded)
                 .sse_customer_key_md5(md5);
         }
-        let response = complete.send().await?;
+        let response = complete.send().await.s3_object(target.bucket, "")?;
         Ok::<PutOutcome, anyhow::Error>(PutOutcome {
             size: Some(size as i64),
             etag: response.e_tag().map(str::to_string),
@@ -858,7 +863,8 @@ pub async fn prefix_exists(client: &Client, bucket: &str, prefix: &str) -> Resul
         .prefix(prefix)
         .max_keys(1)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(!response.contents().is_empty() || !response.common_prefixes().is_empty())
 }
 
@@ -881,7 +887,8 @@ pub async fn object_version_at(
             .set_key_marker(key_marker.take())
             .set_version_id_marker(version_marker.take())
             .send()
-            .await?;
+            .await
+            .s3(bucket, "")?;
         for version in response.versions() {
             if version.key() == Some(key) {
                 items.push(super::ObjectInfo {
@@ -936,7 +943,8 @@ pub async fn list_zip_objects(
             .customize()
             .mutate_request(add_zip_extract_header)
             .send()
-            .await?;
+            .await
+            .s3(bucket, "")?;
         for object in response.contents() {
             let Some(key) = object.key() else { continue };
             items.push(super::ObjectInfo {

@@ -2,6 +2,7 @@
 
 use super::{build_client, debug_timestamp, to_system_time};
 use crate::config::model::AliasConfig;
+use crate::s3::S3ResultExt;
 use crate::target::TargetRef;
 use anyhow::Result;
 use aws_sdk_s3::Client;
@@ -214,7 +215,7 @@ async fn list_versions_inner(
         if let Some(marker) = version_marker.take() {
             request = request.version_id_marker(marker);
         }
-        let response = request.send().await?;
+        let response = request.send().await.s3(bucket, "")?;
         for prefix in response.common_prefixes() {
             if let Some(raw) = prefix.prefix() {
                 items.push(ObjectInfo {
@@ -374,7 +375,7 @@ async fn list_uploads_inner(
         if let Some(marker) = upload_marker.take() {
             request = request.upload_id_marker(marker);
         }
-        let response = request.send().await?;
+        let response = request.send().await.s3(bucket, "")?;
         for prefix in response.common_prefixes() {
             if let Some(raw) = prefix.prefix() {
                 items.push(ObjectInfo {
@@ -408,7 +409,7 @@ async fn list_uploads_inner(
 }
 
 pub(crate) async fn list_buckets(client: &Client) -> Result<Vec<S3ListItem>> {
-    let response = client.list_buckets().send().await?;
+    let response = client.list_buckets().send().await.s3("", "")?;
     let mut items = Vec::new();
 
     for bucket in response.buckets() {
@@ -464,9 +465,10 @@ async fn list_objects_raw(
                 .customize()
                 .mutate_request(super::objects::add_zip_extract_header)
                 .send()
-                .await?
+                .await
+                .s3(bucket, "")?
         } else {
-            request.send().await?
+            request.send().await.s3(bucket, "")?
         };
 
         for prefix in response.common_prefixes() {
@@ -526,7 +528,8 @@ pub async fn bucket_is_empty(client: &Client, bucket: &str) -> Result<bool> {
                 .bucket(bucket)
                 .max_keys(1)
                 .send()
-                .await?;
+                .await
+                .s3(bucket, "")?;
             Ok(response.contents().is_empty())
         }
     }

@@ -337,7 +337,16 @@ pub fn set_tls_alias(home: &Path, alias: &str, url: &str) {
     let access_key = std::env::var("MX_TEST_ACCESS_KEY").unwrap();
     let secret_key = std::env::var("MX_TEST_SECRET_KEY").unwrap();
     mx().env("HOME", home)
-        .args(["alias", "set", alias, url, &access_key, &secret_key])
+        .args([
+            "alias",
+            "set",
+            "--api",
+            "S3v4",
+            alias,
+            url,
+            &access_key,
+            &secret_key,
+        ])
         .assert()
         .success();
 }

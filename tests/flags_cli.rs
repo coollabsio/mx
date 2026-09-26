@@ -54,12 +54,12 @@ fn multichar_short_flags_are_rewritten() {
         .args(["ping", "-vid", "v1", "local"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--version-id"));
+        .stderr(predicate::str::contains("not defined: -version-id"));
     mx().env("HOME", home.path())
         .args(["cat", "-sc", "STANDARD", "local/b/o"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--storage-class"));
+        .stderr(predicate::str::contains("not defined: -storage-class"));
 }
 
 #[test]

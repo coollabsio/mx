@@ -1,10 +1,13 @@
 use crate::commands::stat::{print_date, rfc3339};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::error::nonfatal;
 use crate::flags::{RewindFlag, TimeFilterFlags, VersionIdFlag};
+use crate::location::{Location, parse_location};
+use crate::s3::S3ResultExt;
 use crate::s3::{DeleteOutcome, DeleteTarget, ListOptions, ObjectInfo, full_key};
 use crate::target::TargetRef;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use aws_sdk_s3::Client;
 use clap::Args;
 use std::io::BufRead;
@@ -15,6 +18,12 @@ const RECURSIVE_REQUIRED: &str = "Removal requires --recursive flag. This operat
 const DANGEROUS_REQUIRED: &str = "This operation results in site-wide removal of objects. If you are really sure, retry this command with ‘--dangerous’ and ‘--force’ flags.";
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "version_id" => a.help("delete a specific version of an object"),
+    "older_than" => a.help("remove objects older than value in duration string (e.g. 7d10h31s)"),
+    "newer_than" => a.help("remove objects newer than value in duration string (e.g. 7d10h31s)"),
+    _ => a,
+}))]
 pub struct RemoveArgs {
     /// remove object(s) and all its versions
     #[arg(long)]
@@ -177,13 +186,28 @@ struct Remover<'a> {
 
 impl Remover<'_> {
     fn remove(&self, input: &str) -> Result<()> {
+        if let Location::Local(path) = parse_location(input, self.store.config())
+            && !path.exists()
+        {
+            // mc treats unknown aliases as local paths.
+            let message = if self.args.recursive {
+                format!("Failed to remove `{input}` recursively.")
+            } else {
+                format!("Failed to remove `{input}`.")
+            };
+            let path = path.to_string_lossy();
+            return Err(anyhow::Error::new(crate::error::local_not_found(
+                path.trim_end_matches('/'),
+            ))
+            .context(nonfatal(message)));
+        }
         let target = TargetRef::parse(input)?;
         check_target(self.args, &target)?;
         let alias = alias_config(&self.store, &target.alias)?;
         self.rt.block_on(async {
             let client = crate::s3::build_client(&alias).await?;
             let Some(bucket) = &target.bucket else {
-                let response = client.list_buckets().send().await?;
+                let response = client.list_buckets().send().await.s3("", "")?;
                 let mut result = Ok(());
                 for entry in response.buckets() {
                     let bucket = entry.name().unwrap_or_default();
@@ -193,7 +217,7 @@ impl Remover<'_> {
                         .map(|_| ());
                     if let Err(error) = removed {
                         report(&error);
-                        result = Err(anyhow!("Failed to remove `{input}` recursively."));
+                        result = Err(anyhow::Error::new(crate::output::Exit(1)));
                     }
                 }
                 return result;
@@ -202,7 +226,10 @@ impl Remover<'_> {
                 let prefix = target.key_with_trailing_slash();
                 let found = self
                     .list_and_remove(&client, &target.alias, bucket, prefix.as_deref())
-                    .await?;
+                    .await
+                    .with_context(|| {
+                        nonfatal(format!("Failed to remove `{input}` recursively."))
+                    })?;
                 match prefix.filter(|key| !found && !key.ends_with('/')) {
                     // `rm -r alias/bucket/file`: nothing under `file/`, remove the object itself.
                     Some(key) if self.args.versions || self.rewind.is_some() => {
@@ -276,9 +303,8 @@ impl Remover<'_> {
                     (None, version_id.map(str::to_string))
                 }
                 Err(error) => {
-                    return Err(
-                        anyhow::Error::from(error).context(format!("Failed to remove `{input}`."))
-                    );
+                    return Err(crate::s3::s3_object_error(&error, bucket, key)
+                        .context(nonfatal(format!("Failed to remove `{input}`."))));
                 }
             };
             if !args.time.matches(modified, self.now) {
@@ -297,7 +323,7 @@ impl Remover<'_> {
         let outcome =
             crate::s3::delete_object_with(client, bucket, key, version_id, args.bypass, args.purge)
                 .await
-                .map_err(|error| error.context(format!("Failed to remove `{input}`.")))?;
+                .map_err(|error| error.context(nonfatal(format!("Failed to remove `{input}`."))))?;
         self.print(&RemoveMessage::from_outcome(alias, bucket, &outcome));
         Ok(())
     }

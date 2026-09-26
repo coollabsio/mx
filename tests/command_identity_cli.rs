@@ -31,7 +31,8 @@ fn mc_name_prefixes_runtime_errors_with_mc() {
 
     Command::new(binary)
         .env("HOME", home.path())
-        .args(["ls", "missing"])
+        .current_dir(home.path())
+        .args(["ls", "missing/bucket"])
         .assert()
         .code(1)
         .stderr(predicate::str::starts_with("mc:"));

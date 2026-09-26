@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod error;
 pub mod flags;
 pub mod globals;
 pub mod location;
@@ -12,6 +13,7 @@ pub mod resolve;
 pub mod s3;
 pub mod target;
 pub mod transfer;
+pub mod usage;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
@@ -24,9 +26,16 @@ where
     I: IntoIterator<Item = T>,
     T: Into<std::ffi::OsString> + Clone,
 {
-    let cli = match cli::Cli::try_parse_from(flags::rewrite_argv(args)) {
+    let argv = flags::rewrite_argv(args);
+    let cli = match cli::Cli::try_parse_from(&argv) {
         Ok(cli) => cli,
-        Err(err) => usage_error(err),
+        Err(err) => {
+            let argv: Vec<String> = argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            usage::usage_error(err, &argv)
+        }
     };
     if cli.version {
         print!("{}", version_text());
@@ -68,26 +77,4 @@ pub fn version_text() -> String {
         std::env::consts::OS,
         std::env::consts::ARCH,
     )
-}
-
-/// Help/version requests print normally (status 0). Other clap errors are printed as mc's
-/// `PROG: <ERROR> Invalid command usage, ...` and exit with status 1.
-fn usage_error(err: clap::Error) -> ! {
-    use clap::error::ErrorKind;
-    match err.kind() {
-        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => err.exit(),
-        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
-            let _ = err.print();
-            std::process::exit(1);
-        }
-        _ => {
-            let rendered = err.render().to_string();
-            let text = rendered.strip_prefix("error: ").unwrap_or(&rendered);
-            eprint!(
-                "{}: <ERROR> Invalid command usage, {text}",
-                output::prog_name()
-            );
-            std::process::exit(1);
-        }
-    }
 }

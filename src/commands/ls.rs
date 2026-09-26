@@ -1,10 +1,12 @@
 use crate::commands::stat::{human_bytes, rfc3339};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::error::nonfatal;
 use crate::flags::RewindFlag;
+use crate::location::{Location, parse_location};
 use crate::s3::{ListOptions, ObjectInfo, S3ListItem};
 use crate::target::TargetRef;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -13,6 +15,11 @@ use std::time::SystemTime;
 use tabwriter::TabWriter;
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| if a.get_id().as_str() == "rewind" {
+    a.help("list all object versions no later than specified date")
+} else {
+    a
+}))]
 pub struct LsArgs {
     #[command(flatten)]
     pub rewind: RewindFlag,
@@ -29,7 +36,7 @@ pub struct LsArgs {
     #[arg(long)]
     pub summarize: bool,
     /// filter to specified storage class
-    #[arg(long = "storage-class", value_name = "CLASS")]
+    #[arg(long = "storage-class", visible_alias = "sc", value_name = "CLASS")]
     pub storage_class: Option<String>,
     /// list files inside zip archive (MinIO servers only)
     #[arg(long)]
@@ -55,36 +62,34 @@ pub fn validate(args: &LsArgs, target: &TargetRef) -> Result<()> {
 }
 
 pub fn run(args: LsArgs, json: bool) -> Result<()> {
+    let store = ConfigStore::load_or_create()?;
+    if let Location::Local(path) = parse_location(&args.target, store.config()) {
+        return list_local(&path.to_string_lossy());
+    }
     let target = TargetRef::parse(&args.target)?;
     validate(&args, &target)?;
     let rewind = args.rewind.at(SystemTime::now())?;
-    let store = ConfigStore::load_or_create()?;
     let alias = alias_config(&store, &target.alias)?;
 
     let runtime = runtime()?;
-    let mut entries = match &target.bucket {
-        None => runtime
-            .block_on(crate::s3::list_target(&alias, &target, args.recursive))?
-            .into_iter()
-            .map(Entry::from_list_item)
-            .collect(),
-        Some(bucket) => {
-            let prefix = target.key_with_trailing_slash();
-            let options = ListOptions {
-                recursive: args.recursive,
-                versions: args.versions || rewind.is_some(),
-                incomplete: args.incomplete,
-                zip: args.zip,
-                ..Default::default()
-            };
-            let items = runtime.block_on(async {
-                let client = crate::s3::build_client(&alias).await?;
-                crate::s3::list_objects_with(&client, bucket, prefix.as_deref(), &options).await
-            })?;
-            let show_versions = args.versions || rewind.is_some();
-            select_entries(items, show_versions, args.versions, rewind)
-        }
-    };
+    let mut entries = list_entries(&runtime, &alias, &target, &args, rewind)
+        .map_err(|error| {
+            // mc checks a bucket root with `bucketStat` first (``Bucket `b` does not exist.``);
+            // other listings report the server's message.
+            let plain = target.key.is_none() && !args.recursive && !args.versions;
+            match &target.bucket {
+                Some(bucket)
+                    if plain
+                        && rewind.is_none()
+                        && !args.incomplete
+                        && crate::error::error_code(&error) == Some("NoSuchBucket") =>
+                {
+                    crate::error::McError::bucket_not_found(bucket).into()
+                }
+                _ => error,
+            }
+        })
+        .context(nonfatal("Unable to list folder."))?;
     if let Some(class) = args.storage_class.as_deref() {
         entries.retain(|entry| entry.matches_storage_class(class));
     }
@@ -119,6 +124,68 @@ pub fn run(args: LsArgs, json: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// mc lists local paths (and unknown aliases, which it treats as local paths) by reading the
+/// parent folder of the last path element. mx does not list local folders; a missing folder
+/// fails like mc, a prefix without matches lists nothing.
+fn list_local(input: &str) -> Result<()> {
+    let dir = if input.ends_with('/') {
+        input.trim_end_matches('/').to_string()
+    } else {
+        match input.rfind('/') {
+            Some(index) => input[..index].to_string(),
+            None => ".".to_string(),
+        }
+    };
+    let dir = if dir.is_empty() { "/".to_string() } else { dir };
+    if !std::path::Path::new(&dir).is_dir() {
+        return Err(anyhow::Error::new(crate::error::local_not_found(&dir))
+            .context(nonfatal("Unable to list folder.")));
+    }
+    let prefix = input.rsplit('/').next().unwrap_or_default();
+    let matches = std::fs::read_dir(&dir)?
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().starts_with(prefix));
+    if matches {
+        return Err(crate::error::McError::new(format!(
+            "Listing local path `{input}` is not supported."
+        )))
+        .context(nonfatal("Unable to list folder."));
+    }
+    Ok(())
+}
+
+fn list_entries(
+    runtime: &tokio::runtime::Runtime,
+    alias: &crate::config::model::AliasConfig,
+    target: &TargetRef,
+    args: &LsArgs,
+    rewind: Option<SystemTime>,
+) -> Result<Vec<Entry>> {
+    Ok(match &target.bucket {
+        None => runtime
+            .block_on(crate::s3::list_target(alias, target, args.recursive))?
+            .into_iter()
+            .map(Entry::from_list_item)
+            .collect(),
+        Some(bucket) => {
+            let prefix = target.key_with_trailing_slash();
+            let options = ListOptions {
+                recursive: args.recursive,
+                versions: args.versions || rewind.is_some(),
+                incomplete: args.incomplete,
+                zip: args.zip,
+                ..Default::default()
+            };
+            let items = runtime.block_on(async {
+                let client = crate::s3::build_client(alias).await?;
+                crate::s3::list_objects_with(&client, bucket, prefix.as_deref(), &options).await
+            })?;
+            let show_versions = args.versions || rewind.is_some();
+            select_entries(items, show_versions, args.versions, rewind)
+        }
+    })
 }
 
 /// Turns a version listing into entries with mc version ordinals (latest = highest).

@@ -6,6 +6,7 @@ use super::objects::{
     put_object_with, sse_c_headers,
 };
 use crate::flags::{ChecksumAlgo, Sse};
+use crate::s3::S3ResultExt;
 use anyhow::{Context, Result, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::primitives::ByteStream;
@@ -147,7 +148,7 @@ async fn multipart_upload<R: AsyncRead + Unpin>(
             request = request.checksum_type(ChecksumType::FullObject);
         }
     }
-    let created = request.send().await?;
+    let created = request.send().await.s3_object(bucket, "")?;
     let upload_id = created
         .upload_id()
         .context("S3 did not return a multipart upload ID")?
@@ -216,7 +217,7 @@ async fn multipart_upload<R: AsyncRead + Unpin>(
                 .sse_customer_key(encoded)
                 .sse_customer_key_md5(md5);
         }
-        let response = complete.send().await?;
+        let response = complete.send().await.s3_object(&context.bucket, "")?;
         Ok::<PutOutcome, anyhow::Error>(PutOutcome {
             size: Some(total as i64),
             etag: response.e_tag().map(str::to_string),
@@ -263,9 +264,10 @@ async fn upload_part(
             .customize()
             .config_override(checksum_override())
             .send()
-            .await?
+            .await
+            .s3_object(&context.bucket, "")?
     } else {
-        request.send().await?
+        request.send().await.s3_object(&context.bucket, "")?
     };
     Ok(CompletedPart::builder()
         .part_number(part_number)

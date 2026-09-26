@@ -17,10 +17,6 @@ pub struct Cli {
     #[arg(short = 'v', long = "version", short_alias = 'V', action = ArgAction::SetTrue)]
     pub version: bool,
 
-    /// enable JSON lines formatted output
-    #[arg(long, global = true, env = "MC_JSON", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
-    pub json: bool,
-
     /// path to configuration folder
     #[arg(
         short = 'C',
@@ -35,23 +31,23 @@ pub struct Cli {
     #[arg(short = 'q', long, global = true, env = "MC_QUIET", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub quiet: bool,
 
-    /// disable mc internal pager and print to raw stdout (mx has no pager)
+    /// disable mc internal pager and print to raw stdout
     #[arg(long = "disable-pager", visible_alias = "dp", global = true, env = "MC_DISABLE_PAGER", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub disable_pager: bool,
 
-    /// disable color theme (mx has no colors)
+    /// disable color theme
     #[arg(long, global = true, env = "MC_NO_COLOR", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub no_color: bool,
+
+    /// enable JSON lines formatted output
+    #[arg(long, global = true, env = "MC_JSON", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
+    pub json: bool,
 
     /// enable debug output
     #[arg(long, global = true, env = "MC_DEBUG", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub debug: bool,
 
-    /// disable SSL certificate verification
-    #[arg(long, global = true, env = "MC_INSECURE", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
-    pub insecure: bool,
-
-    /// resolves HOST:PORT to an IP address, e.g. minio.local:9000=10.10.75.1
+    /// resolves HOST[:PORT] to an IP address. Example: minio.local:9000=10.10.75.1
     #[arg(
         long,
         global = true,
@@ -61,16 +57,20 @@ pub struct Cli {
     )]
     pub resolve: Vec<ResolveMapping>,
 
-    /// limits uploads to a maximum rate in KiB/s, MiB/s, GiB/s (default: unlimited)
+    /// disable SSL certificate verification
+    #[arg(long, global = true, env = "MC_INSECURE", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
+    pub insecure: bool,
+
+    /// limits uploads to a maximum rate in KiB/s, MiB/s, GiB/s. (default: unlimited)
     #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate, env = "MC_LIMIT_UPLOAD")]
     pub limit_upload: Option<u64>,
 
-    /// limits downloads to a maximum rate in KiB/s, MiB/s, GiB/s (default: unlimited)
+    /// limits downloads to a maximum rate in KiB/s, MiB/s, GiB/s. (default: unlimited)
     #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate, env = "MC_LIMIT_DOWNLOAD")]
     pub limit_download: Option<u64>,
 
-    /// add custom HTTP header to the request, 'key:value' format
     #[arg(
+        help = "add custom HTTP header to the request. 'key:value' format.",
         short = 'H',
         long = "custom-header",
         global = true,

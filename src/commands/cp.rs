@@ -10,12 +10,14 @@
 use crate::commands::alias_config;
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
+use crate::error::{McError, nonfatal};
 use crate::flags::{
     ChecksumAlgo, ChecksumFlag, EncFlags, MetadataFlags, RewindFlag, Sse, TimeFilterFlags,
     VersionIdFlag, resolve_sse,
 };
 use crate::location::{Location, parse_location};
 use crate::progress::{Progress, ProgressReader};
+use crate::s3::S3ResultExt;
 use crate::s3::{GetOptions, ObjectRef, PutOptions};
 use anyhow::{Context, Result, anyhow, bail};
 use aws_sdk_s3::Client;
@@ -30,16 +32,22 @@ use std::time::SystemTime;
 const DEFAULT_WORKERS: usize = 4;
 
 #[derive(Debug, Default, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "older_than" => a.help("copy objects older than value in duration string (e.g. 7d10h31s)"),
+    "newer_than" => a.help("copy objects newer than value in duration string (e.g. 7d10h31s)"),
+    "version_id" => a.help("select an object version to copy"),
+    _ => a,
+}))]
 pub struct CopyArgs {
+    #[command(flatten)]
+    pub rewind: RewindFlag,
+    #[command(flatten)]
+    pub version: VersionIdFlag,
     /// copy recursively
     #[arg(short = 'r', long)]
     pub recursive: bool,
     #[command(flatten)]
     pub time: TimeFilterFlags,
-    #[command(flatten)]
-    pub rewind: RewindFlag,
-    #[command(flatten)]
-    pub version: VersionIdFlag,
     #[command(flatten)]
     pub metadata: MetadataFlags,
     /// preserve filesystem attributes (mode, ownership, timestamps)
@@ -48,10 +56,6 @@ pub struct CopyArgs {
     /// disable multipart upload feature
     #[arg(long)]
     pub disable_multipart: bool,
-    #[command(flatten)]
-    pub checksum: ChecksumFlag,
-    #[command(flatten)]
-    pub enc: EncFlags,
     /// retention mode to be applied on the object (governance, compliance)
     #[arg(long, value_name = "MODE")]
     pub retention_mode: Option<String>,
@@ -61,12 +65,16 @@ pub struct CopyArgs {
     /// apply legal hold to the copied object (on, off)
     #[arg(long, value_name = "on|off")]
     pub legal_hold: Option<String>,
-    /// extract from remote zip file (MinIO server source only)
-    #[arg(long)]
+    /// Extract from remote zip file (MinIO server source only)
+    #[arg(long, help = "Extract from remote zip file (MinIO server source only)")]
     pub zip: bool,
-    /// maximum number of concurrent copies (default: 4)
+    /// maximum number of concurrent copies (default: autodetect) (default: 0)
     #[arg(long, value_name = "N")]
     pub max_workers: Option<usize>,
+    #[command(flatten)]
+    pub checksum: ChecksumFlag,
+    #[command(flatten)]
+    pub enc: EncFlags,
     /// SOURCE [SOURCE...] TARGET
     #[arg(required = true, num_args = 2.., value_name = "PATH")]
     pub paths: Vec<String>,
@@ -428,10 +436,14 @@ async fn plan(
     let mut plan = Plan::default();
     for source in sources {
         if options.recursive || multi {
-            expand_source(clients, source, target, options, &mut plan).await?;
+            expand_source(clients, source, target, options, &mut plan)
+                .await
+                .context(nonfatal("Unable to prepare URL for copying."))?;
         } else {
-            plan.tasks
-                .push(single_source(clients, source, target, options).await?);
+            let task = single_source(clients, source, target, options)
+                .await
+                .context(nonfatal("Unable to prepare URL for copying."))?;
+            plan.tasks.push(task);
         }
     }
 
@@ -450,6 +462,13 @@ async fn plan(
             .retain(|task| options.time.matches(task.modified, now));
     }
     Ok(plan)
+}
+
+/// mc `PathNotFound` for a missing local source (cp reports it without error fields).
+fn local_stat_error(error: &std::io::Error, path: &std::path::Path) -> anyhow::Error {
+    let mut err = crate::error::io_error(error, &path.to_string_lossy());
+    err.detail = Default::default();
+    err.into()
 }
 
 /// Distinct sources mapped to one target (e.g. keys `a//b` and `a/b`, see [`relative_suffix`])
@@ -478,10 +497,13 @@ async fn target_is_dir(clients: &Clients, target: &Endpoint) -> Result<bool> {
         Endpoint::S3 {
             alias, bucket, key, ..
         } => {
+            // mc `isAliasURLDir`: a failing lookup (e.g. missing bucket) is not a folder; the
+            // copy itself then reports the error.
             key.is_empty()
                 || key.ends_with('/')
                 || crate::s3::prefix_exists(clients.client(alias), bucket, &format!("{key}/"))
-                    .await?
+                    .await
+                    .unwrap_or(false)
         }
     })
 }
@@ -497,21 +519,12 @@ async fn stat_object(
     key: &str,
     options: &GetOptions,
 ) -> Result<Option<(u64, Option<SystemTime>)>> {
-    use aws_sdk_s3::error::SdkError;
-    use aws_sdk_s3::operation::head_object::HeadObjectError;
     match crate::s3::head_object_with(client, bucket, key, options).await {
         Ok(head) => Ok(Some((
             head.content_length().unwrap_or(0).max(0) as u64,
             head.last_modified().and_then(crate::s3::to_system_time),
         ))),
-        Err(error)
-            if error
-                .downcast_ref::<SdkError<HeadObjectError>>()
-                .and_then(SdkError::as_service_error)
-                .is_some_and(HeadObjectError::is_not_found) =>
-        {
-            Ok(None)
-        }
+        Err(error) if crate::error::error_code(&error) == Some("NoSuchKey") => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -550,8 +563,7 @@ async fn single_source(
 ) -> Result<CopyTask> {
     let (item, size, modified, version_id, name) = match source {
         Endpoint::Local { raw, path } => {
-            let meta =
-                std::fs::metadata(path).with_context(|| format!("Unable to stat `{raw}`."))?;
+            let meta = std::fs::metadata(path).map_err(|error| local_stat_error(&error, path))?;
             if meta.is_dir() {
                 return Err(requires_recursive(raw));
             }
@@ -581,7 +593,7 @@ async fn single_source(
                 {
                     return Err(requires_recursive(raw));
                 }
-                bail!("Object `{raw}` does not exist.");
+                return Err(McError::object_missing().into());
             };
             let item = Item::S3 {
                 alias: alias.clone(),
@@ -625,8 +637,7 @@ async fn expand_source(
     let rule = source.rule_path();
     match source {
         Endpoint::Local { raw, path } => {
-            let meta =
-                std::fs::metadata(path).with_context(|| format!("Unable to stat `{raw}`."))?;
+            let meta = std::fs::metadata(path).map_err(|error| local_stat_error(&error, path))?;
             if !meta.is_dir() {
                 plan.tasks.push(CopyTask {
                     source: Item::Local(path.clone()),
@@ -700,7 +711,7 @@ async fn expand_source(
                 {
                     return Err(requires_recursive(raw));
                 }
-                bail!("Object `{raw}` does not exist.");
+                return Err(McError::object_missing().into());
             }
 
             if let Endpoint::S3 {
@@ -770,7 +781,7 @@ async fn expand_source(
                 let Some((size, modified, version_id)) =
                     resolve_s3_object(clients, alias, bucket, key, options).await?
                 else {
-                    bail!("Object `{raw}` does not exist.");
+                    return Err(McError::object_missing().into());
                 };
                 plan.tasks.push(single(size, modified, version_id));
             }
@@ -875,7 +886,8 @@ impl Session {
                         .bucket(bucket)
                         .key(key)
                         .send()
-                        .await?;
+                        .await
+                        .s3(bucket, key)?;
                 }
             }
         }
@@ -1133,20 +1145,14 @@ pub(crate) fn run_session(paths: &[String], options: CopyOptions, json: bool) ->
         };
         session.progress.finish(failures.is_empty());
 
-        if let [(source, error)] = failures.as_slice()
-            && plan.tasks.len() == 1
-        {
-            return Err(anyhow!("{error:#}").context(format!("Failed to {verb} `{source}`.")));
-        }
         if !failures.is_empty() {
-            for (source, error) in &failures {
-                eprintln!("mx: Failed to {verb} `{source}`: {error:#}");
+            // mc reports each failure (`errorIf`) and exits with status 1.
+            for (source, error) in failures {
+                crate::output::print_error(
+                    &error.context(nonfatal(format!("Failed to {verb} `{source}`."))),
+                );
             }
-            bail!(
-                "Failed to {verb} {} of {} object(s).",
-                failures.len(),
-                plan.tasks.len()
-            );
+            return Err(crate::output::Exit(1).into());
         }
         if session.options.is_move {
             for (dir, include_root) in &plan.local_dirs {

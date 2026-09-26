@@ -1,7 +1,9 @@
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
+use crate::error::McError;
 use crate::output;
-use anyhow::{Result, bail};
+use crate::target::is_valid_alias;
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, IsTerminal, Read, Write};
@@ -37,10 +39,12 @@ pub struct AliasSetArgs {
     pub url: String,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
-    #[arg(long, default_value = "S3v4")]
-    pub api: String,
+    /// bucket path lookup supported by the server. Valid options are '[auto, on, off]'
     #[arg(long, default_value = "auto")]
     pub path: String,
+    /// API signature. Valid options are '[S3v4, S3v2]'
+    #[arg(long)]
+    pub api: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -74,18 +78,45 @@ pub fn run(command: AliasCommand, json: bool) -> Result<()> {
 }
 
 fn set(args: AliasSetArgs, json: bool) -> Result<()> {
-    let alias = normalize_alias(&args.alias)?;
-    let url = normalize_url(&args.url)?;
-    let api = normalize_api(&args.api)?;
-    let path = normalize_path(&args.path)?;
     let (access_key, secret_key) = collect_credentials(args.access_key, args.secret_key)?;
-
-    if access_key.is_empty() {
-        bail!("Invalid access key `{access_key}`.");
+    let alias = args.alias.trim_end_matches(['/', '\\']).to_string();
+    if !is_valid_alias(&alias) {
+        return Err(McError::new(format!(
+            "Alias `{alias}` should have alphanumeric characters such as [helloWorld0, hello_World0, ...] and begin with a letter"
+        )))
+        .context("Invalid alias.");
     }
-    if secret_key.is_empty() {
-        bail!("Invalid secret key `{secret_key}`.");
+    let url = normalize_url(&args.url)?;
+    // mc: empty keys make an anonymous alias; set keys have minimum lengths.
+    if !access_key.is_empty() && access_key.len() < 3 {
+        return Err(McError::invalid_argument())
+            .context(format!("Invalid access key `{access_key}`."));
     }
+    if !secret_key.is_empty() && secret_key.len() < 8 {
+        return Err(McError::invalid_argument())
+            .context(format!("Invalid secret key `{secret_key}`."));
+    }
+    let api = args.api.as_deref().map(normalize_api).transpose()?;
+    let path = normalize_path(&args.path)?;
+    // Without `--api`, mc probes the server for the signature version (and fails when the
+    // server cannot be reached).
+    let api = match api {
+        Some(api) => api,
+        None => {
+            let probe = AliasConfig {
+                url: url.clone(),
+                access_key: access_key.clone(),
+                secret_key: secret_key.clone(),
+                api: "S3v4".to_string(),
+                path: path.clone(),
+                ..Default::default()
+            };
+            crate::commands::runtime()?
+                .block_on(crate::s3::probe_signature(&probe))
+                .context("Unable to initialize new alias from the provided credentials.")?;
+            "s3v4".to_string()
+        }
+    };
 
     let mut store = ConfigStore::load_or_create()?;
     store.config_mut().aliases.insert(
@@ -125,6 +156,9 @@ fn list(args: AliasListArgs, json: bool) -> Result<()> {
     // Includes `MC_HOST_*` / `MC_CONFIG_ENV_FILE` aliases (src `env` / the env file).
     let mut rows = Vec::new();
     for (alias, cfg) in &store.config().aliases {
+        if store.is_invalid_env_alias(alias) {
+            continue;
+        }
         let row_src = cfg.src.clone().unwrap_or_else(|| src.clone());
         rows.push(DisplayAlias::from_parts(
             alias.clone(),
@@ -138,7 +172,10 @@ fn list(args: AliasListArgs, json: bool) -> Result<()> {
         let row = rows
             .into_iter()
             .find(|row| row.alias == alias)
-            .ok_or_else(|| anyhow::anyhow!("No such alias `{alias}` found."))?;
+            .ok_or_else(|| {
+                anyhow::Error::new(McError::invalid_aliased_url(&alias))
+                    .context(format!("No such alias `{alias}` found."))
+            })?;
         print_rows(&[row], json)?;
         return Ok(());
     }
@@ -151,7 +188,8 @@ fn remove(args: AliasRemoveArgs, json: bool) -> Result<()> {
     let mut store = ConfigStore::load_or_create()?;
 
     if store.config_mut().aliases.remove(&alias).is_none() {
-        bail!("No such alias `{alias}` found.");
+        return Err(McError::invalid_aliased_url(&alias))
+            .context(format!("No such alias `{alias}` found."));
     }
 
     store.save()?;
@@ -182,7 +220,7 @@ fn import(args: AliasImportArgs, json: bool) -> Result<()> {
             url: document.url,
             access_key: Some(document.access_key),
             secret_key: Some(document.secret_key),
-            api: document.api,
+            api: Some(document.api),
             path: document.path,
         },
         json,
@@ -192,11 +230,9 @@ fn import(args: AliasImportArgs, json: bool) -> Result<()> {
 fn export(args: AliasExportArgs) -> Result<()> {
     let alias = normalize_alias(&args.alias)?;
     let store = ConfigStore::load_or_create()?;
-    let config = store
-        .config()
-        .aliases
-        .get(&alias)
-        .ok_or_else(|| anyhow::anyhow!("No such alias `{alias}` found."))?;
+    let config = store.config().aliases.get(&alias).ok_or_else(|| {
+        anyhow::Error::new(McError::invalid_argument()).context("Unable to export credentials")
+    })?;
     let document = AliasExportDocument {
         url: config.url.clone(),
         access_key: config.access_key.clone(),
@@ -294,14 +330,10 @@ fn read_line(reader: &mut dyn BufRead) -> Result<String> {
     Ok(value.trim_end_matches(['\r', '\n']).to_string())
 }
 
+/// Alias name for `alias remove` / `list` (mc `cleanAlias` + `isValidAlias`).
 fn normalize_alias(input: &str) -> Result<String> {
     let alias = input.trim_end_matches(['/', '\\']).to_string();
-    let valid = !alias.is_empty()
-        && alias.chars().enumerate().all(|(idx, ch)| match idx {
-            0 => ch.is_ascii_alphabetic(),
-            _ => ch.is_ascii_alphanumeric() || ch == '-' || ch == '_',
-        });
-    if !valid {
+    if !is_valid_alias(&alias) {
         bail!("Invalid alias `{alias}`.");
     }
     Ok(alias)
@@ -309,15 +341,18 @@ fn normalize_alias(input: &str) -> Result<String> {
 
 fn normalize_url(input: &str) -> Result<String> {
     let trimmed = input.trim_end_matches('/');
-    let parsed = Url::parse(trimmed)?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        bail!("Invalid URL.");
-    }
-    if parsed.host_str().is_none() || parsed.query().is_some() || parsed.fragment().is_some() {
-        bail!("Invalid URL.");
-    }
-    if parsed.path() != "/" && !parsed.path().is_empty() {
-        bail!("Invalid URL.");
+    let valid = Url::parse(trimmed).is_ok_and(|parsed| {
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed.host_str().is_some()
+            && parsed.query().is_none()
+            && parsed.fragment().is_none()
+            && (parsed.path() == "/" || parsed.path().is_empty())
+    });
+    if !valid {
+        return Err(McError::new(format!(
+            "URL `{input}` for MinIO Client should be of the form scheme://host[:port]/ without resource component."
+        )))
+        .context("Invalid URL.");
     }
     Ok(trimmed.to_string())
 }
@@ -326,7 +361,8 @@ fn normalize_api(input: &str) -> Result<String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "s3v4" => Ok("S3v4".to_string()),
         "s3v2" => Ok("S3v2".to_string()),
-        _ => bail!("Unrecognized API signature. Valid options are `[S3v4, S3v2]`."),
+        _ => Err(McError::invalid_argument())
+            .context("Unrecognized API signature. Valid options are `[S3v4, S3v2]`."),
     }
 }
 
@@ -335,7 +371,8 @@ fn normalize_path(input: &str) -> Result<String> {
         "auto" => Ok("auto".to_string()),
         "on" => Ok("on".to_string()),
         "off" => Ok("off".to_string()),
-        _ => bail!("Unrecognized path value. Valid options are `[auto, on, off]`."),
+        _ => Err(McError::invalid_argument())
+            .context("Unrecognized path value. Valid options are `[auto, on, off]`."),
     }
 }
 

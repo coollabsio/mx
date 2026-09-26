@@ -6,7 +6,7 @@ use predicates::prelude::*;
 
 fn mx(home: &std::path::Path) -> Command {
     let mut cmd = Command::cargo_bin("mx").unwrap();
-    cmd.env("HOME", home);
+    cmd.env("HOME", home).current_dir(home);
     for (key, _) in std::env::vars() {
         if key.starts_with("MC_") {
             cmd.env_remove(key);
@@ -41,27 +41,36 @@ fn json_is_one_compact_document_per_line_on_non_tty() {
 #[test]
 fn text_errors_use_mc_prefix_and_exit_one() {
     let home = tempfile::tempdir().unwrap();
+    // Like mc, an unknown alias is a local path.
+    let path = home
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("missing/bucket/key");
     mx(home.path())
-        .args(["stat", "missing/bucket"])
+        .args(["cat", "missing/bucket/key"])
         .assert()
         .code(1)
         .stdout("")
-        .stderr("mx: <ERROR> No such alias `missing` found.\n");
+        .stderr(format!(
+            "mx: <ERROR> Unable to read from `missing/bucket/key`. Requested path `{}` not found.\n",
+            path.display()
+        ));
 }
 
 #[test]
 fn json_errors_are_mc_error_documents_on_stdout() {
     let home = tempfile::tempdir().unwrap();
     let output = mx(home.path())
-        .args(["--json", "stat", "missing/bucket"])
+        .args(["--json", "rb", "missing/bucket"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stderr.is_empty());
-    // mc prints error JSON with MarshalIndent (one-space indent) even on a non-TTY.
+    // Compact on a non-TTY, like mc.
     assert_eq!(
         stdout(&output),
-        "{\n \"status\": \"error\",\n \"error\": {\n  \"message\": \"No such alias `missing` found.\",\n  \"cause\": {\n   \"message\": \"\",\n   \"error\": {}\n  },\n  \"type\": \"fatal\"\n }\n}\n"
+        "{\"status\":\"error\",\"error\":{\"message\":\"No valid configuration found for 'missing' host alias.\",\"cause\":{\"message\":\"\",\"error\":{}},\"type\":\"fatal\"}}\n"
     );
 }
 
@@ -73,7 +82,7 @@ fn usage_errors_exit_one_with_mc_prefix() {
         .assert()
         .code(1)
         .stderr(predicate::str::starts_with(
-            "mx: <ERROR> Invalid command usage, unexpected argument '--no-such-flag'",
+            "mx: <ERROR> Invalid command usage, flag provided but not defined: -no-such-flag\n\nSUPPORTED FLAGS:\n",
         ));
     // No command: app help, status 1 (mc `showAppHelpAndExit`).
     mx(home.path())
@@ -110,7 +119,7 @@ fn mc_env_flags_are_read() {
         .args(["stat", "missing/bucket"])
         .assert()
         .code(1)
-        .stdout(predicate::str::contains("\"type\": \"fatal\""));
+        .stdout(predicate::str::contains("\"type\":\"fatal\""));
     // MC_JSON=false keeps text output.
     mx(home.path())
         .env("MC_JSON", "false")

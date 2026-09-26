@@ -6,15 +6,20 @@ use crate::flags::{VersionIdFlag, resolve_sse};
 use crate::location::{Location, parse_location};
 use crate::output;
 use crate::s3::GetOptions;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result};
 use clap::Args;
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| if a.get_id().as_str() == "version_id" {
+    a.help("get a specific version of an object")
+} else {
+    a
+}))]
 pub struct GetArgs {
     #[command(flatten)]
-    pub version: VersionIdFlag,
-    #[command(flatten)]
     pub enc: EncCFlag,
+    #[command(flatten)]
+    pub version: VersionIdFlag,
     pub source: String,
     pub target: Option<String>,
 }
@@ -22,7 +27,10 @@ pub struct GetArgs {
 pub fn run(args: GetArgs, _json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let Location::S3(source) = parse_location(&args.source, store.config()) else {
-        bail!("`get` source must be an S3 object");
+        return Err(
+            anyhow::Error::new(crate::error::McError::new("Source is not s3."))
+                .context(crate::error::nonfatal("Unable to download.")),
+        );
     };
     let alias = alias_config(&store, &source.alias)?;
     let bucket = source.require_bucket()?.to_string();
@@ -41,13 +49,15 @@ pub fn run(args: GetArgs, _json: bool) -> Result<()> {
         Some(path) => resolve_local_destination(std::path::Path::new(&path), fallback)?,
         None => std::env::current_dir()?.join(fallback),
     };
-    let bytes = runtime()?.block_on(crate::s3::download_object_to_path_with(
-        &alias,
-        &bucket,
-        &key,
-        &destination,
-        &options,
-    ))?;
+    let bytes = runtime()?
+        .block_on(crate::s3::download_object_to_path_with(
+            &alias,
+            &bucket,
+            &key,
+            &destination,
+            &options,
+        ))
+        .context(crate::error::nonfatal("Unable to download."))?;
     output::print_plain(&format!(
         "Downloaded `{}` -> `{}` ({} bytes).",
         args.source,

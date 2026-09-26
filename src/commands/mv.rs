@@ -6,6 +6,11 @@ use anyhow::Result;
 use clap::Args;
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "older_than" => a.help("move objects older than value in duration string (e.g. 7d10h31s)"),
+    "newer_than" => a.help("move objects newer than value in duration string (e.g. 7d10h31s)"),
+    _ => a,
+}))]
 pub struct MoveArgs {
     /// move recursively
     #[arg(short = 'r', long)]

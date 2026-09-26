@@ -10,10 +10,14 @@ use serde::Serialize;
 
 #[derive(Debug, Args)]
 pub struct PutArgs {
+    #[command(flatten)]
+    pub enc: EncFlags,
+    #[command(flatten)]
+    pub checksum: ChecksumFlag,
     /// upload number of parts in parallel
     #[arg(short = 'P', long, default_value_t = 4, allow_negative_numbers = true)]
     pub parallel: i64,
-    /// each part size (e.g. 16MiB, 64MB)
+    /// each part size
     #[arg(
         short = 's',
         long = "part-size",
@@ -28,12 +32,8 @@ pub struct PutArgs {
     #[arg(long = "disable-multipart")]
     pub disable_multipart: bool,
     /// set storage class for new object on target
-    #[arg(long = "storage-class", value_name = "CLASS")]
+    #[arg(long = "storage-class", visible_alias = "sc", value_name = "CLASS")]
     pub storage_class: Option<String>,
-    #[command(flatten)]
-    pub checksum: ChecksumFlag,
-    #[command(flatten)]
-    pub enc: EncFlags,
     /// local file(s) or `-` for standard input
     #[arg(required = true, num_args = 1..)]
     pub sources: Vec<String>,
@@ -79,6 +79,10 @@ pub fn run(args: PutArgs, json: bool) -> Result<()> {
                     bail!("`{source}` is a folder. Folder cannot be uploaded with `put`.")
                 }
                 Location::Local(path) => {
+                    if !path.exists() {
+                        return Err(anyhow::Error::new(crate::error::local_not_found(source))
+                            .context(crate::error::nonfatal("Unable to upload.")));
+                    }
                     let name = source_name_from_local(&path)?;
                     (Some(path), name)
                 }
@@ -111,7 +115,7 @@ pub fn run(args: PutArgs, json: bool) -> Result<()> {
                     }
                 }
             })
-            .with_context(|| format!("Unable to upload `{source}`."))?;
+            .context("unable to upload")?;
         let result = PutResult::new(
             source.clone(),
             format!("{}/{bucket}/{key}", dst.alias),

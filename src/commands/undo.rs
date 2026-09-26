@@ -5,28 +5,28 @@ use crate::commands::retention::{LockTarget, print_json};
 use crate::commands::runtime;
 use crate::s3::ObjectInfo;
 use crate::s3::lock;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde::Serialize;
 
 #[derive(Debug, Args)]
 pub struct UndoArgs {
     pub target: String,
+    /// undo N last changes
+    #[arg(long, default_value_t = 1)]
+    pub last: usize,
     /// undo last S3 PUT/DELETE operations recursively
     #[arg(short = 'r', long)]
     pub recursive: bool,
     /// force recursive operation
     #[arg(long)]
     pub force: bool,
-    /// undo N last changes
-    #[arg(long, default_value_t = 1)]
-    pub last: usize,
-    /// undo only if the latest version is of the following type: PUT or DELETE
-    #[arg(long)]
-    pub action: Option<String>,
     /// fake an undo operation
     #[arg(long)]
     pub dry_run: bool,
+    /// undo only if the latest version is of the following type [PUT/DELETE]
+    #[arg(long)]
+    pub action: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -80,7 +80,9 @@ pub fn run(args: UndoArgs, json: bool) -> Result<()> {
         target.require_key()?;
     }
     let rt = runtime()?;
-    let status = rt.block_on(crate::s3::get_versioning(&target.alias, &target.bucket))?;
+    let status = rt
+        .block_on(crate::s3::get_versioning(&target.alias, &target.bucket))
+        .context("Unable to get bucket versioning info")?;
     if status != "Enabled" {
         bail!("Undo command works only with S3 versioned-enabled buckets.");
     }
@@ -111,7 +113,7 @@ pub fn run(args: UndoArgs, json: bool) -> Result<()> {
                     version_id,
                 ))
             {
-                eprintln!("mx: Unable to undo `{}`: {error:#}", item.key);
+                crate::output::print_error(&error.context("Unable to undo"));
                 failed += 1;
                 continue;
             }

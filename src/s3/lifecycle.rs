@@ -8,6 +8,7 @@
 use super::bucket::{Capture, S3_XMLNS, XmlNode, has_error_code, raw_body_override, xml_element};
 use super::build_client;
 use crate::config::model::AliasConfig;
+use crate::s3::S3ResultExt;
 use anyhow::{Context, Result, anyhow, bail};
 use aws_sdk_s3::types::BucketLifecycleConfiguration;
 use serde::{Deserialize, Serialize};
@@ -520,7 +521,7 @@ pub async fn get_lifecycle(alias: &AliasConfig, bucket: &str) -> Result<Option<L
             }))
         }
         Err(error) if has_error_code(&error, &["NoSuchLifecycleConfiguration"]) => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(super::error::s3_error(&error, bucket, "")),
     }
 }
 
@@ -536,7 +537,8 @@ pub async fn put_lifecycle(
             .delete_bucket_lifecycle()
             .bucket(bucket)
             .send()
-            .await?;
+            .await
+            .s3(bucket, "")?;
         return Ok(());
     }
     client
@@ -550,7 +552,8 @@ pub async fn put_lifecycle(
         .customize()
         .config_override(raw_body_override(config.to_xml()))
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 

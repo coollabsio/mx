@@ -5,7 +5,7 @@ use crate::commands::util::require_s3;
 use crate::config::ConfigStore;
 use crate::flags::TargetArg;
 use crate::output;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
@@ -90,7 +90,9 @@ fn set(args: EncryptSetArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let (alias, target) = require_s3(&store, &target_arg)?;
     let bucket = target.require_bucket()?.to_string();
-    runtime()?.block_on(crate::s3::put_encryption(&alias, &bucket, key.as_deref()))?;
+    runtime()?
+        .block_on(crate::s3::put_encryption(&alias, &bucket, key.as_deref()))
+        .context("Unable to enable auto encryption")?;
     if json {
         return print_json(
             "set",
@@ -111,7 +113,9 @@ fn info(args: TargetArg, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let (alias, target) = require_s3(&store, &args.target)?;
     let bucket = target.require_bucket()?.to_string();
-    let config = runtime()?.block_on(crate::s3::get_encryption_config(&alias, &bucket))?;
+    let config = runtime()?
+        .block_on(crate::s3::get_encryption_config(&alias, &bucket))
+        .context("Unable to get encryption info")?;
     let (algorithm, key_id) = config
         .map(|(algorithm, key)| (algorithm, key.unwrap_or_default()))
         .unwrap_or_default();
@@ -132,7 +136,9 @@ fn clear(args: TargetArg, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let (alias, target) = require_s3(&store, &args.target)?;
     let bucket = target.require_bucket()?.to_string();
-    runtime()?.block_on(crate::s3::delete_encryption(&alias, &bucket))?;
+    runtime()?
+        .block_on(crate::s3::delete_encryption(&alias, &bucket))
+        .context("Unable to clear auto encryption configuration")?;
     if json {
         return print_json("clear", &args.target, None);
     }

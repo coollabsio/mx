@@ -67,7 +67,7 @@ pub struct RuleFlags {
     /// object prefix
     #[arg(long)]
     pub prefix: Option<String>,
-    /// key value pairs of the form '<key1>=<value1>&<key2>=<value2>'
+    /// key value pairs of the form '<key1>=<value1>&<key2>=<value2>&<key3>=<value3>'
     #[arg(long)]
     pub tags: Option<String>,
     /// objects with size less than this value will be selected for the lifecycle action
@@ -91,27 +91,27 @@ pub struct RuleFlags {
     /// number of days to expire noncurrent versions
     #[arg(long = "noncurrent-expire-days", value_name = "DAYS")]
     pub noncurrent_expire_days: Option<String>,
-    /// number of newer noncurrent versions to retain
+    /// number of newer noncurrent versions to retain (default: 0)
     #[arg(long = "noncurrent-expire-newer", value_name = "COUNT")]
     pub noncurrent_expire_newer: Option<i64>,
-    /// number of days to transition noncurrent versions
+    /// number of days to transition noncurrent versions (default: 0)
     #[arg(long = "noncurrent-transition-days", value_name = "DAYS")]
     pub noncurrent_transition_days: Option<i64>,
-    /// remote tier name to transition noncurrent versions
+    /// remote tier name to transition
     #[arg(long = "noncurrent-transition-tier", value_name = "TIER")]
     pub noncurrent_transition_tier: Option<String>,
-    /// expire all object versions (MinIO extension)
+    /// expire all object versions
     #[arg(long = "expire-all-object-versions")]
     pub expire_all_object_versions: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct IlmRuleAddArgs {
+    #[command(flatten)]
+    pub rule: RuleFlags,
     /// rule id (generated when omitted)
     #[arg(long)]
     pub id: Option<String>,
-    #[command(flatten)]
-    pub rule: RuleFlags,
     pub target: String,
 }
 
@@ -147,12 +147,12 @@ pub struct IlmRuleRemoveArgs {
     /// id of the lifecycle rule
     #[arg(long)]
     pub id: Option<String>,
-    /// delete all lifecycle configuration rules of the bucket (requires --force)
-    #[arg(long)]
-    pub all: bool,
-    /// required together with --all
+    /// force flag is to be used when deleting all lifecycle configuration rules for the bucket
     #[arg(long)]
     pub force: bool,
+    /// delete all lifecycle configuration rules of the bucket, force flag enforced
+    #[arg(long)]
+    pub all: bool,
     pub target: String,
 }
 

@@ -36,16 +36,19 @@ fn command_help_is_available_for_all_core_commands() {
 }
 
 #[test]
-fn cat_rejects_json_output() {
+fn cat_json_errors_are_mc_error_documents() {
     let home = tempfile::tempdir().expect("tempdir");
     let mut cmd = mx();
-    cmd.env("HOME", home.path())
-        .args(["--json", "cat", "play/example/file.txt"]);
+    cmd.env("HOME", home.path()).current_dir(home.path()).args([
+        "--json",
+        "cat",
+        "nosuch/example/file.txt",
+    ]);
 
     // With --json, the error is an mc error document on stdout.
-    cmd.assert()
-        .failure()
-        .stdout(predicate::str::contains("does not support `--json`"));
+    cmd.assert().failure().stdout(predicate::str::contains(
+        r#"{"status":"error","error":{"message":"Unable to read from `nosuch/example/file.txt`.","cause":{"message":"Requested path"#,
+    ));
 }
 
 #[test]
@@ -65,6 +68,8 @@ fn accepts_resolve_after_commands_that_coolify_uses() {
         vec![
             "alias",
             "set",
+            "--api",
+            "S3v4",
             "--resolve",
             "s3.internal:9000=127.0.0.1",
             "demo",

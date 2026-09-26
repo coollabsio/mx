@@ -4,7 +4,7 @@ use crate::commands::retention::{LockTarget, center_text, print_json, resolve_ob
 use crate::commands::runtime;
 use crate::flags::{RewindFlag, VersionIdFlag, VersionsFlag};
 use crate::s3::lock;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
@@ -16,11 +16,38 @@ pub struct LegalholdArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum LegalholdCommand {
-    #[command(about = "set legal hold for object(s)")]
+    #[command(
+        about = "set legal hold for object(s)",
+        mut_args(|a| match a.get_id().as_str() {
+            "recursive" => a.help("apply legal hold recursively"),
+            "version_id" => a.help("apply legal hold to a specific object version"),
+            "rewind" => a.help("apply legal hold on an object version at specified time"),
+            "versions" => a.help("apply legal hold on multiple versions of an object"),
+            _ => a,
+        })
+    )]
     Set(LegalholdTargetArgs),
-    #[command(about = "clear legal hold for object(s)")]
+    #[command(
+        about = "clear legal hold for object(s)",
+        mut_args(|a| match a.get_id().as_str() {
+            "recursive" => a.help("clear legal hold recursively"),
+            "version_id" => a.help("clear legal hold of a specific object version"),
+            "rewind" => a.help("clear legal hold on an object version at specified time"),
+            "versions" => a.help("clear legal hold on multiple versions of object(s)"),
+            _ => a,
+        })
+    )]
     Clear(LegalholdTargetArgs),
-    #[command(about = "show legal hold info for object(s)")]
+    #[command(
+        about = "show legal hold info for object(s)",
+        mut_args(|a| match a.get_id().as_str() {
+            "recursive" => a.help("show legal hold status recursively"),
+            "version_id" => a.help("show legal hold status of a specific object version"),
+            "rewind" => a.help("show legal hold status of an object version at specified time"),
+            "versions" => a.help("show legal hold status of multiple versions of object(s)"),
+            _ => a,
+        })
+    )]
     Info(LegalholdTargetArgs),
 }
 
@@ -112,10 +139,19 @@ fn apply(args: LegalholdTargetArgs, hold: Option<bool>, json: bool) -> Result<()
     let target = LockTarget::resolve(&args.target)?;
     let rt = runtime()?;
     let client = rt.block_on(crate::s3::build_client(&target.alias))?;
-    rt.block_on(target.require_lock_enabled(
-        &client,
-        "Bucket lock needs to be enabled in order to use this feature.",
-    ))?;
+    let enabled = rt
+        .block_on(target.lock_enabled(&client))
+        .with_context(|| match hold {
+            Some(true) => format!("Unable to set legalhold on `{}`", args.target),
+            Some(false) => format!("Unable to clear legalhold of `{}`", args.target),
+            None => format!("Unable to get legalhold info of `{}`", args.target),
+        })?;
+    if !enabled {
+        if hold == Some(false) {
+            bail!("Bucket locking needs to be enabled in order to use this feature.");
+        }
+        bail!("Bucket lock needs to be enabled in order to use this feature.");
+    }
     let objects = resolve_objects(
         &rt,
         &client,

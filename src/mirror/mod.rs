@@ -6,6 +6,7 @@ pub mod diff;
 
 use crate::config::model::AliasConfig;
 use crate::flags::{ChecksumAlgo, Sse, resolve_sse};
+use crate::s3::S3ResultExt;
 use crate::s3::{GetOptions, ListOptions, MakeBucketOptions, ObjectRef, PutOptions};
 use anyhow::{Context, Result, bail};
 use aws_sdk_s3::Client;
@@ -126,7 +127,7 @@ impl Options {
         self.preserve || !self.attr.is_empty()
     }
 
-    fn keep_running(&self) -> bool {
+    pub fn keep_running(&self) -> bool {
         self.watch || self.plan.active_active
     }
 }
@@ -157,6 +158,7 @@ pub async fn validate(source: &Endpoint, target: &Endpoint, options: &Options) -
                         .bucket(bucket)
                         .send()
                         .await
+                        .s3(bucket, "")
                         .with_context(|| format!("Unable to stat source `{display}`."))?;
                     let key = s3.prefix.trim_end_matches('/');
                     if !key.is_empty()
@@ -529,6 +531,7 @@ impl Job {
                     .object_lock_configuration(config)
                     .send()
                     .await
+                    .s3(bucket, "")
                     .context("Unable to set object lock config")?;
             }
         }
@@ -605,12 +608,12 @@ impl Job {
                     Ok((bucket, key)) => s3
                         .client
                         .delete_object()
-                        .bucket(bucket)
-                        .key(key)
+                        .bucket(&bucket)
+                        .key(&key)
                         .send()
                         .await
                         .map(|_| ())
-                        .map_err(Into::into),
+                        .s3(&bucket, &key),
                     Err(error) => Err(error),
                 },
             }
@@ -950,7 +953,7 @@ async fn list(endpoint: &Endpoint, options: &Options) -> Result<(Listing, Vec<St
 }
 
 async fn list_buckets(client: &Client) -> Result<Vec<String>> {
-    let response = client.list_buckets().send().await?;
+    let response = client.list_buckets().send().await.s3("", "")?;
     Ok(response
         .buckets()
         .iter()
@@ -1080,10 +1083,11 @@ async fn load_metadata(endpoint: &Endpoint, listing: &mut Listing, keys: &[Strin
         let response = s3
             .client
             .head_object()
-            .bucket(bucket)
-            .key(object)
+            .bucket(&bucket)
+            .key(&object)
             .send()
             .await
+            .s3_object(&bucket, &object)
             .with_context(|| format!("Unable to stat `{}`.", s3.display(key)))?;
         entry.user_metadata = Some(response.metadata().map(to_btree).unwrap_or_default());
     }

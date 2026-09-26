@@ -1,8 +1,10 @@
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::error::nonfatal;
 use crate::output;
+use crate::s3::S3ResultExt;
 use crate::target::TargetRef;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Args;
 use serde::Serialize;
 
@@ -48,7 +50,8 @@ pub fn run(args: RemoveBucketArgs, json: bool) -> Result<()> {
         let buckets = match &target.bucket {
             Some(bucket) => vec![bucket.clone()],
             None => rt
-                .block_on(client.list_buckets().send())?
+                .block_on(client.list_buckets().send())
+                .s3("", "")?
                 .buckets()
                 .iter()
                 .filter_map(|bucket| bucket.name().map(str::to_string))
@@ -56,8 +59,12 @@ pub fn run(args: RemoveBucketArgs, json: bool) -> Result<()> {
         };
         for bucket in buckets {
             let removed = rt.block_on(async {
+                let validate = || nonfatal(format!("Unable to validate target `{input}`."));
                 if !args.force {
-                    if !crate::s3::bucket_is_empty(&client, &bucket).await? {
+                    let empty = crate::s3::bucket_is_empty(&client, &bucket)
+                        .await
+                        .with_context(validate)?;
+                    if !empty {
                         bail!(
                             "`{input}` is not empty. Retry this command with ‘--force’ flag if you want to remove `{input}` and all its contents"
                         );
@@ -67,9 +74,11 @@ pub fn run(args: RemoveBucketArgs, json: bool) -> Result<()> {
                         // mc: `rb --force` on a missing bucket is a no-op.
                         return Ok(false);
                     }
-                    return Err(error.into());
+                    return Err(crate::s3::s3_error(&error, &bucket, "").context(validate()));
                 }
-                crate::s3::remove_bucket(&alias, &bucket, args.force).await?;
+                crate::s3::remove_bucket(&alias, &bucket, args.force)
+                    .await
+                    .with_context(|| format!("Failed to remove `{input}`."))?;
                 Ok(true)
             })?;
             if !removed {

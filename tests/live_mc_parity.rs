@@ -94,6 +94,14 @@ fn mirrored(p: Option<Parity>) -> Option<Parity> {
     Some(p)
 }
 
+/// `alias set` probes a random `probe-bsign-*` bucket.
+fn probing(p: Option<Parity>) -> Option<Parity> {
+    let mut p = p?;
+    p.normalizer
+        .rule(r"probe-bsign-[0-9a-z]+", "probe-bsign-<RANDOM>");
+    Some(p)
+}
+
 fn with_setup(p: Option<Parity>, args: &[&str]) -> Option<Parity> {
     let p = p?;
     p.setup(args);
@@ -271,20 +279,8 @@ case!(
     empty(),
     ["mb", "-p", "{target}"]
 );
-case!(
-    #[ignore = "parity: error format: `<ERROR> Unable to make bucket ...`"]
-    mb_existing_error_text,
-    text,
-    empty(),
-    ["mb", "{target}"]
-);
-case!(
-    #[ignore = "parity: no JSON error doc on stdout"]
-    mb_existing_error_json,
-    json,
-    empty(),
-    ["mb", "{target}"]
-);
+case!(mb_existing_error_text, text, empty(), ["mb", "{target}"]);
+case!(mb_existing_error_json, json, empty(), ["mb", "{target}"]);
 case!(
     #[ignore = "parity: message `Removed `alias/bucket` successfully.`"]
     rb_text,
@@ -299,20 +295,8 @@ case!(
     empty(),
     ["rb", "{target}"]
 );
-case!(
-    #[ignore = "parity: error lacks `<ERROR>` prefix"]
-    rb_not_empty_text,
-    text,
-    seeded(),
-    ["rb", "{target}"]
-);
-case!(
-    #[ignore = "parity: no JSON error doc on stdout"]
-    rb_not_empty_json,
-    json,
-    seeded(),
-    ["rb", "{target}"]
-);
+case!(rb_not_empty_text, text, seeded(), ["rb", "{target}"]);
+case!(rb_not_empty_json, json, seeded(), ["rb", "{target}"]);
 
 // ---------------------------------------------------------------------------
 // rm
@@ -495,14 +479,12 @@ case!(
 
 case!(cat_text, text, seeded(), ["cat", "{target}/a.txt"]);
 case!(
-    #[ignore = "parity: error format: `<ERROR> ... Object does not exist.`"]
     cat_missing_text,
     text,
     seeded(),
     ["cat", "{target}/nope.txt"]
 );
 case!(
-    #[ignore = "parity: --json unsupported; mc prints JSON error on stdout"]
     cat_missing_json,
     json,
     seeded(),
@@ -926,7 +908,6 @@ case!(
     ["alias", "list", "{alias}"]
 );
 case!(
-    #[ignore = "parity: error lacks `<ERROR>` prefix and mc hint text"]
     alias_list_missing_text,
     text,
     bare(),
@@ -946,7 +927,6 @@ case!(
     ]
 );
 case!(
-    #[ignore = "parity: JSON `api` is `s3v4` (lowercase) in mc"]
     alias_set_json,
     json,
     bare(),
@@ -960,10 +940,9 @@ case!(
     ]
 );
 case!(
-    #[ignore = "parity: mc probes the server and fails on unreachable URL"]
     alias_set_unreachable_text,
     text,
-    bare(),
+    probing(bare()),
     [
         "alias",
         "set",
@@ -975,7 +954,6 @@ case!(
 );
 case!(alias_remove_text, text, bare(), ["alias", "remove", "gcs"]);
 case!(
-    #[ignore = "parity: mc rejects access key shorter than 3 chars"]
     alias_set_invalid_key_text,
     text,
     bare(),
@@ -996,7 +974,6 @@ case!(
     ["alias", "remove", "gcs"]
 );
 case!(
-    #[ignore = "parity: error lacks `<ERROR>` prefix and mc hint text"]
     alias_remove_missing_text,
     text,
     bare(),
@@ -1034,82 +1011,56 @@ case!(
 // ---------------------------------------------------------------------------
 
 case!(
-    #[ignore = "parity: mc treats unknown alias as local path: `Unable to list folder`"]
     err_missing_alias_text,
     text,
     bare(),
     ["ls", "nosuch/bucket"]
 );
 case!(
-    #[ignore = "parity: mc treats unknown alias as local path; JSON error on stdout"]
     err_missing_alias_json,
     json,
     bare(),
     ["ls", "nosuch/bucket"]
 );
+case!(err_missing_bucket_text, text, bare(), ["ls", "{target}"]);
+case!(err_missing_bucket_json, json, bare(), ["ls", "{target}"]);
 case!(
-    #[ignore = "parity: error format: `<ERROR> Unable to list folder. Bucket ... does not exist.`"]
-    err_missing_bucket_text,
-    text,
-    bare(),
-    ["ls", "{target}"]
-);
-case!(
-    #[ignore = "parity: no JSON error doc on stdout"]
-    err_missing_bucket_json,
-    json,
-    bare(),
-    ["ls", "{target}"]
-);
-case!(
-    #[ignore = "parity: error format: `<ERROR> Unable to stat ... Object does not exist.`"]
     err_missing_object_stat_text,
     text,
     empty(),
     ["stat", "{target}/nope.txt"]
 );
 case!(
-    #[ignore = "parity: no JSON error doc on stdout"]
     err_missing_object_stat_json,
     json,
     empty(),
     ["stat", "{target}/nope.txt"]
 );
 case!(
-    #[ignore = "parity: error format: `<ERROR> Failed to remove ... Object does not exist`"]
     err_missing_object_rm_text,
     text,
     empty(),
     ["rm", "{target}/nope.txt"]
 );
 case!(
-    #[ignore = "parity: error format: `Unable to prepare URL for copying`"]
     err_missing_local_file_text,
     text,
     empty(),
     ["cp", "nope.txt", "{target}/"]
 );
 case!(
-    #[ignore = "parity: clap error; mc `<ERROR> Invalid command usage` + SUPPORTED FLAGS, exit 1"]
     err_invalid_flag_text,
     text,
     bare(),
     ["ls", "--bogus", "{alias}/"]
 );
 case!(
-    #[ignore = "parity: clap error; mc `<ERROR> Invalid command usage` + SUPPORTED FLAGS, exit 1"]
     err_invalid_flag_json,
     json,
     bare(),
     ["ls", "--bogus", "{alias}/"]
 );
-case!(
-    #[ignore = "parity: clap error; mc `<ERROR> `bogus` is not a recognized command`"]
-    err_unknown_command_text,
-    text,
-    bare(),
-    ["bogus"]
-);
+case!(err_unknown_command_text, text, bare(), ["bogus"]);
 
 // ---------------------------------------------------------------------------
 // --version

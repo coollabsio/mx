@@ -2,6 +2,7 @@
 
 use super::{S3ListItem, build_client, full_key, list_objects};
 use crate::config::model::AliasConfig;
+use crate::s3::S3ResultExt;
 use anyhow::{Result, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
@@ -13,7 +14,8 @@ pub async fn delete_object(alias: &AliasConfig, bucket: &str, key: &str) -> Resu
         .bucket(bucket)
         .key(key)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -43,7 +45,7 @@ pub async fn delete_all_versions(client: &Client, bucket: &str) -> Result<()> {
         if let Some(marker) = version_marker {
             request = request.version_id_marker(marker);
         }
-        let response = request.send().await?;
+        let response = request.send().await.s3(bucket, "")?;
         let mut objects = Vec::new();
         for version in response.versions() {
             if let (Some(key), Some(version_id)) = (version.key(), version.version_id()) {
@@ -76,7 +78,8 @@ pub async fn delete_all_versions(client: &Client, bucket: &str) -> Result<()> {
                         .build()?,
                 )
                 .send()
-                .await?;
+                .await
+                .s3(bucket, "")?;
             check_delete_errors(response.errors())?;
         }
         if response.is_truncated() == Some(true) {
@@ -109,7 +112,8 @@ pub async fn delete_keys(client: &Client, bucket: &str, keys: &[String]) -> Resu
                     .build()?,
             )
             .send()
-            .await?;
+            .await
+            .s3(bucket, "")?;
         check_delete_errors(response.errors())?;
     }
     Ok(())
@@ -183,7 +187,7 @@ pub async fn delete_versions(
         if bypass {
             request = request.bypass_governance_retention(true);
         }
-        let response = request.send().await?;
+        let response = request.send().await.s3(bucket, "")?;
         for deleted in response.deleted() {
             outcomes.push(DeleteOutcome {
                 key: deleted.key().unwrap_or_default().to_string(),
@@ -234,9 +238,10 @@ pub async fn delete_object_with(
             .customize()
             .mutate_request(add_force_delete_header)
             .send()
-            .await?
+            .await
+            .s3(bucket, "")?
     } else {
-        request.send().await?
+        request.send().await.s3(bucket, "")?
     };
     let delete_marker = response.delete_marker().unwrap_or(false);
     Ok(DeleteOutcome {
@@ -260,7 +265,8 @@ pub async fn abort_upload(client: &Client, bucket: &str, key: &str, upload_id: &
         .key(key)
         .upload_id(upload_id)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -273,7 +279,8 @@ pub async fn delete_bucket_force(client: &Client, bucket: &str) -> Result<()> {
         .customize()
         .mutate_request(add_force_delete_header)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 

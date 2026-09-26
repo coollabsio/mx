@@ -3,6 +3,7 @@
 
 use super::{ObjectInfo, error_code, from_system_time, resolve_rewind, to_system_time};
 use crate::flags::ValidityUnit;
+use crate::s3::S3ResultExt;
 use anyhow::{Result, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::types::{
@@ -37,7 +38,7 @@ pub async fn list_versions_under(
         if let Some(marker) = version_marker.take() {
             request = request.version_id_marker(marker);
         }
-        let response = request.send().await?;
+        let response = request.send().await.s3(bucket, "")?;
         for version in response.versions() {
             let Some(key) = version.key() else { continue };
             items.push(ObjectInfo {
@@ -175,7 +176,8 @@ pub async fn delete_object_version(
         .key(key)
         .version_id(version_id)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -215,7 +217,7 @@ pub async fn put_object_retention(
     if bypass {
         request = request.bypass_governance_retention(true);
     }
-    request.send().await?;
+    request.send().await.s3(bucket, "")?;
     Ok(())
 }
 
@@ -239,7 +241,7 @@ pub async fn get_object_retention(
             Some((mode, retention.retain_until_date().and_then(to_system_time)))
         })),
         Err(error) if error_code(&error) == Some("NoSuchObjectLockConfiguration") => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(super::error::s3_error(&error, bucket, "")),
     }
 }
 
@@ -266,7 +268,8 @@ pub async fn put_object_legal_hold(
         .set_version_id(version_id.map(str::to_string))
         .legal_hold(ObjectLockLegalHold::builder().status(status).build())
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -290,7 +293,7 @@ pub async fn get_object_legal_hold(
             .and_then(|hold| hold.status())
             .map(|status| status.as_str().to_string())),
         Err(error) if error_code(&error) == Some("NoSuchObjectLockConfiguration") => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(super::error::s3_error(&error, bucket, "")),
     }
 }
 
@@ -321,7 +324,7 @@ pub async fn get_bucket_lock_config(
         Err(error) if error_code(&error) == Some("ObjectLockConfigurationNotFoundError") => {
             return Ok(None);
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(super::error::s3_error(&error, bucket, "")),
     };
     let Some(config) = output.object_lock_configuration() else {
         return Ok(None);
@@ -357,7 +360,8 @@ pub async fn put_bucket_lock_config(
         .bucket(bucket)
         .object_lock_configuration(bucket_lock_configuration(rule))
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -411,7 +415,8 @@ pub async fn restore_object(
         .set_version_id(version_id.map(str::to_string))
         .restore_request(restore_request(days)?)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -429,7 +434,8 @@ pub async fn restore_ongoing(
         .key(key)
         .set_version_id(version_id.map(str::to_string))
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(head.restore().map(parse_restore_ongoing))
 }
 

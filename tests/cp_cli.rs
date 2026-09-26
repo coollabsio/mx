@@ -498,5 +498,5 @@ fn mv_rejects_overlapping_source_and_target() {
         .args(["mv", "--rewind", "1d", &s(&file), "play/b/"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unexpected argument"));
+        .stderr(predicate::str::contains("flag provided but not defined"));
 }

@@ -28,7 +28,7 @@ pub enum QuotaCommand {
 #[derive(Debug, Args)]
 pub struct QuotaSetArgs {
     pub target: String,
-    /// hard quota size, e.g. 1GiB, 500MB (k/m/g/t = SI, ki/mi/gi/ti = IEC)
+    /// set a hard quota, disallowing writes after quota is reached
     #[arg(long)]
     pub size: Option<String>,
 }

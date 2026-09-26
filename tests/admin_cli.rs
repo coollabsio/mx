@@ -81,7 +81,9 @@ fn fake_server(responses: Vec<(u16, &'static str)>) -> (String, JoinHandle<Vec<R
 fn home_with_alias(url: &str) -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     mx(home.path())
-        .args(["alias", "set", "fake", url, "akey", "skey"])
+        .args([
+            "alias", "set", "--api", "S3v4", "fake", url, "akey", "skey1234",
+        ])
         .assert()
         .success();
     home
@@ -259,7 +261,7 @@ fn tier_validates_arguments() {
         .assert()
         .code(1)
         .stdout(predicate::str::contains("Incorrect number of arguments"))
-        .stdout(predicate::str::contains(r#""type": "fatal""#));
+        .stdout(predicate::str::contains(r#""type":"fatal""#));
 }
 
 #[test]

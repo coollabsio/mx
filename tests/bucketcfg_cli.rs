@@ -476,7 +476,16 @@ fn health_stub(
 fn stub_home(url: &str) -> tempfile::TempDir {
     let home = home();
     mx(home.path())
-        .args(["alias", "set", "stub", url, "access", "secret12345"])
+        .args([
+            "alias",
+            "set",
+            "--api",
+            "S3v4",
+            "stub",
+            url,
+            "access",
+            "secret12345",
+        ])
         .assert()
         .success();
     home
@@ -530,7 +539,16 @@ fn ping_stops_after_error_count() {
     drop(listener);
     let home = home();
     mx(home.path())
-        .args(["alias", "set", "dead", &dead, "access", "secret12345"])
+        .args([
+            "alias",
+            "set",
+            "--api",
+            "S3v4",
+            "dead",
+            &dead,
+            "access",
+            "secret12345",
+        ])
         .assert()
         .success();
     mx(home.path())

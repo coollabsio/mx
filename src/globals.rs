@@ -43,6 +43,17 @@ pub fn json() -> bool {
     get().json
 }
 
+/// `--json` in raw `argv` (or `MC_JSON`), for errors reported before the CLI is parsed.
+pub fn json_requested(argv: &[String]) -> bool {
+    argv.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--json")
+        || std::env::var("MC_JSON")
+            .ok()
+            .and_then(|value| crate::cli::parse_env_bool(&value).ok())
+            .unwrap_or(false)
+}
+
 pub fn quiet() -> bool {
     get().quiet
 }

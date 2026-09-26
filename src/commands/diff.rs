@@ -1,6 +1,7 @@
-use crate::commands::util::object_infos;
+use crate::commands::util::{TargetKind, object_infos, stat_target};
 use crate::config::ConfigStore;
-use anyhow::Result;
+use crate::error::McError;
+use anyhow::{Context, Result};
 use clap::Args;
 use std::collections::BTreeMap;
 
@@ -12,6 +13,14 @@ pub struct DiffArgs {
 
 pub fn run(args: DiffArgs, _json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
+    for input in [&args.source, &args.target] {
+        let kind =
+            stat_target(&store, input).with_context(|| format!("Unable to stat '{input}'."))?;
+        if kind != TargetKind::Folder {
+            return Err(McError::invalid_argument())
+                .with_context(|| format!("`{input}` is not a folder."));
+        }
+    }
     let (_, source) = object_infos(&store, &args.source)?;
     let (_, target) = object_infos(&store, &args.target)?;
     let source_map: BTreeMap<_, _> = source

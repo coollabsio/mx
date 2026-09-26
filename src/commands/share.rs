@@ -38,6 +38,11 @@ pub enum ShareCommand {
 }
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| if a.get_id().as_str() == "version_id" {
+    a.help("share a particular object version")
+} else {
+    a
+}))]
 pub struct ShareDownloadArgs {
     /// share all objects recursively
     #[arg(short = 'r', long)]
@@ -147,6 +152,8 @@ fn download(args: ShareDownloadArgs, json: bool) -> Result<()> {
     let mut db = ShareDb::load(&db_path)?;
     let rt = runtime()?;
     for target_arg in &args.targets {
+        super::util::stat_target(&store, target_arg)
+            .with_context(|| format!("Unable to stat `{target_arg}`."))?;
         let (alias, target) = require_s3(&store, target_arg)?;
         let bucket = target.require_bucket()?.to_string();
         let objects = rt
@@ -203,7 +210,7 @@ async fn share_download_targets(
                     .await
                     .unwrap_or_default();
                     if listed.is_empty() {
-                        return Err(error.context(format!("Unable to stat `{key}`.")));
+                        return Err(error);
                     }
                     Some(dir)
                 }

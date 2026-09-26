@@ -7,7 +7,7 @@ use crate::config::ConfigStore;
 use crate::flags::TargetArg;
 use crate::output;
 use crate::s3::VersioningInfo;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
@@ -29,10 +29,10 @@ pub enum VersionCommand {
 
 #[derive(Debug, Args)]
 pub struct VersionEnableArgs {
-    /// exclude versioning on these prefix patterns (comma separated, repeatable; MinIO only)
+    /// exclude versioning on these prefix patterns
     #[arg(long = "excluded-prefixes", value_name = "PREFIXES")]
     pub excluded_prefixes: Vec<String>,
-    /// exclude versioning on folder objects (MinIO only)
+    /// exclude versioning on folder objects
     #[arg(long)]
     pub exclude_folders: bool,
     pub target: String,
@@ -95,9 +95,11 @@ fn set(target_arg: &str, op: &str, info: VersioningInfo, json: bool) -> Result<(
             &alias,
             &bucket,
             info.status == "Enabled",
-        ))?;
+        ))
+        .with_context(|| format!("Unable to {op} versioning"))?;
     } else {
-        rt.block_on(crate::s3::put_versioning_info(&alias, &bucket, &info))?;
+        rt.block_on(crate::s3::put_versioning_info(&alias, &bucket, &info))
+            .with_context(|| format!("Unable to {op} versioning"))?;
     }
     if json {
         print_json(op, target_arg, &info)
@@ -114,7 +116,9 @@ fn show(target_arg: &str, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let (alias, target) = require_s3(&store, target_arg)?;
     let bucket = target.require_bucket()?.to_string();
-    let info = runtime()?.block_on(crate::s3::get_versioning_info(&alias, &bucket))?;
+    let info = runtime()?
+        .block_on(crate::s3::get_versioning_info(&alias, &bucket))
+        .context("Unable to get versioning info")?;
     if json {
         return print_json("info", target_arg, &info);
     }

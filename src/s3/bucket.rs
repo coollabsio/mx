@@ -7,6 +7,7 @@
 
 use super::{build_client, delete_all_versions, delete_keys, list_object_infos};
 use crate::config::model::AliasConfig;
+use crate::s3::S3ResultExt;
 use anyhow::{Context, Result, anyhow, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{ConfigBag, Intercept, RuntimeComponents};
@@ -81,7 +82,7 @@ pub async fn make_bucket_with(
             .and_then(ProvideErrorMetadata::code)
             .is_some_and(|code| matches!(code, "BucketAlreadyExists" | "BucketAlreadyOwnedByYou"));
         if !(options.ignore_existing && already_exists) {
-            return Err(error.into());
+            return Err(super::error::s3_error(&error, bucket, ""));
         }
         created = false;
     }
@@ -108,7 +109,7 @@ pub async fn remove_bucket(alias: &AliasConfig, bucket: &str, force: bool) -> Re
         if force && super::error_code(&error) == Some("BucketNotEmpty") {
             return super::delete_bucket_force(&client, bucket).await;
         }
-        return Err(error.into());
+        return Err(super::error::s3_error(&error, bucket, ""));
     }
     Ok(())
 }
@@ -456,11 +457,55 @@ pub const S3_XMLNS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 // health / ping
 // ---------------------------------------------------------------------------
 
+/// mc `probeS3Signature`: `GetBucketLocation` on a random bucket. A missing bucket or access
+/// denied means the credentials and signature work; anything else is returned as mc prints
+/// it (transport failures in Go's `Get "URL": dial tcp ...` form).
+pub async fn probe_signature(alias: &AliasConfig) -> Result<()> {
+    let client = build_client(alias).await?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut seed = nanos as u64 ^ u64::from(std::process::id());
+    let suffix: String = (0..30)
+        .map(|_| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let index = (seed >> 33) % 36;
+            char::from_digit(index as u32, 36).unwrap_or('0')
+        })
+        .collect();
+    let bucket = format!("probe-bsign-{suffix}");
+    let result = client
+        .get_bucket_location()
+        .bucket(&bucket)
+        .customize()
+        .config_override(
+            aws_sdk_s3::config::Builder::default()
+                .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled()),
+        )
+        .send()
+        .await;
+    let Err(error) = result else {
+        return Ok(());
+    };
+    if error.raw_response().is_none() {
+        let url = format!("{}/{bucket}/?location=", alias.url.trim_end_matches('/'));
+        return Err(super::error::go_transport_error("Get", &url, &error).into());
+    }
+    let mapped = super::error::map_sdk_error(&error, &bucket, "");
+    match mapped.code.as_deref() {
+        Some("NoSuchBucket" | "AccessDenied") => Ok(()),
+        _ => Err(mapped.into()),
+    }
+}
+
 /// Liveness check via `ListBuckets` (signed).
 pub async fn ping(alias: &AliasConfig) -> Result<Duration> {
     let client = build_client(alias).await?;
     let started = std::time::Instant::now();
-    client.list_buckets().send().await?;
+    client.list_buckets().send().await.s3("", "")?;
     Ok(started.elapsed())
 }
 
@@ -656,7 +701,8 @@ pub async fn presign_post(
         .get_bucket_location()
         .bucket(bucket)
         .send()
-        .await?
+        .await
+        .s3(bucket, "")?
         .location_constraint()
         .map(|value| value.as_str().to_string())
         .filter(|value| !value.is_empty())
@@ -771,14 +817,16 @@ pub async fn put_tags(
             .set_version_id(version_id.map(str::to_string))
             .tagging(tagging)
             .send()
-            .await?;
+            .await
+            .s3(bucket, "")?;
     } else {
         client
             .put_bucket_tagging()
             .bucket(bucket)
             .tagging(tagging)
             .send()
-            .await?;
+            .await
+            .s3(bucket, "")?;
     }
     Ok(())
 }
@@ -809,13 +857,14 @@ pub async fn get_tags(
             .key(key)
             .set_version_id(version_id.map(str::to_string))
             .send()
-            .await?
+            .await
+            .s3(bucket, "")?
             .tag_set
     } else {
         match client.get_bucket_tagging().bucket(bucket).send().await {
             Ok(response) => response.tag_set,
             Err(error) if has_error_code(&error, &["NoSuchTagSet"]) => return Ok(None),
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(super::error::s3_error(&error, bucket, "")),
         }
     };
     Ok(Some(
@@ -845,9 +894,15 @@ pub async fn delete_tags(
             .key(key)
             .set_version_id(version_id.map(str::to_string))
             .send()
-            .await?;
+            .await
+            .s3(bucket, "")?;
     } else {
-        client.delete_bucket_tagging().bucket(bucket).send().await?;
+        client
+            .delete_bucket_tagging()
+            .bucket(bucket)
+            .send()
+            .await
+            .s3(bucket, "")?;
     }
     Ok(())
 }
@@ -876,7 +931,8 @@ pub async fn set_versioning_client(
         .bucket(bucket)
         .versioning_configuration(VersioningConfiguration::builder().status(status).build())
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -962,7 +1018,8 @@ pub async fn put_versioning_info(
         .customize()
         .config_override(raw_body_override(info.to_xml()))
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -975,7 +1032,8 @@ pub async fn get_versioning_info(alias: &AliasConfig, bucket: &str) -> Result<Ve
         .customize()
         .config_override(capture.config())
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     let raw = capture
         .take()
         .map(|raw| raw.body_text())
@@ -1117,7 +1175,8 @@ pub async fn put_cors_xml(alias: &AliasConfig, bucket: &str, xml: &str) -> Resul
         .customize()
         .config_override(raw_body_override(xml.to_string()))
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -1152,13 +1211,18 @@ pub async fn get_cors_xml(
             Ok(Some((xml, document)))
         }
         Err(error) if has_error_code(&error, &["NoSuchCORSConfiguration"]) => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(super::error::s3_error(&error, bucket, "")),
     }
 }
 
 pub async fn delete_cors(alias: &AliasConfig, bucket: &str) -> Result<()> {
     let client = build_client(alias).await?;
-    client.delete_bucket_cors().bucket(bucket).send().await?;
+    client
+        .delete_bucket_cors()
+        .bucket(bucket)
+        .send()
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -1195,7 +1259,8 @@ pub async fn put_encryption(
                 .build()?,
         )
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -1216,7 +1281,7 @@ pub async fn get_encryption_config(
         {
             return Ok(None);
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(super::error::s3_error(&error, bucket, "")),
     };
     let mut result = None;
     for rule in response
@@ -1249,7 +1314,8 @@ pub async fn delete_encryption(alias: &AliasConfig, bucket: &str) -> Result<()> 
         .delete_bucket_encryption()
         .bucket(bucket)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -1264,7 +1330,8 @@ pub async fn put_bucket_policy(alias: &AliasConfig, bucket: &str, policy: &str) 
         .bucket(bucket)
         .policy(policy)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 
@@ -1273,13 +1340,18 @@ pub async fn get_bucket_policy(alias: &AliasConfig, bucket: &str) -> Result<Opti
     match client.get_bucket_policy().bucket(bucket).send().await {
         Ok(response) => Ok(response.policy.filter(|policy| !policy.trim().is_empty())),
         Err(error) if has_error_code(&error, &["NoSuchBucketPolicy"]) => Ok(None),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(super::error::s3_error(&error, bucket, "")),
     }
 }
 
 pub async fn delete_bucket_policy(alias: &AliasConfig, bucket: &str) -> Result<()> {
     let client = build_client(alias).await?;
-    client.delete_bucket_policy().bucket(bucket).send().await?;
+    client
+        .delete_bucket_policy()
+        .bucket(bucket)
+        .send()
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 

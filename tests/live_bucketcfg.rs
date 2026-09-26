@@ -919,7 +919,7 @@ fn live_cors() {
     if !output.status.success() {
         // MinIO community builds do not implement the bucket CORS API.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("NotImplemented"), "{stderr}");
+        assert!(stderr.contains("not implemented"), "{stderr}");
         eprintln!("server does not implement bucket CORS; skipping set/get/remove");
         return;
     }

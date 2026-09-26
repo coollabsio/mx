@@ -11,7 +11,7 @@ use std::io::Write;
 pub struct PipeArgs {
     #[command(flatten)]
     pub metadata: MetadataFlags,
-    /// allow N concurrent part uploads (uses more memory)
+    /// allow N concurrent uploads [WARNING: will use more memory use it with caution]
     #[arg(
         long,
         default_value_t = 1,
@@ -19,7 +19,7 @@ pub struct PipeArgs {
         allow_negative_numbers = true
     )]
     pub concurrent: i64,
-    /// customize chunk size for each concurrent upload (e.g. 16MiB)
+    /// customize chunk size for each concurrent upload (default: "528 MiB")
     #[arg(long = "part-size", value_name = "SIZE")]
     pub part_size: Option<String>,
     #[command(flatten)]
@@ -58,14 +58,16 @@ pub fn run(args: PipeArgs, json: bool) -> Result<()> {
                 parallel: Some(args.concurrent as usize),
                 ..Default::default()
             };
-            let outcome = runtime()?.block_on(crate::s3::put_object_reader_with(
-                &alias,
-                &bucket,
-                &key,
-                std::io::stdin().lock(),
-                None,
-                &options,
-            ))?;
+            let outcome = runtime()?
+                .block_on(crate::s3::put_object_reader_with(
+                    &alias,
+                    &bucket,
+                    &key,
+                    std::io::stdin().lock(),
+                    None,
+                    &options,
+                ))
+                .context("Unable to write to one or more targets.")?;
             outcome.size.unwrap_or_default()
         }
         Location::Local(path) => {

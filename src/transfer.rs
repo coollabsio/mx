@@ -168,9 +168,9 @@ pub fn apply_attrs(path: &Path, attrs: &std::collections::BTreeMap<String, Strin
     let owner_differs =
         (uid.is_some() && uid != Some(meta.uid())) || (gid.is_some() && gid != Some(meta.gid()));
     if owner_differs && let Err(error) = std::os::unix::fs::chown(path, uid, gid) {
-        eprintln!(
-            "mx: unable to preserve ownership of `{}`: {error}",
-            path.display()
+        crate::output::error_if(
+            &format!("Unable to preserve ownership of `{}`.", path.display()),
+            &error.to_string(),
         );
     }
     if let Some(mode) = attrs.get("mode").and_then(|v| parse_mode(v)) {

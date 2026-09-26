@@ -11,6 +11,11 @@ use std::time::SystemTime;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "rewind" => a.help("select an object version at specified time"),
+    "version_id" => a.help("select an object version to display"),
+    _ => a,
+}))]
 pub struct HeadArgs {
     /// print the first 'n' lines
     #[arg(short = 'n', long, default_value_t = 10, allow_negative_numbers = true)]
@@ -29,9 +34,8 @@ pub struct HeadArgs {
 }
 
 pub fn run(args: HeadArgs, json: bool) -> Result<()> {
-    if json {
-        bail!("`head` does not support `--json` yet.");
-    }
+    // mc writes the raw contents with `--json` too; only errors are JSON.
+    let _ = json;
     if args.version.version_id.is_some() && args.rewind.rewind.is_some() {
         bail!("You cannot specify --version-id and --rewind at the same time");
     }
@@ -74,7 +78,7 @@ pub fn run(args: HeadArgs, json: bool) -> Result<()> {
                     reject_s3_only(select.is_set(), "head")?;
                     let file = tokio::fs::File::open(&path)
                         .await
-                        .with_context(|| format!("Unable to open `{}`.", path.display()))?;
+                        .map_err(|error| crate::error::io_error(&error, &path.to_string_lossy()))?;
                     write_lines(file, lines, &mut out).await
                 }
             }

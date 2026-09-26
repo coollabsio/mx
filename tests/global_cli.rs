@@ -12,7 +12,16 @@ fn mx(home: &std::path::Path) -> Command {
 /// Alias `dead` pointing at a closed local port.
 fn dead_alias(home: &std::path::Path) {
     mx(home)
-        .args(["alias", "set", "dead", "http://127.0.0.1:1", "ak", "sk"])
+        .args([
+            "alias",
+            "set",
+            "--api",
+            "S3v4",
+            "dead",
+            "http://127.0.0.1:1",
+            "akey",
+            "skey1234",
+        ])
         .assert()
         .success();
 }
@@ -129,7 +138,16 @@ fn valid_ca_files_and_other_files_are_accepted() {
 fn insecure_client_reaches_the_network_layer() {
     let home = tempfile::tempdir().unwrap();
     mx(home.path())
-        .args(["alias", "set", "deadtls", "https://127.0.0.1:1", "ak", "sk"])
+        .args([
+            "alias",
+            "set",
+            "--api",
+            "S3v4",
+            "deadtls",
+            "https://127.0.0.1:1",
+            "akey",
+            "skey1234",
+        ])
         .assert()
         .success();
     mx(home.path())

@@ -2,7 +2,7 @@
 
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 use std::time::Duration;
@@ -48,7 +48,8 @@ impl ReadyMessage<'_> {
 
 pub fn run(args: HealthArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
-    let alias = alias_config(&store, args.target.split('/').next().unwrap_or_default())?;
+    let alias = alias_config(&store, args.target.split('/').next().unwrap_or_default())
+        .with_context(|| format!("Couldn't construct anonymous client for `{}`.", args.target))?;
     let (path, query) = if args.cluster_read {
         ("/minio/health/cluster/read", None)
     } else {

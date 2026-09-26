@@ -24,11 +24,38 @@ pub struct RetentionArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum RetentionCommand {
-    #[command(about = "apply retention settings on object(s) or bucket")]
+    #[command(
+        about = "apply retention settings on object(s) or bucket",
+        mut_args(|a| match a.get_id().as_str() {
+            "recursive" => a.help("apply retention recursively"),
+            "version_id" => a.help("apply retention to a specific object version"),
+            "versions" => a.help("apply retention object(s) and all its versions"),
+            "default" => a.help("set bucket default retention mode"),
+            _ => a,
+        })
+    )]
     Set(RetentionSetArgs),
-    #[command(about = "clear retention for object(s) or bucket")]
+    #[command(
+        about = "clear retention for object(s) or bucket",
+        mut_args(|a| match a.get_id().as_str() {
+            "recursive" => a.help("clear retention recursively"),
+            "version_id" => a.help("clear retention of a specific object version"),
+            "versions" => a.help("clear retention of object(s) and all its versions"),
+            "default" => a.help("set default bucket locking"),
+            _ => a,
+        })
+    )]
     Clear(RetentionTargetArgs),
-    #[command(about = "show retention for object(s) or bucket")]
+    #[command(
+        about = "show retention for object(s) or bucket",
+        mut_args(|a| match a.get_id().as_str() {
+            "recursive" => a.help("show retention info recursively"),
+            "version_id" => a.help("show retention info of specific object version"),
+            "versions" => a.help("show retention info on object(s) and all its versions"),
+            "default" => a.help("show bucket default retention mode"),
+            _ => a,
+        })
+    )]
     Info(RetentionTargetArgs),
 }
 
@@ -141,6 +168,8 @@ pub(crate) struct LockTarget {
     /// Object key or prefix (may be empty, keeps a trailing slash).
     pub key: String,
     pub target: TargetRef,
+    /// The target as given on the command line.
+    pub input: String,
 }
 
 impl LockTarget {
@@ -154,6 +183,7 @@ impl LockTarget {
             bucket,
             key: target.key_with_trailing_slash().unwrap_or_default(),
             target,
+            input: input.to_string(),
         })
     }
 
@@ -196,14 +226,21 @@ impl LockTarget {
         Ok(())
     }
 
-    /// Fails with `message` unless object lock is enabled on the bucket.
-    pub async fn require_lock_enabled(&self, client: &Client, message: &str) -> Result<()> {
+    /// Whether object lock is enabled on the bucket (servers without object lock: false).
+    pub async fn lock_enabled(&self, client: &Client) -> Result<bool> {
         match lock::get_bucket_lock_config(client, &self.bucket).await {
-            Ok(Some(config)) if config.status == "Enabled" => Ok(()),
-            Ok(_) => bail!("{message}"),
-            Err(error) if format!("{error:#}").contains("NotImplemented") => bail!("{message}"),
+            Ok(config) => Ok(config.is_some_and(|config| config.status == "Enabled")),
+            Err(error) if crate::error::error_code(&error) == Some("NotImplemented") => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// mc `fatalIfBucketLockNotSupported`: any failure means locking is not supported.
+    pub async fn require_lock_supported(&self, client: &Client) -> Result<()> {
+        if !self.lock_enabled(client).await.unwrap_or(false) {
+            bail!("Remote bucket `{}` does not support locking", self.input);
+        }
+        Ok(())
     }
 }
 
@@ -255,8 +292,6 @@ pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
     crate::output::print_json(value)?;
     Ok(())
 }
-
-const LOCK_UNSUPPORTED: &str = "does not support locking";
 
 // ---------------------------------------------------------------------------
 // set / clear
@@ -379,8 +414,7 @@ fn apply_bucket_lock(
     }
     runtime()?.block_on(async {
         let client = crate::s3::build_client(&target.alias).await?;
-        let message = format!("Remote bucket `{}` {LOCK_UNSUPPORTED}", target.bucket);
-        target.require_lock_enabled(&client, &message).await?;
+        target.require_lock_supported(&client).await?;
         lock::put_bucket_lock_config(&client, &target.bucket, rule.clone()).await
     })?;
     let (mode, validity) = match &rule {
@@ -441,8 +475,7 @@ fn apply_retention(
         .unwrap_or_default();
     let rt = runtime()?;
     let client = rt.block_on(crate::s3::build_client(&target.alias))?;
-    let unsupported = format!("Remote bucket `{}` {LOCK_UNSUPPORTED}", target.bucket);
-    rt.block_on(target.require_lock_enabled(&client, &unsupported))?;
+    rt.block_on(target.require_lock_supported(&client))?;
     let objects = resolve_objects(
         &rt,
         &client,
@@ -516,8 +549,7 @@ fn info(args: RetentionTargetArgs, json: bool) -> Result<()> {
     let selection = args.common.selection()?;
     let rt = runtime()?;
     let client = rt.block_on(crate::s3::build_client(&target.alias))?;
-    let unsupported = format!("Remote bucket `{}` {LOCK_UNSUPPORTED}", target.bucket);
-    rt.block_on(target.require_lock_enabled(&client, &unsupported))?;
+    rt.block_on(target.require_lock_supported(&client))?;
 
     if args.common.default || (selection.is_none() && target.key.is_empty()) {
         if target.target.key.is_some() {
@@ -762,6 +794,7 @@ mod tests {
                 bucket: target.bucket.clone().unwrap(),
                 key: target.key_with_trailing_slash().unwrap_or_default(),
                 target,
+                input: input.to_string(),
             }
         };
         let object = make("local/b/dir/obj.txt");

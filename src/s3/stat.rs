@@ -1,6 +1,7 @@
 //! HeadBucket / HeadObject and bucket/object property collection for `stat` (area C).
 
 use super::{GetOptions, to_system_time};
+use crate::s3::S3ResultExt;
 use anyhow::Result;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
@@ -64,7 +65,7 @@ pub async fn stat_object_sse_c(
             .sse_customer_key(encoded)
             .sse_customer_key_md5(md5);
     }
-    let response = request.send().await?;
+    let response = request.send().await.s3_object(bucket, key)?;
     Ok(object_stat_from_head(key, &response))
 }
 
@@ -209,7 +210,12 @@ pub struct BucketStat {
 
 /// Collects bucket properties. Fails only when the bucket itself cannot be read.
 pub async fn stat_bucket(client: &Client, bucket: &str) -> Result<BucketStat> {
-    let location = client.get_bucket_location().bucket(bucket).send().await?;
+    let location = client
+        .get_bucket_location()
+        .bucket(bucket)
+        .send()
+        .await
+        .s3(bucket, "")?;
     let mut stat = BucketStat {
         name: bucket.to_string(),
         location: location
@@ -334,9 +340,10 @@ pub async fn head_object_with(
             .customize()
             .mutate_request(super::objects::add_zip_extract_header)
             .send()
-            .await?)
+            .await
+            .s3_object(bucket, key)?)
     } else {
-        Ok(request.send().await?)
+        Ok(request.send().await.s3_object(bucket, key)?)
     }
 }
 

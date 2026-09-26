@@ -175,7 +175,13 @@ fn current_permission(target: &PolicyTarget) -> Result<&'static str> {
 fn set(args: AnonymousSetArgs, json: bool) -> Result<()> {
     let permission = args.permission.to_ascii_lowercase();
     let canned = canned_policy(&permission)?;
-    let target = load_target(&args.target)?;
+    let context = || {
+        format!(
+            "Unable to set anonymous `{permission}` for `{}`.",
+            args.target
+        )
+    };
+    let target = load_target(&args.target).with_context(context)?;
     let mut document = match &target.policy {
         Some(policy) => parse_policy(policy)?,
         None => PolicyDocument::default(),
@@ -187,14 +193,16 @@ fn set(args: AnonymousSetArgs, json: bool) -> Result<()> {
             rt.block_on(crate::s3::delete_bucket_policy(
                 &target.alias,
                 &target.bucket,
-            ))?;
+            ))
+            .with_context(context)?;
         }
     } else {
         rt.block_on(crate::s3::put_bucket_policy(
             &target.alias,
             &target.bucket,
             &document.to_json().to_string(),
-        ))?;
+        ))
+        .with_context(context)?;
     }
     let target = load_target(&args.target)?;
     print_message(
@@ -226,7 +234,8 @@ fn set_json(args: AnonymousSetJsonArgs, json: bool) -> Result<()> {
 }
 
 fn get(target_arg: &str, operation: &str, json: bool) -> Result<()> {
-    let target = load_target(target_arg)?;
+    let target = load_target(target_arg)
+        .with_context(|| format!("Unable to {operation} anonymous `` for `{target_arg}`."))?;
     let permission = current_permission(&target)?;
     let anonymous = match &target.policy {
         Some(policy) => match serde_json::from_str::<Value>(policy)? {

@@ -12,6 +12,11 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::time::SystemTime;
 
 #[derive(Debug, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "rewind" => a.help("display an earlier object version"),
+    "version_id" => a.help("display a specific version of an object"),
+    _ => a,
+}))]
 pub struct CatArgs {
     #[command(flatten)]
     pub rewind: RewindFlag,
@@ -48,8 +53,11 @@ pub struct CatArgs {
 /// `--enc-c` only (read-side commands).
 #[derive(Debug, Clone, Default, Args)]
 pub struct EncCFlag {
-    /// decrypt objects using client provided keys: "ALIAS/BUCKET/PREFIX=KEY" (repeatable, comma-separated)
-    #[arg(long = "enc-c", value_name = "PATH=KEY")]
+    #[arg(
+        long = "enc-c",
+        value_name = "PATH=KEY",
+        help = "encrypt/decrypt objects using client provided keys. (multiple keys can be provided) Formats: RawBase64 or Hex."
+    )]
     pub enc_c: Vec<String>,
 }
 
@@ -159,9 +167,8 @@ fn validate(args: &CatArgs) -> Result<()> {
 }
 
 pub fn run(args: CatArgs, json: bool) -> Result<()> {
-    if json {
-        bail!("`cat` does not support `--json` yet.");
-    }
+    // mc writes the raw contents with `--json` too; only errors are JSON.
+    let _ = json;
     validate(&args)?;
     let select = ReadSelect {
         version_id: args.version.version_id.clone(),
@@ -222,7 +229,7 @@ fn cat_one(
         Location::Local(path) => {
             reject_s3_only(select.is_set() || args.part_number != 0, "cat")?;
             let mut file = std::fs::File::open(&path)
-                .with_context(|| format!("Unable to open `{}`.", path.display()))?;
+                .map_err(|error| crate::error::io_error(&error, &path.to_string_lossy()))?;
             let size = file.metadata()?.len() as i64;
             let start = start_offset(args.offset, args.tail, size)?;
             file.seek(SeekFrom::Start(start as u64))?;

@@ -3,6 +3,7 @@
 //! The S3 configuration is flattened into [`EventConfig`] entries (topic, queue and lambda
 //! configurations alike), edited with pure functions, and converted back.
 
+use crate::s3::S3ResultExt;
 use anyhow::{Result, anyhow, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::types::{
@@ -291,7 +292,8 @@ pub async fn get_bucket_notification(client: &Client, bucket: &str) -> Result<Ve
         .get_bucket_notification_configuration()
         .bucket(bucket)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     let config = NotificationConfiguration::builder()
         .set_topic_configurations(Some(output.topic_configurations().to_vec()))
         .set_queue_configurations(Some(output.queue_configurations().to_vec()))
@@ -310,7 +312,8 @@ pub async fn put_bucket_notification(
         .bucket(bucket)
         .notification_configuration(from_entries(entries)?)
         .send()
-        .await?;
+        .await
+        .s3(bucket, "")?;
     Ok(())
 }
 

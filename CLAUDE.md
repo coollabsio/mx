@@ -52,6 +52,7 @@ Current command behavior (details in `COMPATIBILITY.md`):
 - `quota`/`ilm tier`/`replicate`: MinIO admin API; tiers `minio`/`s3` only; replicate `status`/`backlog` text simplified
 - `ping`/`ready`: health endpoint; `ping -c -e -x -i`, `ready --cluster-read --maintenance`
 - Dates in output are UTC
+- Errors: raise `McError` causes, attach mc's message with `.context("Unable to ...")` (fatal) or `.context(nonfatal("..."))` (mc `errorIf` + exit 1); map SDK errors with `.s3(bucket, key)` (server message) or `.s3_object(...)` (HEAD/GET/PUT/COPY object, mc translations); unknown aliases are local paths
 
 Known gaps vs full `mc`:
 

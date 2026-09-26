@@ -621,7 +621,9 @@ fn live_ilm_restore_non_transitioned_object() {
             "Sent restore requests to 0 object(s)",
         ))
         .stderr(predicate::str::contains("Unable to send restore request"))
-        .stderr(predicate::str::contains("InvalidObjectState"));
+        .stderr(predicate::str::contains(
+            "not valid for the current state of the object",
+        ));
     let output = live
         .cmd()
         .args(["--json", "ilm", "restore", "-r", &live.url("")])
@@ -629,6 +631,12 @@ fn live_ilm_restore_non_transitioned_object() {
         .unwrap();
     assert!(!output.status.success());
     let json = json_lines(&output.stdout);
-    assert_eq!(json[0]["status"], "failure");
-    assert_eq!(json[0]["restored"], 0);
+    // Per-object failures and the final error are mc error documents.
+    assert_eq!(json[0]["status"], "error");
+    let summary = json
+        .iter()
+        .find(|doc| doc.get("restored").is_some())
+        .unwrap();
+    assert_eq!(summary["status"], "failure");
+    assert_eq!(summary["restored"], 0);
 }
