@@ -16,35 +16,29 @@ Supported (tested against MinIO unless noted):
 | Command | Notes |
 | --- | --- |
 | `alias set` `list` `remove` `import` `export` | Reads `mc` config version 10. |
-| `ls` | Recursive with `-r`. |
-| `mb` | `--ignore-existing`. |
-| `rb` | `--force` deletes objects and versions first. |
-| `stat` `cat` `head` `get` | `head` also works on local files. |
-| `put` / `out` `pipe` | `pipe` uses bounded-memory multipart upload. |
-| `rm` | Recursive prefix delete with `-r --force`. |
-| `cp` `mv` | Single objects in local↔S3 and S3↔S3. Recursive **local-to-S3** `cp` only. |
-| `du` `find` `tree` `diff` | S3 aliases and local paths. |
+| `ls` | `-r`, `--versions`, `--rewind`, `-I`, `--summarize`, `--zip`. |
+| `mb` `rb` | `mb --ignore-existing --with-lock`. `rb --force` deletes objects and versions first. |
+| `stat` `cat` `head` `get` | Version IDs, `--rewind`, SSE-C. `head` also works on local files. |
+| `put` / `out` `pipe` | Multiple sources, multipart tuning, checksums, SSE. `pipe` uses bounded memory. |
+| `cp` `mv` | Recursive in every direction: local↔S3, S3→S3 (also across servers), local→local. |
+| `rm` | Every `mc` flag, including `--versions`, `--rewind`, `--dry-run`, `--stdin`. |
+| `mirror` | Every direction. Uses mc's change detection. `--overwrite`, `--remove`, `--watch`. |
+| `du` `find` `tree` `diff` | S3 aliases and local paths. `find` has `--exec`, `--print`, `--watch`. |
 | `share download` `upload` `list` | Presigned URLs. Default expiry `168h`. |
-| `ready` `ping` | Uses `ListBuckets`. |
-| `tag set` `list` `remove` | Object and bucket tags. |
-| `version enable` `suspend` `info` | Bucket versioning. |
+| `ready` `ping` | Health endpoint. |
+| `tag` `version` `anonymous` `encrypt` `ilm rule` | Bucket and object configuration. |
+| `retention` `legalhold` `undo` `event` `od` `ilm restore` | Object lock, notifications, version undo. |
+| `quota` `ilm tier` `replicate` | MinIO admin API. Tiers: `minio` and `s3` only. |
 
-Preview (CLI exists; some S3 servers reject AWS CRC32 checksums or require `Content-MD5`):
+Preview (depends on server support):
 
 - `cors set` `get` `remove`
-- `encrypt set` `info` `clear`
-- `anonymous set` `get`
-- `ilm rule add` `list` `remove`
-- `mirror` (local-to-S3 trees; change detection and `--remove` are incomplete)
 
 Not implemented:
 
 - `mc admin`, IDP, license, support
-- `batch`, `sql`, `watch`, `quota`, `event`, `replicate`
-- `retention`, `legalhold`, `undo`
-- object `--version-id` / `--versions` / `--rewind` on copy and list
-- recursive `cp`/`mv` except local-to-S3
-- `--insecure` is accepted; TLS skip-verify is not wired
+- `batch`, `sql`, `watch`, `update`
+- `MC_HOST_<alias>` aliases and `MC_*` environment variables
 
 ## Global options
 
@@ -54,8 +48,16 @@ mx -C /path/to/config-dir ...
 mx -q ...
 mx --insecure ...
 mx --resolve HOST:PORT=IP ...
+mx --debug ...
+mx -H 'X-Custom: value' ...
+mx --limit-upload 10MiB --limit-download 50MiB ...
 mx -V
 ```
+
+`--insecure` skips TLS verification. CA certificates in
+`<config dir>/certs/CAs/` are trusted. `--debug` prints an HTTP trace to stderr
+with credentials redacted. `--dp`/`--disable-pager` and `--no-color` are
+accepted and do nothing.
 
 `--resolve` is repeatable. It can occur after a subcommand. Only a mapping
 whose host and port match the alias URL is used. Signing still uses the
@@ -117,6 +119,8 @@ mx out ./local.txt myminio/mybucket/out.txt
 tar czf - ./data | mx pipe --quiet myminio/mybucket/archive.tar.gz
 mx rm myminio/mybucket/path/file.txt
 mx rm -r --force myminio/mybucket/prefix
+mx rm -r --force --versions --dry-run myminio/mybucket/prefix
+mx ls --versions myminio/mybucket/
 mx rb myminio/mybucket
 mx rb --force myminio/mybucket
 ```
@@ -128,12 +132,13 @@ mx cp ./local.txt myminio/mybucket/
 mx cp myminio/mybucket/remote.txt ./downloaded.txt
 mx cp myminio/mybucket/a.txt myminio/mybucket/b.txt
 mx cp -r ./dir/ myminio/mybucket/dir/
+mx cp -r myminio/mybucket/dir/ otherminio/backup/dir/
+mx cp --version-id VID myminio/mybucket/a.txt ./a.txt
 mx mv myminio/mybucket/a.txt myminio/mybucket/archive/a.txt
 mx mirror ./dir myminio/mybucket/dir
+mx mirror --overwrite --remove myminio/mybucket otherminio/mybucket
+mx mirror --watch ./dir myminio/mybucket/dir
 ```
-
-Recursive `cp` works for a local directory to S3. Other recursive directions
-are not complete.
 
 ### Inspect
 
@@ -158,6 +163,18 @@ mx tag remove myminio/mybucket/path/file.txt
 mx version enable myminio/mybucket
 mx version info myminio/mybucket
 mx version suspend myminio/mybucket
+```
+
+### Object lock, lifecycle, and admin
+
+```bash
+mx mb --with-lock myminio/locked
+mx retention set GOVERNANCE 30d myminio/locked/file.txt
+mx legalhold set myminio/locked/file.txt
+mx undo myminio/mybucket/file.txt
+mx ilm rule add --expire-days 30 myminio/mybucket
+mx quota set --size 10GiB myminio/mybucket
+mx replicate add --remote-bucket otherminio/mybucket myminio/mybucket
 ```
 
 ### Pin an endpoint hostname
@@ -212,9 +229,11 @@ CARGO_HOME=$PWD/.cargo-home CARGO_TARGET_DIR=$PWD/target cargo test --locked
 sh tests/live_minio.sh
 ```
 
-`tests/live_minio.sh` starts a pinned MinIO container, runs
-`tests/live_s3_workflow.rs`, and removes the container. Docker is required.
-Image tag: `tests/minio.image`.
+`tests/live_minio.sh [live_suite...]` starts three MinIO containers (two plain,
+one TLS with a throwaway CA, KMS enabled), runs every `tests/live_*.rs` suite or
+the named ones, and removes the containers. Docker is required. The image is
+set in `tests/minio.image` (override with `MX_MINIO_IMAGE`). Extra server
+environment goes in `tests/minio.env`.
 
 Point live tests at another S3-compatible server:
 
