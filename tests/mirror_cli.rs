@@ -110,11 +110,14 @@ fn mirror_local_to_local_copies_tree_and_is_idempotent() {
         .stdout(predicate::str::contains("nested/deep/b.txt`"));
     assert_eq!(dirs.read_dst("a.txt").as_deref(), Some("alpha"));
     assert_eq!(dirs.read_dst("nested/deep/b.txt").as_deref(), Some("bravo"));
-    // Nothing left to do on a second run.
+    // Nothing left to do on a second run: only mc's summary table.
     dirs.mirror(&[])
         .assert()
         .success()
-        .stdout(predicate::str::is_empty())
+        .stdout(predicate::str::contains("->").not())
+        .stdout(predicate::str::contains(
+            "│ 0 B   │ 0 B         │ 00m00s   │ 0 B/s │",
+        ))
         .stderr(predicate::str::is_empty());
 }
 
@@ -137,7 +140,7 @@ fn mirror_reports_differences_without_overwrite() {
     dirs.mirror(&[])
         .assert()
         .success()
-        .stdout(predicate::str::is_empty())
+        .stdout(predicate::str::contains("->").not())
         .stderr(predicate::str::contains(
             "Failed to perform mirroring, with error condition (size)",
         ))
@@ -178,17 +181,21 @@ fn mirror_remove_deletes_extraneous_target_files() {
     dirs.mirror(&[]).assert().success();
     assert!(dirs.read_dst("extra.txt").is_some());
 
+    // mc's dry run prints no per-object lines.
     dirs.mirror(&["--remove", "--dry-run"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Removed `"));
+        .stdout(predicate::str::contains("->").not());
     assert!(dirs.read_dst("extra.txt").is_some());
 
+    // Initial-pass removals have no event type: mc prints `` -> `TARGET`.
     dirs.mirror(&["--remove"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Removed `"))
-        .stdout(predicate::str::contains("extra.txt`"));
+        .stdout(predicate::str::contains(format!(
+            "`` -> `{}/extra.txt`",
+            dirs.dst()
+        )));
     assert!(dirs.read_dst("extra.txt").is_none());
     assert!(dirs.read_dst("a.txt").is_some());
 }
@@ -196,11 +203,19 @@ fn mirror_remove_deletes_extraneous_target_files() {
 #[test]
 fn mirror_dry_run_changes_nothing() {
     let dirs = Dirs::new();
+    // Like mc: only the summary, with `Transferred` counted twice.
     dirs.mirror(&["--dry-run"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("a.txt`"));
+        .stdout(predicate::str::contains("a.txt").not())
+        .stdout(predicate::str::contains("│ 10 B  │ 20 B        │"));
     assert!(dirs.read_dst("a.txt").is_none());
+    let assert = dirs.mirror(&["--dry-run"]).arg("--json").assert().success();
+    let summary: serde_json::Value = serde_json::from_str(stdout(&assert).trim()).unwrap();
+    assert_eq!(
+        (summary["total"].as_u64(), summary["transferred"].as_u64()),
+        (Some(10), Some(20))
+    );
 }
 
 #[test]
@@ -247,11 +262,15 @@ fn mirror_time_filters() {
 fn mirror_json_output_uses_mc_fields() {
     let dirs = Dirs::new();
     let assert = dirs.mirror(&[]).arg("--json").assert().success();
-    let lines: Vec<serde_json::Value> = stdout(&assert)
+    let mut lines: Vec<serde_json::Value> = stdout(&assert)
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 3);
+    // The last document is mc's accounting summary.
+    let summary = lines.pop().unwrap();
+    assert_eq!(summary["total"], 10);
+    assert_eq!(summary["transferred"], 10);
     for line in &lines {
         assert_eq!(line["status"], "success");
         for field in [
@@ -275,7 +294,8 @@ fn mirror_json_output_uses_mc_fields() {
 
     write(&dirs.src.path().join("a.txt"), "alpha-changed");
     let assert = dirs.mirror(&[]).arg("--json").assert().success();
-    let error: serde_json::Value = serde_json::from_str(stdout(&assert).trim()).unwrap();
+    let out = stdout(&assert);
+    let error: serde_json::Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
     assert_eq!(error["status"], "error");
     assert!(
         error["error"]["cause"]["message"]
@@ -366,10 +386,12 @@ fn mirror_validates_source_and_flags() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Unable to stat source"));
-    dirs.mirror(&["--monitoring-address", "localhost:8081"])
+    dirs.mirror(&["--monitoring-address", "256.0.0.1:x"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not supported"));
+        .stderr(predicate::str::contains(
+            "Unable to setup monitoring endpoint.",
+        ));
     dirs.mirror(&["--older-than", "soon"])
         .assert()
         .failure()

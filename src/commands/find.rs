@@ -1,18 +1,18 @@
-use crate::commands::util::{format_print_time, glob_match, humanize_ibytes, key_depth};
+use crate::commands::util::{format_print_time, glob_match, humanize_ibytes};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
 use crate::flags::parse_size;
 use crate::flags::{TimeFilterFlags, VersionsFlag};
 use crate::location::{Location, parse_location};
-use crate::s3::{ListOptions, full_key, list_objects_with};
+use crate::s3::{ListOptions, S3ResultExt, list_objects_with};
 use anyhow::{Context, Result, anyhow, bail};
 use aws_sdk_s3::Client;
 use clap::Args;
 use regex::Regex;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Args)]
@@ -86,13 +86,11 @@ FORMAT:
   {url}     presigned URL valid for 7 days (S3 only)
   Wrap a keyword in quotes, e.g. {\"base\"}, to get a quoted value.";
 
-/// One listed object (or version / delete marker).
+/// One listed object (or version / delete marker), bucket or local file/folder.
 #[derive(Debug, Clone, Default)]
 struct Entry {
-    /// Path relative to the find target (used for matching and default output).
-    rel: String,
-    /// `ALIAS/BUCKET/KEY` or the local path (`{}`).
-    full: String,
+    /// mc `Key`: `ALIAS/BUCKET/KEY`, or the absolute local path (`{}`).
+    key: String,
     /// S3 bucket and key (None for local files).
     object: Option<(String, String)>,
     size: i64,
@@ -111,7 +109,6 @@ struct Matcher {
     time: TimeFilterFlags,
     larger: Option<u64>,
     smaller: Option<u64>,
-    maxdepth: Option<usize>,
     metadata: Vec<(String, Option<Regex>)>,
     tags: Vec<(String, Option<Regex>)>,
 }
@@ -138,18 +135,14 @@ impl Matcher {
             time: args.time.clone(),
             larger: size(&args.larger)?.filter(|v| *v > 0),
             smaller: size(&args.smaller)?.filter(|v| *v > 0),
-            maxdepth: args.maxdepth.filter(|v| *v > 0),
             metadata: parse_regex_map(&args.metadata, "--metadata")?,
             tags: parse_regex_map(&args.tags, "--tags")?,
         })
     }
 
-    /// mc `matchFind` without the metadata/tag checks.
-    fn matches(&self, entry: &Entry, now: SystemTime) -> bool {
-        let path = entry.rel.as_str();
-        if self.maxdepth.is_some_and(|max| key_depth(path) > max) {
-            return false;
-        }
+    /// mc `matchFind` without the metadata/tag checks. `path` is the key without the target
+    /// prefix ([`match_path`]).
+    fn matches(&self, entry: &Entry, path: &str, now: SystemTime) -> bool {
         if self.ignore.as_deref().is_some_and(|p| glob_match(p, path)) {
             return false;
         }
@@ -277,6 +270,49 @@ fn shell_match(pattern: &str, text: &str) -> bool {
     go(&p, &t)
 }
 
+/// The part of `key` that mc matches patterns against: the key without the target argument
+/// as typed (plus `/` unless it starts with `/`, a quirk of mc's `matchFind`). Local keys are
+/// absolute, so for a relative local target the whole absolute path is matched.
+fn match_path<'a>(target: &str, key: &'a str) -> &'a str {
+    let prefix = if target.starts_with('/') {
+        target.to_string()
+    } else {
+        format!("{target}/")
+    };
+    key.strip_prefix(&prefix).unwrap_or(key)
+}
+
+/// mc `trimSuffixAtMaxDepth`: with `--maxdepth N` mc does not filter but truncates each key to
+/// its first N components after the target argument (printing duplicates).
+fn trim_at_max_depth(target: &str, key: &str, max_depth: usize) -> String {
+    if max_depth == 0 {
+        return key.to_string();
+    }
+    let rest = key.strip_prefix(target).unwrap_or(key);
+    let kept: String = rest.split_inclusive('/').take(max_depth).collect();
+    format!("{target}{kept}")
+}
+
+/// Go `time.RFC3339Nano` in UTC (trailing zeros of the fraction trimmed).
+fn rfc3339_nano(time: SystemTime) -> String {
+    let since = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let base = aws_sdk_s3::primitives::DateTime::from_secs(since.as_secs() as i64)
+        .fmt(aws_sdk_s3::primitives::DateTimeFormat::DateTime)
+        .unwrap_or_default();
+    let nanos = since.subsec_nanos();
+    if nanos == 0 {
+        return base;
+    }
+    let fraction = format!("{nanos:09}");
+    format!(
+        "{}.{}Z",
+        base.trim_end_matches('Z'),
+        fraction.trim_end_matches('0')
+    )
+}
+
 /// Go `filepath.Base`.
 fn base_name(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
@@ -306,12 +342,12 @@ fn expand(
     let time = entry.modified.map(format_print_time).unwrap_or_default();
     let version = entry.version_id.clone().unwrap_or_default();
     let mut out = format
-        .replace("{}", &entry.full)
-        .replace("{\"\"}", &quote(&entry.full))
-        .replace("{base}", base_name(&entry.full))
-        .replace("{\"base\"}", &quote(base_name(&entry.full)))
-        .replace("{dir}", dir_name(&entry.full))
-        .replace("{\"dir\"}", &quote(dir_name(&entry.full)))
+        .replace("{}", &entry.key)
+        .replace("{\"\"}", &quote(&entry.key))
+        .replace("{base}", base_name(&entry.key))
+        .replace("{\"base\"}", &quote(base_name(&entry.key)))
+        .replace("{dir}", dir_name(&entry.key))
+        .replace("{\"dir\"}", &quote(dir_name(&entry.key)))
         .replace("{size}", &size)
         .replace("{\"size\"}", &quote(&size))
         .replace("{time}", &time)
@@ -334,12 +370,11 @@ enum Source {
         client: Client,
         /// None = all buckets of the alias.
         bucket: Option<String>,
+        /// Key prefix exactly as typed (mc lists `b/dir` with prefix `dir`, matching `dirx/`).
         prefix: Option<String>,
     },
-    Local {
-        root: PathBuf,
-        display: String,
-    },
+    /// Absolute local path.
+    Local(PathBuf),
 }
 
 impl Source {
@@ -352,82 +387,151 @@ impl Source {
                 prefix,
                 ..
             } => {
-                let buckets = match bucket {
-                    Some(bucket) => vec![bucket.clone()],
-                    None => rt
-                        .block_on(crate::s3::list::list_buckets(client))?
-                        .into_iter()
-                        .filter_map(|item| match item {
-                            crate::s3::S3ListItem::Bucket { name, .. } => Some(name),
-                            _ => None,
-                        })
-                        .collect(),
-                };
-                let options = ListOptions {
-                    recursive: true,
-                    versions,
-                    ..Default::default()
-                };
                 let mut entries = Vec::new();
-                for name in buckets {
-                    let items = rt.block_on(list_objects_with(
-                        client,
-                        &name,
-                        prefix.as_deref(),
-                        &options,
-                    ))?;
-                    for item in items {
-                        if item.is_prefix || item.storage_class.as_deref() == Some("GLACIER") {
-                            continue;
-                        }
-                        let key = full_key(prefix.as_deref().unwrap_or_default(), &item.key);
-                        let rel = if bucket.is_some() {
-                            item.key
-                        } else {
-                            format!("{name}/{}", item.key)
-                        };
+                let Some(bucket) = bucket else {
+                    // Alias root: each bucket, then its objects.
+                    let buckets = rt.block_on(client.list_buckets().send()).s3("", "")?;
+                    for bucket in buckets.buckets() {
+                        let name = bucket.name().unwrap_or_default();
                         entries.push(Entry {
-                            rel,
-                            full: format!("{alias_name}/{name}/{key}"),
-                            object: Some((name.clone(), key)),
-                            size: item.size,
-                            modified: item.last_modified,
-                            version_id: item.version_id,
-                            is_delete_marker: item.is_delete_marker,
+                            key: format!("{alias_name}/{name}"),
+                            modified: bucket.creation_date().and_then(crate::s3::to_system_time),
+                            ..Default::default()
                         });
+                        entries.extend(
+                            rt.block_on(list_objects(client, alias_name, name, None, versions))?,
+                        );
                     }
+                    return Ok(entries);
+                };
+                rt.block_on(list_objects(
+                    client,
+                    alias_name,
+                    bucket,
+                    prefix.as_deref(),
+                    versions,
+                ))
+            }
+            Source::Local(root) => {
+                let root_key = root.to_string_lossy().into_owned();
+                let meta = std::fs::metadata(root)
+                    .map_err(|error| crate::error::io_error(&error, &root_key))?;
+                let mut entries = vec![local_entry(root_key.clone(), &meta)];
+                if meta.is_dir() {
+                    walk_local(root, &root_key, &mut entries);
                 }
                 Ok(entries)
             }
-            Source::Local { root, display } => {
-                if root.is_file() {
-                    let meta = root.metadata()?;
-                    return Ok(vec![Entry {
-                        rel: base_name(display).to_string(),
-                        full: display.clone(),
-                        size: meta.len() as i64,
-                        modified: meta.modified().ok(),
-                        ..Default::default()
-                    }]);
-                }
-                let base = if display.ends_with('/') {
-                    display.clone()
-                } else {
-                    format!("{display}/")
-                };
-                crate::transfer::local_inventory(root)?
-                    .into_iter()
-                    .map(|item| {
-                        Ok(Entry {
-                            full: format!("{base}{}", item.relative),
-                            modified: std::fs::metadata(&item.path)?.modified().ok(),
-                            rel: item.relative,
-                            size: item.size as i64,
-                            ..Default::default()
-                        })
-                    })
-                    .collect()
-            }
+        }
+    }
+}
+
+/// Recursive S3 listing of `bucket` under the raw `prefix`, keys as `ALIAS/BUCKET/KEY`.
+/// GLACIER objects are skipped like mc.
+async fn list_objects(
+    client: &Client,
+    alias_name: &str,
+    bucket: &str,
+    prefix: Option<&str>,
+    versions: bool,
+) -> Result<Vec<Entry>> {
+    let items = if versions {
+        // Version listings take a folder prefix: list the parent folder and filter.
+        let prefix = prefix.unwrap_or_default();
+        let parent = &prefix[..prefix.rfind('/').map_or(0, |i| i + 1)];
+        let options = ListOptions {
+            recursive: true,
+            versions: true,
+            ..Default::default()
+        };
+        list_objects_with(
+            client,
+            bucket,
+            Some(parent).filter(|p| !p.is_empty()),
+            &options,
+        )
+        .await?
+        .into_iter()
+        .map(|mut item| {
+            item.key = format!("{parent}{}", item.key);
+            item
+        })
+        .filter(|item| !item.is_prefix && item.key.starts_with(prefix))
+        .collect()
+    } else {
+        let mut pages = client
+            .list_objects_v2()
+            .bucket(bucket)
+            .set_prefix(prefix.map(str::to_string))
+            .into_paginator()
+            .send();
+        let mut items = Vec::new();
+        while let Some(page) = pages.next().await {
+            let page = page.s3(bucket, "")?;
+            items.extend(page.contents().iter().map(|object| crate::s3::ObjectInfo {
+                key: object.key().unwrap_or_default().to_string(),
+                size: object.size().unwrap_or(0),
+                last_modified: object.last_modified().and_then(crate::s3::to_system_time),
+                storage_class: object.storage_class().map(|c| c.as_str().to_string()),
+                ..Default::default()
+            }));
+        }
+        items
+    };
+    Ok(items
+        .into_iter()
+        .filter(|item| item.storage_class.as_deref() != Some("GLACIER"))
+        .map(|item| Entry {
+            key: format!("{alias_name}/{bucket}/{}", item.key),
+            object: Some((bucket.to_string(), item.key)),
+            size: item.size,
+            modified: item.last_modified,
+            version_id: item.version_id,
+            is_delete_marker: item.is_delete_marker,
+        })
+        .collect())
+}
+
+fn local_entry(key: String, meta: &std::fs::Metadata) -> Entry {
+    Entry {
+        key,
+        size: meta.len() as i64,
+        modified: meta.modified().ok(),
+        ..Default::default()
+    }
+}
+
+/// mc's local listing: folders (listed before their contents) and files, sorted by name with
+/// folders compared as `name/`. Symlinks are listed but not followed into; unreadable folders
+/// are reported (mc "Unable to list folder.") and skipped.
+fn walk_local(dir: &Path, dir_key: &str, entries: &mut Vec<Entry>) {
+    let items = match std::fs::read_dir(dir) {
+        Ok(items) => items,
+        Err(error) => {
+            let error = anyhow::Error::from(crate::error::io_error(&error, dir_key));
+            crate::output::print_error(
+                &error.context(crate::error::nonfatal("Unable to list folder.")),
+            );
+            return;
+        }
+    };
+    let mut children: Vec<(String, PathBuf, bool)> = items
+        .filter_map(|item| item.ok())
+        .map(|item| {
+            let name = item.file_name().to_string_lossy().into_owned();
+            let is_dir = item.file_type().is_ok_and(|t| t.is_dir());
+            let sort = if is_dir { format!("{name}/") } else { name };
+            (sort, item.path(), is_dir)
+        })
+        .collect();
+    children.sort();
+    for (sort, path, is_dir) in children {
+        let key = format!("{dir_key}/{}", sort.trim_end_matches('/'));
+        let meta = std::fs::metadata(&path).or_else(|_| std::fs::symlink_metadata(&path));
+        let Ok(meta) = meta else { continue };
+        entries.push(local_entry(key.clone(), &meta));
+        if is_dir {
+            walk_local(&path, &key, entries);
         }
     }
 }
@@ -435,19 +539,23 @@ impl Source {
 #[derive(Debug, Serialize)]
 struct FindMessage<'a> {
     status: &'static str,
-    key: &'a str,
+    /// mc leaves the content type empty for find results.
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(rename = "lastModified")]
+    last_modified: String,
     size: i64,
-    #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
-    last_modified: Option<String>,
+    key: &'a str,
+    etag: &'static str,
     #[serde(rename = "versionId", skip_serializing_if = "Option::is_none")]
     version_id: Option<&'a str>,
-    #[serde(rename = "isDeleteMarker", skip_serializing_if = "std::ops::Not::not")]
-    is_delete_marker: bool,
 }
 
 struct Finder<'a> {
     args: &'a FindArgs,
     matcher: Matcher,
+    /// The target argument as typed (`.` becomes `./`, like mc).
+    target: String,
     source: Source,
     rt: tokio::runtime::Runtime,
     json: bool,
@@ -455,36 +563,35 @@ struct Finder<'a> {
 
 impl Finder<'_> {
     fn handle(&self, entry: &Entry, now: SystemTime) -> Result<()> {
-        if !self.matcher.matches(entry, now) || !self.details_match(entry)? {
+        let mut entry = entry.clone();
+        entry.key = trim_at_max_depth(&self.target, &entry.key, self.args.maxdepth.unwrap_or(0));
+        let path = match_path(&self.target, &entry.key);
+        if !self.matcher.matches(&entry, path, now) || !self.details_match(&entry)? {
             return Ok(());
         }
         let mut url = |entry: &Entry| self.share_url(entry);
         if let Some(command) = &self.args.exec {
-            return run_exec(command, entry, &mut url);
+            return run_exec(command, &entry, &mut url);
         }
-        let text = match &self.args.print {
-            Some(format) => expand(format, entry, &mut url)?,
-            None => entry.rel.clone(),
+        let key = match &self.args.print {
+            Some(format) => expand(format, &entry, &mut url)?,
+            None => entry.key.clone(),
         };
+        let version = entry.version_id.as_deref().filter(|v| !v.is_empty());
         if self.json {
             crate::output::print_json(&FindMessage {
                 status: "success",
-                key: &text,
+                kind: "",
+                last_modified: entry.modified.map(rfc3339_nano).unwrap_or_default(),
                 size: entry.size,
-                last_modified: entry.modified.map(|t| {
-                    crate::s3::from_system_time(t)
-                        .fmt(aws_sdk_s3::primitives::DateTimeFormat::DateTime)
-                        .unwrap_or_default()
-                }),
-                version_id: entry.version_id.as_deref(),
-                is_delete_marker: entry.is_delete_marker,
+                key: &key,
+                etag: "",
+                version_id: version,
             })?;
-        } else if self.args.print.is_none()
-            && let Some(version) = &entry.version_id
-        {
-            println!("{text} ({version})");
+        } else if let Some(version) = version {
+            println!("{key} ({version})");
         } else {
-            println!("{text}");
+            println!("{key}");
         }
         Ok(())
     }
@@ -586,16 +693,15 @@ fn open_source(store: &ConfigStore, input: &str, rt: &tokio::runtime::Runtime) -
                 client,
                 alias: Box::new(alias),
                 bucket: target.bucket.clone(),
-                prefix: target.key_with_trailing_slash(),
+                prefix: target.key.clone().filter(|key| !key.is_empty()),
             })
         }
         Location::Local(root) => {
             super::util::stat_target(store, input)
                 .with_context(|| format!("Unable to stat `{input}`."))?;
-            Ok(Source::Local {
-                root,
-                display: input.to_string(),
-            })
+            Ok(Source::Local(PathBuf::from(crate::error::abs_path(
+                &root.to_string_lossy(),
+            ))))
         }
     }
 }
@@ -605,7 +711,7 @@ pub fn run(args: FindArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let rt = runtime()?;
     let source = open_source(&store, &args.target, &rt)?;
-    if let Source::Local { .. } = source {
+    if let Source::Local(_) = source {
         if args.versions.versions {
             bail!("--versions is only supported for S3 targets");
         }
@@ -613,9 +719,15 @@ pub fn run(args: FindArgs, json: bool) -> Result<()> {
             bail!("--metadata and --tags are only supported for S3 targets");
         }
     }
+    let target = if args.target == "." {
+        "./".to_string()
+    } else {
+        args.target.clone()
+    };
     let finder = Finder {
         args: &args,
         matcher,
+        target,
         source,
         rt,
         json,
@@ -626,7 +738,7 @@ pub fn run(args: FindArgs, json: bool) -> Result<()> {
         let now = SystemTime::now();
         for entry in finder.source.list(&finder.rt, args.versions.versions)? {
             let identity = (
-                entry.full.clone(),
+                entry.key.clone(),
                 entry.version_id.clone(),
                 entry.modified,
                 entry.size,
@@ -648,8 +760,7 @@ mod tests {
 
     fn entry(rel: &str, size: i64) -> Entry {
         Entry {
-            rel: rel.into(),
-            full: format!("play/bucket/{rel}"),
+            key: format!("play/bucket/{rel}"),
             object: Some(("bucket".into(), rel.into())),
             size,
             modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_704_164_645)),
@@ -679,21 +790,61 @@ mod tests {
             regex: Some(Regex::new(r"\.txt$").unwrap()),
             larger: Some(10),
             smaller: Some(100),
-            maxdepth: Some(2),
             time: TimeFilterFlags {
                 older_than: Some("1d".into()),
                 newer_than: None,
             },
             ..Default::default()
         };
-        assert!(matcher.matches(&entry("dir/a.txt", 50), now));
-        assert!(!matcher.matches(&entry("dir/a.log", 50), now));
-        assert!(!matcher.matches(&entry("other/a.txt", 50), now));
-        assert!(!matcher.matches(&entry("dir/a.txt", 10), now));
-        assert!(!matcher.matches(&entry("dir/a.txt", 100), now));
-        assert!(!matcher.matches(&entry("dir/sub/a.txt", 50), now));
+        let matches = |rel: &str, size: i64, now: SystemTime| {
+            let entry = entry(rel, size);
+            matcher.matches(&entry, match_path("play/bucket", &entry.key), now)
+        };
+        assert!(matches("dir/a.txt", 50, now));
+        assert!(matches("dir/sub/a.txt", 50, now));
+        assert!(!matches("dir/a.log", 50, now));
+        assert!(!matches("other/a.txt", 50, now));
+        assert!(!matches("dir/a.txt", 10, now));
+        assert!(!matches("dir/a.txt", 100, now));
         let recent = SystemTime::UNIX_EPOCH + Duration::from_secs(1_704_164_645 + 60);
-        assert!(!matcher.matches(&entry("dir/a.txt", 50), recent));
+        assert!(!matches("dir/a.txt", 50, recent));
+    }
+
+    #[test]
+    fn match_path_and_max_depth_follow_mc_quirks() {
+        assert_eq!(match_path("play/b", "play/b/dir/x"), "dir/x");
+        // A trailing slash on the target is not trimmed (mc checks the prefix, not the suffix).
+        assert_eq!(match_path("play/b/", "play/b/dir/x"), "play/b/dir/x");
+        // Local keys are absolute: relative targets never match, absolute ones keep a `/`.
+        assert_eq!(match_path("src", "/w/src/a"), "/w/src/a");
+        assert_eq!(match_path("/w/src", "/w/src/a"), "/a");
+        assert_eq!(
+            trim_at_max_depth("play/b", "play/b/dir/sub/c", 0),
+            "play/b/dir/sub/c"
+        );
+        assert_eq!(
+            trim_at_max_depth("play/b", "play/b/dir/sub/c", 1),
+            "play/b/"
+        );
+        assert_eq!(
+            trim_at_max_depth("play/b", "play/b/dir/sub/c", 2),
+            "play/b/dir/"
+        );
+        assert_eq!(
+            trim_at_max_depth("play/b", "play/b/a.txt", 2),
+            "play/b/a.txt"
+        );
+        assert_eq!(trim_at_max_depth("/w/o", "/w/o", 2), "/w/o");
+    }
+
+    #[test]
+    fn formats_rfc3339_nano() {
+        let at = SystemTime::UNIX_EPOCH + Duration::new(1_704_164_645, 868_000_000);
+        assert_eq!(rfc3339_nano(at), "2024-01-02T03:04:05.868Z");
+        let at = SystemTime::UNIX_EPOCH + Duration::new(1_704_164_645, 60_238_938);
+        assert_eq!(rfc3339_nano(at), "2024-01-02T03:04:05.060238938Z");
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_704_164_645);
+        assert_eq!(rfc3339_nano(at), "2024-01-02T03:04:05Z");
     }
 
     #[test]

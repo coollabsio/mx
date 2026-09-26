@@ -3,6 +3,7 @@
 
 use crate::commands::retention::{LockTarget, print_json};
 use crate::commands::runtime;
+use crate::error::McError;
 use crate::s3::ObjectInfo;
 use crate::s3::lock;
 use anyhow::{Context, Result, bail};
@@ -53,22 +54,26 @@ impl UndoMessage<'_> {
     }
 }
 
+/// mc `parseUndoSyntax`: usage errors carry mc's invalid-argument cause.
 fn parse_action(args: &UndoArgs) -> Result<Option<String>> {
+    let invalid = |message: &'static str| Err(McError::invalid_argument()).context(message);
     if args.last < 1 {
-        bail!("--last value should be a positive integer");
+        return invalid("--last value should be a positive integer");
     }
     if args.recursive && !args.force {
-        bail!("This is a dangerous operation, you need to provide --force flag as well");
+        return invalid("This is a dangerous operation, you need to provide --force flag as well");
     }
     let action = args.action.as_deref().map(str::to_ascii_uppercase);
     match action.as_deref() {
         None | Some("PUT") | Some("DELETE") => {}
-        Some(_) => bail!(
-            "unsupported action specified, supported actions are PUT, DELETE or empty (default)"
-        ),
+        Some(_) => {
+            return invalid(
+                "unsupported action specified, supported actions are PUT, DELETE or empty (default)",
+            );
+        }
     }
     if action.is_some() && args.last != 1 {
-        bail!("--action if specified requires that you must specify --last=1");
+        return invalid("--action if specified requires that you must specify --last=1");
     }
     Ok(action)
 }

@@ -20,8 +20,9 @@ use aws_smithy_runtime_api::client::interceptors::context::{
 };
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::config_bag::{Storable, StoreReplace};
+use aws_smithy_types::timeout::TimeoutConfig;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Builds an S3 client for an alias. Cheap enough per command, but reuse the returned client
 /// for bulk operations (`Client` is `Clone` and shares its connection pool).
@@ -48,7 +49,11 @@ pub async fn build_client(alias: &AliasConfig) -> Result<Client> {
     let shared_config = loader.load().await;
 
     let force_path_style = force_path_style(alias)?;
-    let config = aws_sdk_s3::config::Builder::from(&shared_config)
+    let mut builder = aws_sdk_s3::config::Builder::from(&shared_config);
+    if let Some(timeouts) = conn_deadline_timeouts(shared_config.timeout_config()) {
+        builder = builder.timeout_config(timeouts);
+    }
+    let config = builder
         .endpoint_url(alias.url.clone())
         .force_path_style(force_path_style)
         .request_checksum_calculation(aws_sdk_s3::config::RequestChecksumCalculation::WhenRequired)
@@ -58,6 +63,32 @@ pub async fn build_client(alias: &AliasConfig) -> Result<Client> {
         .build();
 
     Ok(Client::from_conf(config))
+}
+
+static CONN_DEADLINES: OnceLock<(Option<Duration>, Option<Duration>)> = OnceLock::new();
+
+/// Stores mc's hidden `--conn-read-deadline` / `--conn-write-deadline` (0 = no deadline).
+pub fn set_conn_deadlines(read: Option<Duration>, write: Option<Duration>) {
+    let positive = |value: Option<Duration>| value.filter(|d| !d.is_zero());
+    let _ = CONN_DEADLINES.set((positive(read), positive(write)));
+}
+
+/// mc sets per-read/per-write socket deadlines; the SDK has no per-I/O deadline, so the read
+/// deadline bounds the wait for each response (SDK read timeout) and the write deadline bounds
+/// connection setup (SDK connect timeout). None when neither flag is set (SDK defaults).
+fn conn_deadline_timeouts(base: Option<&TimeoutConfig>) -> Option<TimeoutConfig> {
+    let (read, write) = CONN_DEADLINES.get().copied().unwrap_or_default();
+    if read.is_none() && write.is_none() {
+        return None;
+    }
+    let mut builder = base.map(TimeoutConfig::to_builder).unwrap_or_default();
+    if let Some(read) = read {
+        builder = builder.read_timeout(read);
+    }
+    if let Some(write) = write {
+        builder = builder.connect_timeout(write);
+    }
+    Some(builder.build())
 }
 
 /// Picks the HTTP client for the global flags: the SDK default unless `--resolve` pins this

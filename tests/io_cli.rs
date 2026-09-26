@@ -344,41 +344,54 @@ fn find_lines(home: &Path, args: &[&str]) -> Vec<String> {
     lines
 }
 
+/// mc prints absolute local keys (folders included) and matches patterns against the key
+/// without the target as typed; lines here are shown relative to the absolute root.
 #[test]
 fn find_filters_local_trees() {
     let dir = find_tree();
     let home = dir.path();
     let root = dir.path().join("data");
     let r = path(&root);
+    let find = |args: &[&str]| -> Vec<String> {
+        let mut full = vec![r];
+        full.extend_from_slice(args);
+        find_lines(home, &full)
+            .iter()
+            .map(|line| line.strip_prefix(r).unwrap_or(line).to_string())
+            .collect()
+    };
     assert_eq!(
-        find_lines(home, &[r, "--name", "*.txt"]),
-        ["a.txt", "logs/old/app.txt"]
+        find(&[]),
+        [
+            "",
+            "/a.txt",
+            "/big.bin",
+            "/logs",
+            "/logs/app.log",
+            "/logs/old",
+            "/logs/old/app.txt"
+        ]
+    );
+    assert_eq!(find(&["--name", "*.txt"]), ["/a.txt", "/logs/old/app.txt"]);
+    assert_eq!(
+        find(&["--name", "logs"]),
+        ["/logs", "/logs/app.log", "/logs/old", "/logs/old/app.txt"]
     );
     assert_eq!(
-        find_lines(home, &[r, "--name", "logs"]),
-        ["logs/app.log", "logs/old/app.txt"]
+        find(&["--path", "/logs/*"]),
+        ["/logs/app.log", "/logs/old", "/logs/old/app.txt"]
     );
-    assert_eq!(
-        find_lines(home, &[r, "--path", "logs/*"]),
-        ["logs/app.log", "logs/old/app.txt"]
-    );
-    assert_eq!(
-        find_lines(home, &[r, "--ignore", "*.txt"]),
-        ["big.bin", "logs/app.log"]
-    );
-    assert_eq!(
-        find_lines(home, &[r, "--regex", r"^logs/.*\.log$"]),
-        ["logs/app.log"]
-    );
-    assert_eq!(find_lines(home, &[r, "--larger", "1KiB"]), ["big.bin"]);
-    assert_eq!(find_lines(home, &[r, "--smaller", "2"]), ["a.txt"]);
-    assert_eq!(
-        find_lines(home, &[r, "--maxdepth", "1"]),
-        ["a.txt", "big.bin"]
-    );
-    assert_eq!(find_lines(home, &[r, "--maxdepth", "0"]).len(), 4);
-    assert_eq!(find_lines(home, &[r, "--newer-than", "1d"]).len(), 4);
-    assert!(find_lines(home, &[r, "--older-than", "1d"]).is_empty());
+    assert_eq!(find(&["--ignore", "*o*"]), ["", "/a.txt", "/big.bin"]);
+    assert_eq!(find(&["--regex", r"^/logs/.*\.log$"]), ["/logs/app.log"]);
+    assert_eq!(find(&["--larger", "1KiB", "--name", "*.bin"]), ["/big.bin"]);
+    assert_eq!(find(&["--smaller", "2"]), ["/a.txt"]);
+    // mc truncates keys to the depth instead of filtering.
+    let depth = find(&["--maxdepth", "2", "--name", "*.*"]);
+    assert_eq!(depth, ["/a.txt", "/big.bin"]);
+    assert!(find(&["--maxdepth", "2"]).contains(&"/logs/".to_string()));
+    assert_eq!(find(&["--maxdepth", "0"]).len(), 7);
+    assert_eq!(find(&["--newer-than", "1d"]).len(), 7);
+    assert!(find(&["--older-than", "1d"]).is_empty());
 }
 
 #[test]
@@ -428,8 +441,9 @@ fn find_print_and_exec_on_local_trees() {
         .unwrap();
     let message: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(message["status"], "success");
-    assert_eq!(message["key"], "a.txt");
+    assert_eq!(message["key"], format!("{r}/a.txt"));
     assert_eq!(message["size"], 1);
+    assert_eq!(message["etag"], "");
 }
 
 #[test]
@@ -486,5 +500,5 @@ fn find_watch_reports_new_local_files() {
     }
     child.kill().unwrap();
     child.wait().unwrap();
-    assert_eq!(seen.as_deref(), Some("fresh.new"));
+    assert_eq!(seen, Some(format!("{}/fresh.new", path(&root))));
 }

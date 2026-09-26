@@ -555,10 +555,18 @@ fn live_find_filters_print_exec_and_watch() {
     pipe(&live, &[], &live.url("docs/deep/c.txt"), "0123456789");
     pipe(&live, &[], &live.url(&unique), "u");
     let bucket = live.bucket_target();
-    let find = |args: &[&str]| {
+    // mc prints `alias/bucket/key`; compare the keys.
+    let find = |args: &[&str]| -> Vec<String> {
         let mut all = vec!["find", bucket.as_str()];
         all.extend_from_slice(args);
         sorted_lines(&live, &all)
+            .iter()
+            .map(|line| {
+                line.strip_prefix(&format!("{bucket}/"))
+                    .unwrap_or(line)
+                    .to_string()
+            })
+            .collect()
     };
 
     assert_eq!(
@@ -586,11 +594,14 @@ fn live_find_filters_print_exec_and_watch() {
     );
     assert_eq!(find(&["--tags", "env=^prod$"]), ["a.txt"]);
     assert!(find(&["--tags", "env=dev"]).is_empty());
+    // `--maxdepth` truncates keys like mc instead of filtering.
+    assert_eq!(
+        find(&["--maxdepth", "2", "--name", "docs"]),
+        ["docs/", "docs/"]
+    );
     assert_eq!(
         find(&["--name", "c.txt", "--print", "{} {base} {dir} {size}"]),
-        [format!(
-            "{bucket}/docs/deep/c.txt c.txt {bucket}/docs/deep 10 B"
-        )]
+        [format!("docs/deep/c.txt c.txt {bucket}/docs/deep 10 B")]
     );
     let url = find(&["--name", "b.log", "--print", "{url}"]);
     assert!(url[0].starts_with("http"), "{url:?}");
@@ -602,11 +613,11 @@ fn live_find_filters_print_exec_and_watch() {
     // Prefix target and alias-wide search.
     assert_eq!(
         sorted_lines(&live, &["find", &live.url("docs/"), "--name", "*.txt"]),
-        ["deep/c.txt"]
+        [format!("{bucket}/docs/deep/c.txt")]
     );
     assert_eq!(
         sorted_lines(&live, &["find", &live.alias, "--name", &unique]),
-        [format!("{}/{unique}", live.bucket)]
+        [format!("{bucket}/{unique}")]
     );
 
     // --versions
@@ -620,14 +631,21 @@ fn live_find_filters_print_exec_and_watch() {
     let base = format!("{}/{versioned}", live.alias);
     let lines = sorted_lines(&live, &["find", &base, "--versions"]);
     assert_eq!(lines.len(), 2, "{lines:?}");
-    assert!(lines.iter().all(|l| l.starts_with("v.txt (")));
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.starts_with(&format!("{base}/v.txt (")))
+    );
     let ids = sorted_lines(
         &live,
         &["find", &base, "--versions", "--print", "{version}"],
     );
     assert_eq!(ids.len(), 2);
     assert_ne!(ids[0], ids[1]);
-    assert_eq!(sorted_lines(&live, &["find", &base]), ["v.txt"]);
+    assert_eq!(
+        sorted_lines(&live, &["find", &base]),
+        [format!("{base}/v.txt")]
+    );
 
     // --watch
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("mx"))
@@ -654,5 +672,5 @@ fn live_find_filters_print_exec_and_watch() {
     }
     child.kill().unwrap();
     child.wait().unwrap();
-    assert_eq!(seen.as_deref(), Some("later/x.new"));
+    assert_eq!(seen, Some(format!("{bucket}/later/x.new")));
 }

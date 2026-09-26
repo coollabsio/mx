@@ -23,11 +23,11 @@ server support that varies between S3-compatible servers.
 | `pipe` | Supported | Bounded-memory multipart upload. `--storage-class`, `--attr`, `--tags`, `--concurrent`, `--part-size`, `--checksum`, SSE flags. Global `-q`. |
 | `cp`, `mv` | Supported | Follow mc rules for multiple sources and `-r` in every direction: local↔S3, S3→S3 (also across servers), and local→local. Flags: `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--tags`, `--checksum`, `--disable-multipart`, `-a/--preserve` (mc-attrs), `--enc-c/--enc-s3/--enc-kms`, `--rewind`, `--version-id`, `--legal-hold`, `--retention-mode/--retention-duration`, `--zip`, `--max-workers` (`--rewind`, `--version-id`, `--legal-hold`, `--retention-*`, `--zip`, and `--max-workers` are `cp` only). Objects larger than 5 GiB use server-side multipart copy. They show a progress bar on a TTY. Otherwise they print mc's `` `SRC` -> `TGT` `` lines and a summary. |
 | `rm` | Supported | Takes multiple targets. `-r --force`, `--versions`, `--version-id`, `--non-current`, `--rewind`, `--dangerous`, `-I`, `--dry-run`, `--stdin`, `--older-than`, `--newer-than`, `--bypass`, `--purge`. Output lines and JSON match mc. |
-| `mirror` | Supported | Works in every direction, including from or to an alias root. Uses mc's change detection. `--overwrite`, `--remove`, `--dry-run`, `-w/--watch` (polling rescan), `--region`, `-a`, `--active-active`, `--disable-multipart`, `--exclude`, `--exclude-bucket`, `--exclude-storageclass`, `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--retry`, `--summary`, `--skip-errors`, `--max-workers`, `--checksum`, SSE flags. `--monitoring-address` is not supported. |
+| `mirror` | Supported | Works in every direction, including from or to an alias root. Uses mc's change detection. `--overwrite`, `--remove`, `--dry-run`, `-w/--watch` (polling rescan), `--region`, `-a`, `--active-active`, `--disable-multipart`, `--exclude`, `--exclude-bucket`, `--exclude-storageclass`, `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--retry`, `--summary`, `--skip-errors`, `--max-workers`, `--checksum`, SSE flags, `--monitoring-address` (Prometheus `/metrics` with mc's `mc_mirror_*` metrics; no Go runtime metrics). Output matches mc: `SRC -> TGT` lines (initial-pass removals print `` `` -> `TGT` ``), no per-object lines with `--dry-run`, and the `Total/Transferred/Duration/Speed` summary (table or JSON document) at the end of every non-watch run; errors use endpoint URLs like mc. Content-type guessing for local uploads is pending. |
 | `du` | Supported | `-r`, `-d`, `--versions`, `--rewind`. S3 aliases and local paths. |
 | `tree` | Supported | `-f`, `-d`, `--rewind`. |
-| `find` | Supported | Supports every mc flag, including `--exec`, `--print`, `--larger`, `--smaller`, `--metadata`, `--tags`, `--watch` (polling), `--versions`. Paths are relative by default. |
-| `diff` | Supported | S3 aliases and local paths. |
+| `find` | Supported | Supports every mc flag, including `--exec`, `--print`, `--larger`, `--smaller`, `--metadata`, `--tags`, `--watch` (polling), `--versions`. Prints mc keys (`alias/bucket/key`, absolute local paths including folders) and mc's JSON (`type`/`etag` empty); patterns match the key minus the target as typed and `--maxdepth` truncates keys, like mc. |
+| `diff` | Supported | S3 aliases and local paths. mc output: `< FIRST_URL`, `> SECOND_URL`, `! SECOND_URL` (size differs or first is newer) with endpoint URLs / absolute paths, and `--json` `{first,second,diff}`. |
 | `share download`, `upload`, `list` | Supported | `-r`, `--version-id`, `-E/--expire` (default `168h`), `-T`. `upload` prints a `curl` command with a POST policy. `list` uses mc's share database in `<config dir>/share/`. |
 | `tag set`, `list`, `remove` | Supported | Object and bucket tags. `--version-id`, `--rewind`, `--versions`, `-r`, `--exclude-folders`. |
 | `version enable`, `suspend`, `info` | Supported | `--excluded-prefixes`, `--exclude-folders` (MinIO). |
@@ -38,8 +38,8 @@ server support that varies between S3-compatible servers.
 | `retention set`, `clear`, `info` | Supported | Object and bucket default retention (`--default`). `-r`, `--versions`, `--version-id`, `--rewind`, `--bypass`. |
 | `legalhold set`, `clear`, `info` | Supported | Object legal hold. Works recursively and on versions. |
 | `event add`, `rm`, `ls` | Supported | Bucket notifications. `--event`, `--prefix`, `--suffix`, `-p`. `rm --force` removes all notifications. |
-| `undo` | Supported | `-r --force`, `--last`, `--action`, `--dry-run`. |
-| `od` | Supported | Single-stream upload and download measurement. |
+| `undo` | Supported | `-r --force`, `--last`, `--action`, `--dry-run`. mc output and errors. |
+| `od` | Supported | Single-stream upload and download measurement. mc output and errors (local sources shown as absolute paths). |
 | `quota set`, `info`, `clear` | Supported | MinIO admin API. |
 | `replicate add`, `update`, `ls`, `status`, `resync`, `export`, `import`, `rm`, `backlog` | Partial | MinIO admin API. The text output of `status` and `backlog` is simplified. |
 | `ping` | Supported | Uses the health endpoint. `-c`, `-e`, `-x/--exit`, `-i`. Runs until interrupted when `-c` is not given. `-a/--distributed` and `--node` need the admin API and are not supported. |
@@ -90,7 +90,10 @@ server support that varies between S3-compatible servers.
 - `-v` / `--version` (and `-V`) print `PROG version X (commit-id=SHA)` plus
   `Runtime:` and license lines, like mc.
 
-`--conn-read-deadline` and `--conn-write-deadline` are not supported.
+Hidden `--conn-read-deadline` and `--conn-write-deadline` (Go durations such as `10m`)
+are accepted. mc sets per-read/per-write socket deadlines; the SDK has no per-I/O deadline,
+so `mx` applies the read deadline as the S3 read timeout (time until a response arrives)
+and the write deadline as the connect timeout. Without the flags the SDK defaults apply.
 
 ## Intentional differences from mc
 
@@ -99,11 +102,12 @@ server support that varies between S3-compatible servers.
 - `rm` output now matches mc's lines and JSON. This is a breaking change from
   earlier `mx` output.
 - `mv -r` removes local source directories that it empties. mc leaves them.
-- `mirror --dry-run` prints the planned lines. `mirror --summary` prints a
-  summary only when you ask for it.
+- `mirror` on a terminal prints the same lines and summary as mc does without a
+  terminal (or with `-q`); mc shows a progress bar there instead.
 - `mirror -w` and `find --watch` rescan by polling. They do not use event
   notifications.
-- `find` prints relative paths by default.
+- `find` on a local file prints the file only; mc also prints a `readdirent ...:
+  not a directory` error and exits 1.
 - `stat`, `ls --versions`, and similar output show dates in UTC.
 
 ## Remaining gaps

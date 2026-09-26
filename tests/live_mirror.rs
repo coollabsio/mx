@@ -63,7 +63,7 @@ fn head(
     })
 }
 
-fn wait_for(check: impl Fn() -> bool) -> bool {
+fn wait_for(mut check: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
         if check() {
@@ -95,7 +95,9 @@ fn live_mirror_local_to_s3_overwrite_remove_dry_run() {
         .args(["mirror", "--dry-run", &src_path, &target])
         .assert()
         .success()
-        .stdout(predicate::str::contains("a.txt`"));
+        // Like mc: no per-object lines, only the summary (dry-run doubles `Transferred`).
+        .stdout(predicate::str::contains("a.txt").not())
+        .stdout(predicate::str::contains("│ Total │ Transferred │"));
     assert!(cat(&live, &live.url("backup/a.txt")).is_none());
 
     live.cmd()
@@ -116,12 +118,13 @@ fn live_mirror_local_to_s3_overwrite_remove_dry_run() {
     );
     assert!(cat(&live, &live.url("backup/skip.tmp")).is_none());
 
-    // Unchanged: nothing to do.
+    // Unchanged: nothing to do (only the summary table).
     live.cmd()
         .args(["mirror", "--exclude", "*.tmp", &src_path, &target])
         .assert()
         .success()
-        .stdout(predicate::str::is_empty());
+        .stdout(predicate::str::contains(" -> ").not())
+        .stdout(predicate::str::contains("│ 0 B   │ 0 B         │"));
 
     // Changed size without --overwrite: reported, target untouched.
     write(&src.path().join("a.txt"), "alpha-v2");
@@ -154,14 +157,15 @@ fn live_mirror_local_to_s3_overwrite_remove_dry_run() {
         .args(["mirror", "--remove", "--dry-run", &src_path, &target])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Removed `"));
+        .stdout(predicate::str::contains(" -> ").not());
     assert!(cat(&live, &live.url("backup/nested/b.txt")).is_some());
     live.cmd()
         .args(["mirror", "--remove", &src_path, &target])
         .assert()
         .success()
+        // mc prints initial-pass removals without an event type: `` -> `TARGET`.
         .stdout(predicate::str::contains(format!(
-            "Removed `{}`",
+            "`` -> `{}`",
             live.url("backup/nested/b.txt")
         )));
     assert!(cat(&live, &live.url("backup/nested/b.txt")).is_none());
@@ -308,7 +312,7 @@ fn live_mirror_s3_to_s3_same_and_cross_server() {
             .args([&live.bucket_target(), &filtered_target])
             .assert()
             .success()
-            .stdout(predicate::str::is_empty());
+            .stdout(predicate::str::contains(" -> ").not());
     }
     live.cmd()
         .args([
@@ -363,11 +367,108 @@ fn live_mirror_s3_to_s3_same_and_cross_server() {
         ])
         .assert()
         .success();
-    let line: serde_json::Value = serde_json::from_str(stdout(&assert).trim()).unwrap();
+    let out = stdout(&assert);
+    let docs: Vec<serde_json::Value> = out
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(docs.len(), 2, "{out}");
+    let line = &docs[0];
     assert_eq!(line["status"], "success");
+    assert_eq!(line["source"], "");
     assert_eq!(line["target"], format!("{target2}/skip.tmp"));
-    assert_eq!(line["eventType"], "s3:ObjectRemoved:Delete");
+    assert_eq!(line["eventType"], "");
+    assert_eq!(docs[1]["total"], 0);
     assert!(cat(&live, &format!("{target2}/skip.tmp")).is_none());
+}
+
+/// `GET /metrics` from the `--monitoring-address` endpoint (None while it is not up).
+fn scrape(address: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(address).ok()?;
+    stream
+        .write_all(b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    Some(response)
+}
+
+#[test]
+fn live_mirror_monitoring_address_serves_metrics() {
+    let Some(live) = Live::new() else { return };
+    let src = source_tree();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let address = format!("127.0.0.1:{port}");
+    let mut child = spawn_mx(
+        &live,
+        &[
+            "mirror",
+            "--watch",
+            "--watch-interval",
+            "1s",
+            "--monitoring-address",
+            &address,
+            &path_str(src.path()),
+            &live.bucket_target(),
+        ],
+    );
+    let mut metrics = String::new();
+    let scraped = wait_for(|| {
+        metrics = scrape(&address).unwrap_or_default();
+        metrics.contains("mc_mirror_total_s3uploaded_bytes 14")
+    });
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(scraped, "{metrics}");
+    assert!(metrics.starts_with("HTTP/1.1 200 OK"), "{metrics}");
+    for name in [
+        "mc_mirror_total_s3ops",
+        "mc_mirror_failed_s3ops 0",
+        "mc_mirror_total_restarts 0",
+        "mc_mirror_replication_duration_count{object_size=\"LESS_THAN_1_KiB\"}",
+    ] {
+        assert!(metrics.contains(name), "{name}: {metrics}");
+    }
+}
+
+/// Hidden global `--conn-read-deadline` / `--conn-write-deadline` bound S3 requests.
+#[test]
+fn live_conn_deadlines_apply() {
+    let Some(live) = Live::new() else { return };
+    let src = source_tree();
+    let target = live.url("deadline");
+    live.cmd()
+        .args([
+            "--conn-read-deadline",
+            "1ns",
+            "mirror",
+            &path_str(src.path()),
+            &target,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("timed out"));
+    live.cmd()
+        .args([
+            "--conn-read-deadline",
+            "10m",
+            "--conn-write-deadline",
+            "10m",
+            "mirror",
+            &path_str(src.path()),
+            &target,
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        cat(&live, &format!("{target}/a.txt")).as_deref(),
+        Some("alpha")
+    );
 }
 
 #[test]
@@ -488,7 +589,7 @@ fn live_mirror_alias_root_to_second_server() {
             live.alias, live.bucket, live.bucket
         )))
         .stdout(predicate::str::contains(format!(
-            "Removed `{alias2}/{extra2}/keep.txt`"
+            "`` -> `{alias2}/{extra2}/keep.txt`"
         )));
 
     assert_eq!(

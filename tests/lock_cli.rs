@@ -259,7 +259,20 @@ fn ilm_restore_rejects_bad_arguments() {
 fn od_rejects_bad_operands() {
     let home = home();
     mx(&home).arg("od").assert().failure();
-    fails_with(&home, &["od", "if=a"], "both if= and of=");
+    // Like mc: the source is checked first, then the target.
+    fails_with(&home, &["od", "if=a"], "Unable to guess copy URL type.");
+    fails_with(
+        &home,
+        &["od", "of=b"],
+        "Invalid path, path cannot be empty.",
+    );
+    let source = home.path().join("source.bin");
+    std::fs::write(&source, "x").unwrap();
+    fails_with(
+        &home,
+        &["od", &format!("if={}", source.display())],
+        "Unable to initialize target client. Invalid path, path cannot be empty.",
+    );
     fails_with(
         &home,
         &["od", "if=a", "of=b", "bs=1"],
@@ -271,16 +284,11 @@ fn od_rejects_bad_operands() {
         &["od", "if=a", "of=b", "parts=x"],
         "invalid value for `parts`",
     );
-    fails_with(
-        &home,
-        &["od", "if=dead/b/o", "of=out.bin", "size=1MiB"],
-        "size cannot be specified getting from server",
-    );
     let dir = home.path().to_str().unwrap().to_string();
     fails_with(
         &home,
         &["od", &format!("if={dir}"), "of=dead/b/o"],
-        "source cannot be a directory",
+        "Unable to get source and target URLs: invalid source path",
     );
 }
 
