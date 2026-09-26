@@ -26,9 +26,10 @@ Module layout:
 - `src/cli.rs` top-level clap CLI (global flags + command list); each command's Args live in its module
 - `src/flags.rs` shared clap flag groups/parsers (SSE, rewind, version-id, durations, sizes, ...)
 - `src/globals.rs` process-wide settings from global flags
+- `src/error.rs` mc-style errors (`McError` typed causes, `nonfatal`); `src/s3/error.rs` maps SDK errors to mc's (minio-go `ErrorResponse`); `src/usage.rs` mc usage errors (`SUPPORTED FLAGS:`, unknown command)
 - `src/output.rs` shared output: `print_json(&T)` for every `--json` document (compact line on non-TTY, one-space indent on TTY), `json_indent` for text-mode JSON dumps, `error_if`/`print_error` (mc `errorIf`, non-fatal), `fatal` (mc `fatalIf`, used by `main`)
 - `src/net/` TLS trust (`tls.rs`), bandwidth limits (`throttle.rs`), `--debug` trace (`trace.rs`)
-- `src/s3/*.rs` S3 layer split by area, re-exported from `src/s3/mod.rs`: `client` (endpoint, `--resolve`, TLS, interceptors), `list`, `stat`, `delete`, `objects`, `multipart`, `io_ext`, `bucket`, `lifecycle`, `lock`, `notify`, `admin` (MinIO admin API), `replication`
+- `src/s3/*.rs` S3 layer split by area, re-exported from `src/s3/mod.rs`: `client` (endpoint, `--resolve`, TLS, interceptors), `list`, `stat`, `delete`, `objects`, `multipart`, `io_ext`, `bucket`, `lifecycle`, `lock`, `notify`, `admin` (MinIO admin API), `admin_info` (ServerInfo), `replication`, `error`
 - `src/mirror/` mirror engine (`mod.rs`) + pure diff/plan logic (`diff.rs`)
 - `src/progress.rs` cp/mv progress bar and mc-style summary
 - `src/commands/*.rs` one module per command (`util.rs` shared helpers)
@@ -37,30 +38,29 @@ Module layout:
 Current command behavior (details in `COMPATIBILITY.md`):
 
 - `alias`: validates alias/URL/API/path, prompts for missing credentials, `list` prints `Src`, import/export use mc JSON schema
-- `ls`: `-r --versions --rewind -I --summarize --storage-class --zip`; table output unchanged
+- `ls`: `-r --versions --rewind -I --summarize --storage-class --zip`; mc line format and JSON
 - `mb`/`rb`: `mb -p --with-versioning -l --region`; `rb` multiple targets, `--force`, `--force --dangerous ALIAS`
 - `stat`: mc layout; `-r --versions --version-id --rewind -v --no-list`; JSON keeps `size`, `type` is `file`/`folder`
-- `cat`/`head`/`get`: version/rewind/zip/SSE-C; `cat --offset --tail --part-number`; `head` works on local files
-- `put`/`pipe`: multiple sources/stdin, multipart tuning, checksum, SSE, storage class, attrs/tags (`pipe`)
-- `cp`/`mv`: mc multi-source and `-r` rules in all directions (local↔S3, S3→S3 across servers, local→local), filters, attrs, tags, lock, SSE, >5GiB server-side multipart copy; progress bar on TTY, else mc `SRC -> TGT` lines + summary
+- `cat`/`head`/`get`: version/rewind/zip/SSE-C; `cat --offset --tail --part-number`; `head` works on local files, decompresses gzip/bzip2
+- `put`/`pipe`: multiple sources/stdin, multipart tuning, checksum, SSE, storage class, attrs/tags (`pipe`); Content-Type guessed from extension (also cp/mv/mirror)
+- `cp`/`mv`: mc multi-source and `-r` rules in all directions (local↔S3, S3→S3 across servers, local→local), filters, attrs, tags, lock, SSE, `-a` (xattrs as metadata, tags kept on cross-server copy), >5GiB server-side multipart copy; progress bar on TTY, else mc `SRC -> TGT` lines + summary
 - `rm`: all mc flags, multiple targets, mc output lines/JSON
-- `mirror`: all directions, mc change detection, `--overwrite --remove --dry-run -w` (polling), excludes, filters, `--retry --summary --skip-errors`
+- `mirror`: all directions, mc change detection, `--overwrite --remove --dry-run -w` (polling), excludes, filters, `--retry --summary --skip-errors --monitoring-address`
 - `du`/`tree`/`find`/`diff`: S3 and local; `find` has all mc flags, relative paths by default
 - `share`: presigned download/upload (curl + POST policy), `list` from mc share DB
 - `tag`/`version`/`anonymous`/`cors`/`encrypt`/`ilm rule`: mc subcommands and flags
 - `retention`/`legalhold`/`undo`/`od`/`event`/`ilm restore`: object lock, notifications, version undo
-- `quota`/`ilm tier`/`replicate`: MinIO admin API; tiers `minio`/`s3` only; replicate `status`/`backlog` text simplified
-- `ping`/`ready`: health endpoint; `ping -c -e -x -i`, `ready --cluster-read --maintenance`
+- `quota`/`ilm tier`/`replicate`: MinIO admin API; tiers `minio`/`s3`/`azure`/`gcs`; replicate `status --nodes`/`backlog --json` match mc (`backlog` text: static table on TTY)
+- `ping`/`ready`: health endpoint; `ping -c -e -x -i -a --node`, `ready --cluster-read --maintenance`
 - Dates in output are UTC
 - Errors: raise `McError` causes, attach mc's message with `.context("Unable to ...")` (fatal) or `.context(nonfatal("..."))` (mc `errorIf` + exit 1); map SDK errors with `.s3(bucket, key)` (server message) or `.s3_object(...)` (HEAD/GET/PUT/COPY object, mc translations); unknown aliases are local paths
 
 Known gaps vs full `mc`:
 
-- no mc `ls` line format; some per-command JSON field sets differ
-- no `--conn-read-deadline`/`--conn-write-deadline`, no `mirror --monitoring-address`
-- cp/mv: no content-type guessing, no xattrs, no tags on cross-server streamed copy
-- no API auto-probing, no TLS trust prompt flow
-- output/help is compatible-ish, not byte-for-byte identical
+- no S3v2 signing (`alias set` probe only checks reachability, always stores S3v4), no TLS trust prompt flow
+- `--conn-write-deadline` is only a connect timeout; `--conn-read-deadline` is the SDK read timeout
+- `replicate backlog` text is not mc's interactive view
+- help text is compatible-ish, not byte-for-byte identical
 
 Testing requirements:
 
@@ -70,8 +70,9 @@ Testing requirements:
 - `tests/live_minio.sh [live_suite...]` starts 3 MinIO containers (2 plain + 1 TLS with a throwaway CA), KMS enabled, runs all or the named `tests/live_*.rs` suites, then removes them. Docker required.
   - Image from `tests/minio.image` (`pgsty/minio` community build; quay.io/minio images are no longer pullable); override with `MX_MINIO_IMAGE`.
   - Extra server env in `tests/minio.env` (webhook notify target for `event`).
-- mc parity: `tests/live_mc_parity.rs` runs the pinned upstream `mc` (`tests/mc.version`, built by `tests/mc_ref.sh` via docker into `target/mc-ref/mc`) and `mx` side by side and diffs normalized output (helpers in `tests/common/parity.rs`). Known gaps are `#[ignore = "parity: ..."]`; remove the ignore when fixing one.
+- mc parity: `tests/live_mc_parity.rs` runs the pinned upstream `mc` (`tests/mc.version`, built by `tests/mc_ref.sh` via docker into `target/mc-ref/mc`) and `mx` side by side and diffs normalized output (helpers in `tests/common/parity.rs`). Known gaps are `#[ignore = "parity: ..."]` (currently none); remove the ignore when fixing one. CI runs it as a non-blocking `mc-parity` job.
   - `MX_MC_PARITY=1 sh tests/live_minio.sh live_mc_parity [-- --ignored]`
+- New or changed command output must have a parity case in `tests/live_mc_parity.rs`.
 
 Useful commands:
 

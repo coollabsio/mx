@@ -15,20 +15,20 @@ Supported (tested against MinIO unless noted):
 
 | Command | Notes |
 | --- | --- |
-| `alias set` `list` `remove` `import` `export` | Reads `mc` config version 10. |
-| `ls` | `-r`, `--versions`, `--rewind`, `-I`, `--summarize`, `--zip`. |
+| `alias set` `list` `remove` `import` `export` | Reads `mc` config version 10. `set` checks the server unless `--api` is given. |
+| `ls` | `-r`, `--versions`, `--rewind`, `-I`, `--summarize`, `--storage-class`, `--zip`. mc line format. |
 | `mb` `rb` | `mb --ignore-existing --with-lock`. `rb --force` deletes objects and versions first. |
-| `stat` `cat` `head` `get` | Version IDs, `--rewind`, SSE-C. `head` also works on local files. |
-| `put` / `out` `pipe` | Multiple sources, multipart tuning, checksums, SSE. `pipe` uses bounded memory. |
-| `cp` `mv` | Recursive in every direction: local↔S3, S3→S3 (also across servers), local→local. |
+| `stat` `cat` `head` `get` | Version IDs, `--rewind`, SSE-C. `head` also works on local files and decompresses gzip/bzip2. |
+| `put` / `out` `pipe` | Multiple sources, multipart tuning, checksums, SSE, Content-Type guessing. `pipe` uses bounded memory. |
+| `cp` `mv` | Recursive in every direction: local↔S3, S3→S3 (also across servers), local→local. `-a` keeps attributes, xattrs and tags. |
 | `rm` | Every `mc` flag, including `--versions`, `--rewind`, `--dry-run`, `--stdin`. |
-| `mirror` | Every direction. Uses mc's change detection. `--overwrite`, `--remove`, `--watch`. |
+| `mirror` | Every direction. Uses mc's change detection. `--overwrite`, `--remove`, `--watch`, `--monitoring-address`. |
 | `du` `find` `tree` `diff` | S3 aliases and local paths. `find` has `--exec`, `--print`, `--watch`. |
 | `share download` `upload` `list` | Presigned URLs. Default expiry `168h`. |
-| `ready` `ping` | Health endpoint. |
+| `ready` `ping` | Health endpoint. `ping -a`/`--node` for every node. |
 | `tag` `version` `anonymous` `encrypt` `ilm rule` | Bucket and object configuration. |
 | `retention` `legalhold` `undo` `event` `od` `ilm restore` | Object lock, notifications, version undo. |
-| `quota` `ilm tier` `replicate` | MinIO admin API. Tiers: `minio` and `s3` only. |
+| `quota` `ilm tier` `replicate` | MinIO admin API. Tiers: `minio`, `s3`, `azure`, `gcs`. |
 
 Preview (depends on server support):
 
@@ -58,6 +58,19 @@ MC_HOST_myminio=https://ACCESS:SECRET@minio.example.com mx ls myminio
 `<config dir>/certs/CAs/` are trusted. `--debug` prints an HTTP trace to stderr
 with credentials redacted. `--dp`/`--disable-pager` and `--no-color` are
 accepted and do nothing.
+
+Output and errors follow mc: `--json` prints one compact JSON document per line
+when stdout is not a terminal (indented on a terminal), errors print as
+`mc: <ERROR> ...` (JSON error documents on stdout with `--json`), and usage
+errors exit 1 with mc's `SUPPORTED FLAGS:` block. An unknown alias is treated
+as a local path.
+
+Global flags except `-H` also read their `MC_*` environment variables (`MC_JSON`,
+`MC_CONFIG_DIR`, `MC_INSECURE`, ...). `MC_HOST_<alias>` defines an alias
+without touching the config file; `MC_CONFIG_ENV_FILE` reads such lines from a
+file. `-v`/`--version` prints mc's four-line version block. Hidden
+`--conn-read-deadline`/`--conn-write-deadline` are accepted (the write deadline
+is only a connect timeout).
 
 `--resolve` is repeatable. It can occur after a subcommand. Only a mapping
 whose host and port match the alias URL is used. Signing still uses the
@@ -193,20 +206,13 @@ mx --json stat myminio/mybucket/file.txt
 mx --json cp ./local.txt myminio/mybucket/
 ```
 
-`stat --json` prints compact JSON with an `mc`-compatible `size` field.
+Without a terminal every document is one compact line (indented on a
+terminal). `stat --json` keeps an `mc`-compatible `size` field.
 
-Example alias list object:
+Example `alias list` line:
 
 ```json
-{
-  "status": "success",
-  "alias": "myminio",
-  "URL": "http://localhost:9000",
-  "accessKey": "minio",
-  "secretKey": "minio123",
-  "api": "S3v4",
-  "path": "auto"
-}
+{"status":"success","alias":"myminio","URL":"http://localhost:9000","accessKey":"minio","secretKey":"minio123","api":"S3v4","path":"auto","src":"/root/.mx/config.json"}
 ```
 
 ## Config
@@ -234,6 +240,16 @@ one TLS with a throwaway CA, KMS enabled), runs every `tests/live_*.rs` suite or
 the named ones, and removes the containers. Docker is required. The image is
 set in `tests/minio.image` (override with `MX_MINIO_IMAGE`). Extra server
 environment goes in `tests/minio.env`.
+
+Output parity with the real `mc`: `sh tests/mc_ref.sh` builds the pinned mc
+release (`tests/mc.version`) with Docker, and
+
+```bash
+MX_MC_PARITY=1 sh tests/live_minio.sh live_mc_parity
+```
+
+runs `tests/live_mc_parity.rs`, which compares normalized mx and mc output (timestamps, version IDs, signatures, ...) case by case.
+CI runs it as a non-blocking `mc-parity` job.
 
 Point live tests at another S3-compatible server:
 

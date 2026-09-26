@@ -67,7 +67,9 @@ server support that varies between S3-compatible servers.
   commands print mc's "not a recognized command" text with "Did you mean"
   suggestions; missing arguments print the command help. All exit 1.
 - `alias set` without `--api` probes the server like mc (and fails when it is
-  unreachable); access keys need 3+ and secret keys 8+ characters.
+  unreachable); access keys need 3+ and secret keys 8+ characters. The probe
+  always stores `S3v4`: S3v2 signing is not supported (`--api S3v2` is stored,
+  but commands on that alias fail).
 - `MC_*` environment variables: `MC_CONFIG_DIR`, `MC_QUIET`, `MC_DISABLE_PAGER`,
   `MC_NO_COLOR`, `MC_JSON`, `MC_DEBUG`, `MC_RESOLVE` (comma separated),
   `MC_INSECURE`, `MC_LIMIT_UPLOAD`, `MC_LIMIT_DOWNLOAD`. Booleans use Go
@@ -120,15 +122,21 @@ and the write deadline as the connect timeout. Without the flags the SDK default
 
 ## Remaining gaps
 
-- Output is close to mc but not byte-for-byte identical. Some errors differ where mc
-  depends on minio-go internals (bucket location lookups).
-- No API auto-probing and no TLS trust prompt flow.
+- Command output is compared (after normalizing timestamps, version IDs, signatures, ...) with the pinned mc release
+  (`tests/mc.version`) by `tests/live_mc_parity.rs`; all cases pass. Help text is
+  not identical, and some errors differ where mc depends on minio-go internals
+  (bucket location lookups).
+- No S3v2 signing, so `alias set` never detects S3v2 servers.
+- No TLS trust prompt flow for unknown certificates (use `certs/CAs/` or `--insecure`).
+- `--conn-write-deadline` is only a connect timeout (see above).
+- `replicate backlog` text is a static table, not mc's interactive view.
+- `share upload` sorts the curl `-F` fields; `ping` reports `dns` as `0s`.
 
 ## Coolify compatibility
 
 - `--resolve HOST:PORT=IP` is repeatable and supported as a global option.
 - `mb --ignore-existing` is supported.
-- `stat --json` emits compact JSON with an mc-compatible `size` field.
+- `stat --json` emits compact JSON (when stdout is not a terminal) with an mc-compatible `size` field.
 - The container provides a static Linux binary at `/usr/bin/mc` and supports
   amd64 and arm64 builds.
 - Version tags `v*.*.*` publish `ghcr.io/<owner>/mx:<version>` and GitHub
