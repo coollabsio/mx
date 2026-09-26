@@ -503,9 +503,10 @@ impl EncFlags {
     ) -> Result<Vec<(String, Sse)>> {
         let mut entries = Vec::new();
         for value in self.enc_c.iter().flat_map(|v| split_list(v)) {
-            let (path, key) = value.split_once('=').ok_or_else(|| {
-                anyhow!("`--enc-c` value `{value}` must be ALIAS/BUCKET/PREFIX=KEY")
-            })?;
+            // The value may be a bare secret key: never echo it.
+            let (path, key) = value
+                .split_once('=')
+                .ok_or_else(|| anyhow!("`--enc-c` values must be ALIAS/BUCKET/PREFIX=KEY"))?;
             entries.push((
                 normalize_enc_path(path)?,
                 Sse::C {
@@ -894,6 +895,15 @@ mod tests {
             .entries_with_env(None, None)
             .is_err()
         );
+        let secret = "MzJieXRlc2xvbmdzZWNyZXRrZXltdXN0cHJvdmlkZWQ";
+        let error = EncFlags {
+            enc_c: vec![secret.into()],
+            ..Default::default()
+        }
+        .entries_with_env(None, None)
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains(secret), "{error}");
     }
 
     #[test]

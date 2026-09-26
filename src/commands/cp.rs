@@ -435,6 +435,7 @@ async fn plan(
         }
     }
 
+    check_target_collisions(&plan.tasks)?;
     let mut seen = HashSet::new();
     plan.tasks.retain(|task| seen.insert(task.target.clone()));
     if let Some(task) = plan.tasks.iter().find(|task| task.source == task.target) {
@@ -449,6 +450,25 @@ async fn plan(
             .retain(|task| options.time.matches(task.modified, now));
     }
     Ok(plan)
+}
+
+/// Distinct sources mapped to one target (e.g. keys `a//b` and `a/b`, see [`relative_suffix`])
+/// would overwrite each other, and `mv` would then delete both sources.
+fn check_target_collisions(tasks: &[CopyTask]) -> Result<()> {
+    let mut sources: HashMap<&Item, &Item> = HashMap::new();
+    for task in tasks {
+        if let Some(previous) = sources.insert(&task.target, &task.source)
+            && previous != &task.source
+        {
+            bail!(
+                "Sources `{}` and `{}` both map to target `{}`.",
+                previous.display(),
+                task.source.display(),
+                task.target.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// mc `isAliasURLDir`: an existing folder, a bucket root, or a path ending in `/`.
@@ -1228,6 +1248,33 @@ pub(crate) fn resolve_local_destination(target: &Path, fallback: String) -> Resu
 mod tests {
     use super::*;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn colliding_targets_are_rejected() {
+        let target = Endpoint::Local {
+            raw: "/tmp/out/".into(),
+            path: PathBuf::from("/tmp/out/"),
+        };
+        let task = |key: &str| CopyTask {
+            source: Item::S3 {
+                alias: "play".into(),
+                bucket: "b".into(),
+                key: key.into(),
+            },
+            target: join_target(&target, &relative_suffix("b/", &format!("b/{key}"))),
+            size: 0,
+            modified: None,
+            version_id: None,
+        };
+        assert!(check_target_collisions(&[task("a/b"), task("a/c"), task("a/b")]).is_ok());
+        let error = check_target_collisions(&[task("a/b"), task("a//b")])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "Sources `play/b/a/b` and `play/b/a//b` both map to target `/tmp/out/a/b`."
+        );
+    }
 
     fn s3(key: &str) -> Endpoint {
         Endpoint::S3 {

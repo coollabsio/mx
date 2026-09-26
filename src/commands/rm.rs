@@ -197,7 +197,8 @@ impl Remover<'_> {
                     let bucket = entry.name().unwrap_or_default();
                     let removed = self
                         .list_and_remove(&client, &target.alias, bucket, None)
-                        .await;
+                        .await
+                        .map(|_| ());
                     if let Err(error) = removed {
                         report(&error);
                         result = Err(anyhow!("Failed to remove `{input}` recursively."));
@@ -207,8 +208,26 @@ impl Remover<'_> {
             };
             if self.args.recursive {
                 let prefix = target.key_with_trailing_slash();
-                self.list_and_remove(&client, &target.alias, bucket, prefix.as_deref())
-                    .await
+                let found = self
+                    .list_and_remove(&client, &target.alias, bucket, prefix.as_deref())
+                    .await?;
+                match prefix.filter(|key| !found && !key.ends_with('/')) {
+                    // `rm -r alias/bucket/file`: nothing under `file/`, remove the object itself.
+                    Some(key) if self.args.versions || self.rewind.is_some() => {
+                        let versions = crate::s3::list_key_versions(&client, bucket, &key).await?;
+                        if versions.is_empty() {
+                            bail!("Failed to remove `{input}`: object does not exist.");
+                        }
+                        let selected = select_versions(versions, self.args, self.rewind);
+                        self.remove_entries(&client, &target.alias, bucket, selected)
+                            .await
+                    }
+                    Some(key) => {
+                        self.remove_single(&client, &target.alias, bucket, &key, input)
+                            .await
+                    }
+                    None => Ok(()),
+                }
             } else {
                 let key = target.require_object_key()?;
                 if self.args.versions {
@@ -304,14 +323,15 @@ impl Remover<'_> {
         self.remove_entries(client, alias, bucket, selected).await
     }
 
-    /// Recursive removal under `prefix` (whole bucket when `None`).
+    /// Recursive removal under `prefix` (whole bucket when `None`). Returns whether anything was
+    /// listed.
     async fn list_and_remove(
         &self,
         client: &Client,
         alias: &str,
         bucket: &str,
         prefix: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let args = self.args;
         let base = crate::s3::normalize_prefix(prefix).unwrap_or_default();
         let options = ListOptions {
@@ -327,7 +347,9 @@ impl Remover<'_> {
         for item in &mut items {
             item.key = full_key(&base, &item.key);
         }
-        self.remove_entries(client, alias, bucket, items).await
+        let found = !items.is_empty();
+        self.remove_entries(client, alias, bucket, items).await?;
+        Ok(found)
     }
 
     /// Applies time filters, then prints (dry run), aborts (incomplete) or bulk-deletes.

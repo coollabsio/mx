@@ -554,12 +554,15 @@ pub(crate) fn display_name(raw: &str, prefix: Option<&str>) -> String {
 }
 
 /// Joins a listing prefix and a relative name into an absolute key.
+///
+/// Listings strip the normalized prefix (`dir/`), so an empty name is the folder-marker object
+/// `dir/` itself, never the sibling key `dir`.
 pub fn full_key(prefix: &str, name: &str) -> String {
     let prefix = prefix.trim_matches('/');
     if prefix.is_empty() {
         name.to_string()
     } else if name.is_empty() {
-        prefix.to_string()
+        format!("{prefix}/")
     } else {
         format!("{prefix}/{name}")
     }
@@ -567,7 +570,9 @@ pub fn full_key(prefix: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObjectInfo, resolve_rewind, versions_before};
+    use super::{
+        ObjectInfo, display_name, full_key, normalize_prefix, resolve_rewind, versions_before,
+    };
     use std::time::{Duration, UNIX_EPOCH};
 
     fn version(key: &str, secs: u64, id: &str, delete: bool) -> ObjectInfo {
@@ -578,6 +583,17 @@ mod tests {
             is_delete_marker: delete,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn full_key_keeps_folder_marker_distinct_from_sibling() {
+        for input in ["pre", "pre/"] {
+            let prefix = normalize_prefix(Some(input)).unwrap();
+            for raw in ["pre/", "pre/inner", "pre//x"] {
+                assert_eq!(full_key(input, &display_name(raw, Some(&prefix))), raw);
+            }
+        }
+        assert_eq!(full_key("", "a/b"), "a/b");
     }
 
     #[test]

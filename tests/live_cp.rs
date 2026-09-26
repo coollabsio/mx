@@ -881,3 +881,51 @@ fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     out.extend(le16(0));
     out
 }
+
+fn put_raw(live: &Live, key: &str, contents: &str) {
+    rt().block_on(s3::put_object_reader_with(
+        &live.alias_config(),
+        &live.bucket,
+        key,
+        std::io::Cursor::new(contents.as_bytes().to_vec()),
+        None,
+        &PutOptions::default(),
+    ))
+    .unwrap_or_else(|error| panic!("put {key}: {error:?}"));
+}
+
+/// Folder-marker objects (`dir/`) never turn into their sibling key (`dir`). (Colliding keys such
+/// as `a//b` vs `a/b` are covered by the `colliding_targets_are_rejected` unit test: MinIO
+/// rejects such key names.)
+#[test]
+fn live_cp_mv_folder_markers() {
+    let Some(live) = Live::new() else { return };
+    let client = client(&live);
+    let work = tempfile::tempdir().unwrap();
+    for (key, contents) in [
+        ("pre", "sibling"),
+        ("pre/", ""),
+        ("dir/", ""),
+        ("dir/a", "alpha"),
+    ] {
+        put_raw(&live, key, contents);
+    }
+
+    // Console-style folder: `dir/` + `dir/a`.
+    let out = work.path().join("cpout");
+    live.cmd()
+        .args(["cp", "-r", &live.url("dir/"), &format!("{}/", s(&out))])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(out.join("a")).unwrap(), b"alpha");
+
+    // mv of the marker folder `pre/` must not touch the sibling object `pre` (MinIO cannot list
+    // children of `pre/` while the object `pre` exists, so the marker is the only entry).
+    let moved = work.path().join("mvout");
+    live.cmd()
+        .args(["mv", "-r", &live.url("pre/"), &format!("{}/", s(&moved))])
+        .assert()
+        .success();
+    assert!(!moved.join("pre").exists());
+    assert_eq!(body(&client, &live.bucket, "pre"), b"sibling");
+}

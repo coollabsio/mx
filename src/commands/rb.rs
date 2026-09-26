@@ -69,13 +69,7 @@ pub fn run(args: RemoveBucketArgs, json: bool) -> Result<()> {
                     }
                     return Err(error.into());
                 }
-                if let Err(error) = crate::s3::remove_bucket(&alias, &bucket, args.force).await {
-                    // Locked objects cannot be deleted one by one; MinIO can force-delete.
-                    if !args.force || crate::s3::delete_bucket_force(&client, &bucket).await.is_err()
-                    {
-                        return Err(error);
-                    }
-                }
+                crate::s3::remove_bucket(&alias, &bucket, args.force).await?;
                 Ok(true)
             })?;
             if !removed {

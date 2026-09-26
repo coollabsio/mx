@@ -102,7 +102,14 @@ pub async fn remove_bucket(alias: &AliasConfig, bucket: &str, force: bool) -> Re
             .collect::<Vec<_>>();
         delete_keys(&client, bucket, &keys).await?;
     }
-    client.delete_bucket().bucket(bucket).send().await?;
+    if let Err(error) = client.delete_bucket().bucket(bucket).send().await {
+        // mc: a regular removal first (force does not work with locking rules), then MinIO's
+        // force delete only when the bucket is still not empty.
+        if force && super::error_code(&error) == Some("BucketNotEmpty") {
+            return super::delete_bucket_force(&client, bucket).await;
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 

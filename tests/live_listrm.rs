@@ -603,6 +603,52 @@ fn live_rm_and_ls_incomplete_uploads() {
     assert!(uploads().is_empty());
 }
 
+/// `rm -r` on folder markers (`pre/`, `dir/`) never touches the sibling key; `rm -r` on a plain
+/// object removes it, and a missing target is an error.
+#[test]
+fn live_rm_recursive_folder_markers_and_objects() {
+    let Some(fx) = Fixture::new(BucketOpts::default()) else {
+        return;
+    };
+    let live = &fx.live;
+    // MinIO cannot list `pre/...` children while the object `pre` exists: marker + sibling only.
+    for key in ["pre", "pre/", "dir/", "dir/a", "file"] {
+        fx.put(key, "x");
+    }
+    live.cmd()
+        .args(["rm", "-r", "--force", &fx.url("pre/")])
+        .assert()
+        .success();
+    assert!(fx.exists("pre"));
+    assert!(!fx.exists("pre/"));
+
+    live.cmd()
+        .args(["rm", "-r", "--force", &fx.url("dir")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "Removed `{}`.",
+            fx.url("dir/")
+        )));
+    assert!(!fx.exists("dir/") && !fx.exists("dir/a"));
+
+    live.cmd()
+        .args(["rm", "-r", "--force", &fx.url("file")])
+        .assert()
+        .success()
+        .stdout(format!("Removed `{}`.\n", fx.url("file")));
+    assert!(!fx.exists("file"));
+    live.cmd()
+        .args(["rm", "-r", "--force", &fx.url("missing")])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(format!(
+            "Failed to remove `{}`",
+            fx.url("missing")
+        )));
+    assert!(fx.exists("pre"));
+}
+
 #[test]
 fn live_rm_bypass_governance_and_rb_force() {
     let Some(fx) = Fixture::new(BucketOpts {
@@ -628,6 +674,14 @@ fn live_rm_bypass_governance_and_rb_force() {
         .args(["rm", "--version-id", &version, &fx.url("locked.txt")])
         .assert()
         .failure();
+    assert_eq!(fx.versions("locked.txt").len(), 1);
+    // rb --force reports the per-object failure and keeps the bucket (no MinIO force-delete
+    // fallback unless the bucket is merely not empty).
+    live.cmd()
+        .args(["rb", "--force", &live.bucket_target()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`locked.txt` (versionId="));
     assert_eq!(fx.versions("locked.txt").len(), 1);
     live.cmd()
         .args([

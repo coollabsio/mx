@@ -2,7 +2,7 @@
 
 use super::{S3ListItem, build_client, full_key, list_objects};
 use crate::config::model::AliasConfig;
-use anyhow::Result;
+use anyhow::{Result, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 
@@ -66,7 +66,7 @@ pub async fn delete_all_versions(client: &Client, bucket: &str) -> Result<()> {
             }
         }
         if !objects.is_empty() {
-            client
+            let response = client
                 .delete_objects()
                 .bucket(bucket)
                 .delete(
@@ -77,6 +77,7 @@ pub async fn delete_all_versions(client: &Client, bucket: &str) -> Result<()> {
                 )
                 .send()
                 .await?;
+            check_delete_errors(response.errors())?;
         }
         if response.is_truncated() == Some(true) {
             key_marker = response.next_key_marker().map(str::to_string);
@@ -98,7 +99,7 @@ pub async fn delete_keys(client: &Client, bucket: &str, keys: &[String]) -> Resu
             .iter()
             .map(|key| ObjectIdentifier::builder().key(key).build())
             .collect::<Result<Vec<_>, _>>()?;
-        client
+        let response = client
             .delete_objects()
             .bucket(bucket)
             .delete(
@@ -109,8 +110,29 @@ pub async fn delete_keys(client: &Client, bucket: &str, keys: &[String]) -> Resu
             )
             .send()
             .await?;
+        check_delete_errors(response.errors())?;
     }
     Ok(())
+}
+
+/// Turns per-key DeleteObjects failures (quiet mode only reports those) into an error.
+fn check_delete_errors(errors: &[aws_sdk_s3::types::Error]) -> Result<()> {
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let details = errors
+        .iter()
+        .map(|error| {
+            let key = error.key().unwrap_or_default();
+            let reason = error.message().or(error.code()).unwrap_or("unknown error");
+            match error.version_id() {
+                Some(version) => format!("`{key}` (versionId={version}): {reason}"),
+                None => format!("`{key}`: {reason}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    bail!("Failed to remove {} object(s): {details}", errors.len())
 }
 
 /// One object (version) to delete with [`delete_versions`].
@@ -259,4 +281,29 @@ fn add_force_delete_header(
     request: &mut aws_smithy_runtime_api::client::orchestrator::HttpRequest,
 ) {
     request.headers_mut().insert("x-minio-force-delete", "true");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_delete_errors;
+    use aws_sdk_s3::types::Error;
+
+    #[test]
+    fn quiet_delete_errors_are_reported() {
+        assert!(check_delete_errors(&[]).is_ok());
+        let errors = [
+            Error::builder()
+                .key("locked.txt")
+                .version_id("v1")
+                .code("AccessDenied")
+                .message("Object is WORM protected")
+                .build(),
+            Error::builder().key("b").code("InternalError").build(),
+        ];
+        let message = check_delete_errors(&errors).unwrap_err().to_string();
+        assert_eq!(
+            message,
+            "Failed to remove 2 object(s): `locked.txt` (versionId=v1): Object is WORM protected; `b`: InternalError"
+        );
+    }
 }

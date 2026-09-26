@@ -324,7 +324,11 @@ fn remote_url(config: &ConfigV10, input: &str) -> Result<(String, String, url::U
                 format!("{}{host}", &input[..scheme_end]),
             ),
             [_, _, _, ..] => bail!("temporary tokens are not allowed for remote targets"),
-            _ => bail!("unsupported remote target format `{input}`, see --help"),
+            // Never echo the userinfo: it holds the secret key.
+            _ => bail!(
+                "unsupported remote target format `{}{host}`, see --help",
+                &input[..scheme_end]
+            ),
         }
     } else {
         let target = TargetRef::parse(input)?;
@@ -1133,6 +1137,13 @@ mod tests {
                 .contains("temporary tokens")
         );
         assert!(remote_url(&store, "https://h/b").is_err());
+        let error = remote_url(&store, "https://:SECRET@h/b")
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "unsupported remote target format `https://h/b`, see --help"
+        );
         let (_, _, url) = remote_url(&store, "https://ak:sk@h/").unwrap();
         assert!(remote_bucket_name(&url).is_err());
     }

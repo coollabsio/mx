@@ -426,7 +426,7 @@ fn live_mirror_active_active_sets_source_mtime() {
 }
 
 /// Alias root -> alias root. Only against the throwaway servers of tests/live_minio.sh: it
-/// mirrors (and with --remove deletes) every bucket.
+/// mirrors every bucket (and with --remove deletes extraneous objects, never buckets or versions).
 #[test]
 fn live_mirror_alias_root_to_second_server() {
     let Some(live) = Live::new() else { return };
@@ -456,7 +456,20 @@ fn live_mirror_alias_root_to_second_server() {
         ])
         .assert()
         .success();
-    let extra2 = live.make_bucket2(BucketOpts::default()).unwrap();
+    let extra2 = live
+        .make_bucket2(BucketOpts {
+            versioning: true,
+            lock: false,
+        })
+        .unwrap();
+    live.cmd()
+        .args([
+            "cp",
+            &path_str(&src.path().join("a.txt")),
+            &format!("{alias2}/{extra2}/keep.txt"),
+        ])
+        .assert()
+        .success();
 
     live.cmd()
         .args([
@@ -475,7 +488,7 @@ fn live_mirror_alias_root_to_second_server() {
             live.alias, live.bucket, live.bucket
         )))
         .stdout(predicate::str::contains(format!(
-            "Removed `{alias2}/{extra2}`"
+            "Removed `{alias2}/{extra2}/keep.txt`"
         )));
 
     assert_eq!(
@@ -486,7 +499,17 @@ fn live_mirror_alias_root_to_second_server() {
     let buckets2 = String::from_utf8_lossy(&buckets2.stdout).to_string();
     assert!(buckets2.contains(&locked), "{buckets2}");
     assert!(!buckets2.contains(&excluded), "{buckets2}");
-    assert!(!buckets2.contains(&extra2), "{buckets2}");
+    // Like mc, a bucket missing on the source is kept; only its objects are removed (a delete
+    // marker on top of the preserved version).
+    assert!(buckets2.contains(&extra2), "{buckets2}");
+    let versions = live
+        .cmd()
+        .args(["ls", "--versions", &format!("{alias2}/{extra2}")])
+        .output()
+        .unwrap();
+    let versions = String::from_utf8_lossy(&versions.stdout).to_string();
+    assert!(versions.contains(" v1 PUT "), "{versions}");
+    assert!(versions.contains(" v2 DEL "), "{versions}");
 
     // -a copied the object lock configuration.
     let config2 = alias_config_from_home(live.home.path(), &alias2);
@@ -515,7 +538,7 @@ fn live_mirror_alias_root_to_second_server() {
         .success();
     assert!(dst.path().join(&live.bucket).join("a.txt").is_file());
 
-    for bucket in [&live.bucket, &locked] {
+    for bucket in [&live.bucket, &locked, &extra2] {
         let _ = live
             .cmd()
             .args(["rb", "--force", &format!("{alias2}/{bucket}")])

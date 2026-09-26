@@ -294,8 +294,14 @@ impl Job {
         let options = &self.options;
         let mut failed = self.sync_buckets().await?;
 
-        let mut source = list(&self.source, options).await?;
-        let mut target = list(&self.target, options).await?;
+        let (mut source, source_errors) = list(&self.source, options).await?;
+        let (mut target, target_errors) = list(&self.target, options).await?;
+        // An incomplete scan must not turn unreadable entries into deletions.
+        let incomplete = !source_errors.is_empty() || !target_errors.is_empty();
+        for error in source_errors.iter().chain(&target_errors) {
+            self.report_error("Failed to perform mirroring", error);
+            failed = true;
+        }
 
         let compare_metadata = options.compare_metadata()
             && initial
@@ -352,6 +358,9 @@ impl Job {
                     _ => true,
                 });
             }
+        }
+        if incomplete {
+            actions.retain(|action| !matches!(action, Action::Remove { .. }));
         }
 
         let source = Arc::new(source);
@@ -411,7 +420,12 @@ impl Job {
         while let Some(result) = tasks.join_next().await {
             self.handle_result(result, &mut failed);
         }
-        Ok((source.keys().cloned().collect(), failed))
+        let mut keys: BTreeSet<String> = source.keys().cloned().collect();
+        if incomplete && let Some(previous) = previous {
+            // Keep tracking entries that could not be read in this pass.
+            keys.extend(previous.iter().cloned());
+        }
+        Ok((keys, failed))
     }
 
     /// Records a task result; returns true when mirroring should stop.
@@ -433,8 +447,9 @@ impl Job {
         !self.options.skip_errors && !self.options.keep_running()
     }
 
-    /// Creates target buckets missing for alias-root mirrors (and removes extraneous ones with
-    /// `--remove`). Returns whether anything failed.
+    /// Creates target buckets missing for alias-root mirrors. Extraneous target buckets are never
+    /// dropped: like mc, `--remove` only deletes their objects (one by one, via the normal diff).
+    /// Returns whether anything failed.
     async fn sync_buckets(&self) -> Result<bool> {
         let Endpoint::S3(target) = &self.target else {
             return Ok(false);
@@ -469,23 +484,6 @@ impl Job {
                     &format!("{error:#}"),
                 );
                 failed = true;
-            }
-        }
-        if options.plan.remove && !options.plan.dry_run {
-            for bucket in target_buckets.difference(&source_buckets) {
-                if diff::match_exclude_bucket(&options.plan.exclude_bucket, bucket) {
-                    continue;
-                }
-                match crate::s3::remove_bucket(&target.alias, bucket, true).await {
-                    Ok(()) => self.print_removed(&target.display(bucket), &Event::default()),
-                    Err(error) => {
-                        self.report_error(
-                            &format!("Failed to remove `{}`.", target.display(bucket)),
-                            &format!("{error:#}"),
-                        );
-                        failed = true;
-                    }
-                }
             }
         }
         Ok(failed)
@@ -933,12 +931,15 @@ impl Job {
 // listing
 // ----------------------------------------------------------------------------------------
 
-async fn list(endpoint: &Endpoint, options: &Options) -> Result<Listing> {
+/// Lists an endpoint. The second value holds per-entry errors (local walks only): the listing is
+/// then incomplete and must not be used to propagate deletions.
+async fn list(endpoint: &Endpoint, options: &Options) -> Result<(Listing, Vec<String>)> {
     match endpoint {
         Endpoint::Local(root) => list_local(root),
         Endpoint::S3(s3) => match &s3.bucket {
             Some(bucket) => list_bucket(&s3.client, bucket, &s3.prefix, "")
                 .await
+                .map(|listing| (listing, Vec::new()))
                 .with_context(|| format!("Unable to list `{}`.", s3.display(""))),
             None => {
                 let mut listing = Listing::new();
@@ -954,7 +955,7 @@ async fn list(endpoint: &Endpoint, options: &Options) -> Result<Listing> {
                             })?,
                     );
                 }
-                Ok(listing)
+                Ok((listing, Vec::new()))
             }
         },
     }
@@ -1002,15 +1003,23 @@ async fn list_bucket(
         .collect())
 }
 
-fn list_local(root: &Path) -> Result<Listing> {
+fn list_local(root: &Path) -> Result<(Listing, Vec<String>)> {
     let mut listing = Listing::new();
+    let mut errors = Vec::new();
     if root.is_dir() {
-        walk_local(root, root, &mut listing)?;
+        walk_local(root, root, &mut listing, &mut errors)?;
     }
-    Ok(listing)
+    Ok((listing, errors))
 }
 
-fn walk_local(root: &Path, dir: &Path, listing: &mut Listing) -> Result<()> {
+/// Unreadable entries are recorded in `errors` (never silently skipped: a missing entry would be
+/// treated as deleted).
+fn walk_local(
+    root: &Path,
+    dir: &Path,
+    listing: &mut Listing,
+    errors: &mut Vec<String>,
+) -> Result<()> {
     for item in std::fs::read_dir(dir)
         .with_context(|| format!("Unable to read directory `{}`.", dir.display()))?
     {
@@ -1018,12 +1027,21 @@ fn walk_local(root: &Path, dir: &Path, listing: &mut Listing) -> Result<()> {
         let path = item.path();
         let file_type = item.file_type()?;
         if file_type.is_dir() {
-            walk_local(root, &path, listing)?;
+            walk_local(root, &path, listing, errors)?;
             continue;
         }
-        // Symlinks to files are followed; anything else is skipped.
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
+        // Symlinks to files are followed; dangling symlinks and anything else are skipped.
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(error)
+                if file_type.is_symlink() && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(error) => {
+                errors.push(format!("Unable to stat `{}`: {error}", path.display()));
+                continue;
+            }
         };
         if !meta.is_file() {
             continue;
@@ -1249,6 +1267,26 @@ mod tests {
         assert!(safe_join(root, "a/../../x").is_err());
         assert!(safe_join(root, "/etc/passwd").is_err());
         assert!(safe_join(root, "").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_walk_reports_unreadable_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/ok.txt"), "ok").unwrap();
+        // Dangling symlink: not a file, skipped without error.
+        std::os::unix::fs::symlink("missing", dir.path().join("dangling")).unwrap();
+        let (listing, errors) = list_local(dir.path()).unwrap();
+        assert_eq!(listing.keys().collect::<Vec<_>>(), ["sub/ok.txt"]);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // Symlink loop: stat fails with ELOOP; the scan must be flagged incomplete.
+        std::os::unix::fs::symlink("loop", dir.path().join("loop")).unwrap();
+        let (listing, errors) = list_local(dir.path()).unwrap();
+        assert_eq!(listing.len(), 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("loop"), "{errors:?}");
     }
 
     #[test]
