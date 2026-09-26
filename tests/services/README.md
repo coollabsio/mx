@@ -49,3 +49,4 @@ network); export both the host URL and the internal address when both are needed
 | `minio_pools.sh` | `MX_TEST_POOLS_URL`, `MX_TEST_POOLS_ACCESS_KEY`, `MX_TEST_POOLS_SECRET_KEY`, `MX_TEST_POOLS_POOL1` (`/data{1...4}`), `MX_TEST_POOLS_POOL2` (`/data{5...8}`) |
 | `minio_server.sh` | `MX_TEST_SERVER_URL`, `MX_TEST_SERVER_ACCESS_KEY`, `MX_TEST_SERVER_SECRET_KEY` (4-drive erasure set, safe to restart/freeze) |
 | `minio_ec.sh` | `MX_TEST_EC_URL`, `MX_TEST_EC_ACCESS_KEY`, `MX_TEST_EC_SECRET_KEY` (1 pool, 4 drives: `admin heal`) |
+| `topo.sh` | `MX_TEST_TOPO_SR1_URL` .. `MX_TEST_TOPO_SR6_URL` (fresh single-drive servers on a private network, container-IP URLs, for site replication: SR1-SR4 parity, SR5-SR6 live), `MX_TEST_TOPO_POOLS_MC_URL` / `MX_TEST_TOPO_POOLS_MX_URL` (two-pool servers, one per parity side), `MX_TEST_TOPO_ACCESS_KEY`, `MX_TEST_TOPO_SECRET_KEY` |

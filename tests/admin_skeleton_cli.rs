@@ -78,32 +78,6 @@ fn assert_stubs(rows: &[&[&str]]) {
 }
 
 // ---------------------------------------------------------------------------
-// TOPO
-// ---------------------------------------------------------------------------
-
-const TOPO: &[&[&str]] = &[
-    &["admin", "replicate", "add", "a"],
-    &["admin", "replicate", "update", "a"],
-    &["admin", "replicate", "remove", "a"],
-    &["admin", "replicate", "info", "a"],
-    &["admin", "replicate", "status", "a"],
-    &["admin", "replicate", "resync", "start", "a", "a"],
-    &["admin", "replicate", "resync", "status", "a", "a"],
-    &["admin", "replicate", "resync", "cancel", "a", "a"],
-    &["admin", "decommission", "start", "a", "a"],
-    &["admin", "decommission", "status", "a"],
-    &["admin", "decommission", "cancel", "a"],
-    &["admin", "rebalance", "start", "a"],
-    &["admin", "rebalance", "status", "a"],
-    &["admin", "rebalance", "stop", "a"],
-];
-
-#[test]
-fn topo_stubs() {
-    assert_stubs(TOPO);
-}
-
-// ---------------------------------------------------------------------------
 // JOBS
 // ---------------------------------------------------------------------------
 
