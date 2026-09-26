@@ -61,6 +61,9 @@ pub struct AdminClient {
     secret_key: String,
     session_token: Option<String>,
     connector: SharedHttpConnector,
+    /// `api: S3v2` alias: S3 API requests (bucket sub-resources) are signed with Signature
+    /// V2 like minio-go; admin API requests always use SigV4 (madmin).
+    s3v2: bool,
 }
 
 impl AdminClient {
@@ -80,20 +83,18 @@ impl AdminClient {
             .filter(|m| m.host.eq_ignore_ascii_case(host) && Some(m.port) == port)
             .collect();
         let resolver = crate::resolve::PinnedDnsResolver::new(&mappings)?;
-        // Same TLS trust as the S3 client: `--insecure`, else system roots + `certs/CAs`.
-        let connector = if crate::globals::insecure() {
-            crate::net::tls::insecure_connector(resolver)?
-        } else {
-            let mut builder =
-                Connector::builder().tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc));
-            if let Some(context) = crate::net::tls::custom_ca_context()? {
-                builder = builder.tls_context(context);
+        // Same HTTP stack as the S3 client: `--insecure`, `certs/CAs`, connection deadlines.
+        let connector = match crate::net::tls::custom_connector(resolver.clone())? {
+            Some(connector) => connector,
+            None => {
+                let builder =
+                    Connector::builder().tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc));
+                SharedHttpConnector::new(if mappings.is_empty() {
+                    builder.build()
+                } else {
+                    builder.build_with_resolver(resolver)
+                })
             }
-            SharedHttpConnector::new(if mappings.is_empty() {
-                builder.build()
-            } else {
-                builder.build_with_resolver(resolver)
-            })
         };
         Ok(Self {
             scheme: url.scheme().to_string(),
@@ -102,6 +103,7 @@ impl AdminClient {
             secret_key: alias.secret_key.clone(),
             session_token: alias.session_token.clone().filter(|t| !t.is_empty()),
             connector,
+            s3v2: super::client::is_s3v2(alias),
         })
     }
 
@@ -143,16 +145,20 @@ impl AdminClient {
         );
         let mut all_headers: Vec<(&str, String)> = vec![("host", self.authority.clone())];
         all_headers.extend(headers.iter().cloned());
-        let signed = sign_headers(
-            method,
-            &uri,
-            &all_headers,
-            &body,
-            &self.access_key,
-            &self.secret_key,
-            self.session_token.as_deref(),
-            SystemTime::now(),
-        )?;
+        let signed = if self.s3v2 && !path.starts_with("/minio/") {
+            self.sign_v2(method, path, &encode_query(query), &mut all_headers)
+        } else {
+            sign_headers(
+                method,
+                &uri,
+                &all_headers,
+                &body,
+                &self.access_key,
+                &self.secret_key,
+                self.session_token.as_deref(),
+                SystemTime::now(),
+            )?
+        };
 
         let mut builder = http::Request::builder().method(method).uri(&uri);
         for (name, value) in &all_headers {
@@ -161,14 +167,34 @@ impl AdminClient {
         for (name, value) in &signed {
             builder = builder.header(name.as_str(), value.as_str());
         }
+        // `-H/--custom-header`, added after signing like mc's header transport.
+        for (name, value) in crate::globals::custom_headers() {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
         builder = builder.header("content-length", body.len().to_string());
         let request = builder.body(SdkBody::from(body))?;
         let request = aws_smithy_runtime_api::http::Request::try_from(request)?;
+        let debug = crate::globals::debug();
+        if debug {
+            crate::net::trace::print(&crate::net::trace::format_request(
+                request.method(),
+                request.uri(),
+                request.headers(),
+            ));
+        }
+        let started = std::time::Instant::now();
         let response = self
             .connector
             .call(request)
             .await
             .map_err(|err| super::error::go_transport_error(&go_method(method), &uri, &err))?;
+        if debug {
+            crate::net::trace::print(&crate::net::trace::format_response(
+                response.status().as_u16(),
+                response.headers(),
+            ));
+            crate::net::trace::print(&format!("Response Time: {:?}\n\n", started.elapsed()));
+        }
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -237,6 +263,41 @@ impl AdminClient {
             body,
             headers,
         })
+    }
+
+    /// Signature V2 headers (`date`, `authorization`) for an S3 API request; none for
+    /// anonymous aliases.
+    fn sign_v2(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        headers: &mut Vec<(&str, String)>,
+    ) -> Vec<(String, String)> {
+        if self.access_key.is_empty() || self.secret_key.is_empty() {
+            return Vec::new();
+        }
+        if let Some(token) = &self.session_token {
+            headers.push(("x-amz-security-token", token.clone()));
+        }
+        let date = crate::net::sigv2::http_date(SystemTime::now());
+        let mut signable_headers: Vec<(&str, &str)> =
+            headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
+        signable_headers.push(("date", &date));
+        let signable = crate::net::sigv2::SignableV2 {
+            method,
+            host: &self.authority,
+            path,
+            query: query.trim_start_matches('?'),
+            headers: signable_headers,
+            virtual_host: false,
+        };
+        let authorization =
+            crate::net::sigv2::authorization(&signable, &self.access_key, &self.secret_key);
+        vec![
+            ("date".to_string(), date),
+            ("authorization".to_string(), authorization),
+        ]
     }
 
     /// Admin API request builder for `/minio/admin/v3/<api>` (see [`AdminRequest`]).

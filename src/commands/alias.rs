@@ -99,23 +99,34 @@ fn set(args: AliasSetArgs, json: bool) -> Result<()> {
     }
     let api = args.api.as_deref().map(normalize_api).transpose()?;
     let path = normalize_path(&args.path)?;
-    // Without `--api`, mc probes the server for the signature version (and fails when the
-    // server cannot be reached).
+    const INIT_FAILED: &str = "Unable to initialize new alias from the provided credentials.";
+    // mc offers to trust an unknown self-signed certificate on a terminal (not with
+    // `--insecure` or `--json`).
+    if !crate::globals::insecure() && !json && io::stdout().is_terminal() {
+        prompt_trust_self_signed_cert(&url, &alias).context(INIT_FAILED)?;
+    }
+    // Without `--api`, mc probes the server for the signature version: S3v4, then S3v2 (the
+    // S3v2 error is reported when both fail).
     let api = match api {
         Some(api) => api,
         None => {
-            let probe = AliasConfig {
+            let probe = |api: &str| AliasConfig {
                 url: url.clone(),
                 access_key: access_key.clone(),
                 secret_key: secret_key.clone(),
-                api: "S3v4".to_string(),
+                api: api.to_string(),
                 path: path.clone(),
                 ..Default::default()
             };
-            crate::commands::runtime()?
-                .block_on(crate::s3::probe_signature(&probe))
-                .context("Unable to initialize new alias from the provided credentials.")?;
-            "s3v4".to_string()
+            let rt = crate::commands::runtime()?;
+            match rt.block_on(crate::s3::probe_signature(&probe("S3v4"))) {
+                Ok(()) => "s3v4".to_string(),
+                Err(_) => {
+                    rt.block_on(crate::s3::probe_signature(&probe("S3v2")))
+                        .context(INIT_FAILED)?;
+                    "s3v2".to_string()
+                }
+            }
         }
     };
 
@@ -365,6 +376,52 @@ fn collect_credentials(
     };
 
     Ok((access_key.trim().to_string(), secret_key.trim().to_string()))
+}
+
+/// mc `promptTrustSelfSignedCert`: when an `https` server's certificate is self-signed and
+/// not trusted yet, shows its public key fingerprint and, on `y`/`yes`, saves it as
+/// `<config dir>/certs/CAs/<alias>.crt`. Any other verification failure, a certificate issued
+/// by an unknown CA, or another answer is an error.
+fn prompt_trust_self_signed_cert(url: &str, alias: &str) -> Result<()> {
+    use crate::net::tls::{PeerTrust, probe_peer};
+    let parsed = Url::parse(url)?;
+    let PeerTrust::UnknownAuthority { error, cert } = probe_peer(&parsed)? else {
+        return Ok(());
+    };
+    let untrusted = || anyhow::Error::new(McError::new(error.clone()));
+    let info = crate::net::x509::parse(cert.as_ref()).map_err(|_| untrusted())?;
+    if !info.is_self_signed() {
+        return Err(untrusted());
+    }
+    let color = |code: &str, text: &str| {
+        if crate::globals::no_color() {
+            text.to_string()
+        } else {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        }
+    };
+    print!(
+        "Fingerprint of {} public key: {}\nConfirm public key y/N: ",
+        color("32", alias),
+        color("33", &info.fingerprint())
+    );
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if !answer.ends_with('\n') {
+        return Err(McError::new("EOF").into());
+    }
+    let answer = answer.to_lowercase();
+    if answer != "y\n" && answer != "yes\n" {
+        return Err(untrusted());
+    }
+    let dir = crate::net::tls::cas_dir().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join(format!("{alias}.crt")),
+        crate::net::x509::to_pem(cert.as_ref()),
+    )?;
+    Ok(())
 }
 
 fn prompt_line(prompt: &str) -> Result<String> {

@@ -272,7 +272,9 @@ fn transport_message(err: &(dyn std::error::Error + 'static)) -> String {
         current = source;
         text = current.to_string();
     }
-    if text.contains("UnknownIssuer") {
+    // webpki rejects an unknown self-signed `CA:TRUE` server certificate as
+    // `CaUsedAsEndEntity`; Go reports it as an unknown authority.
+    if text.contains("UnknownIssuer") || text.contains("CaUsedAsEndEntity") {
         return "tls: failed to verify certificate: x509: certificate signed by unknown authority"
             .to_string();
     }
@@ -280,6 +282,10 @@ fn transport_message(err: &(dyn std::error::Error + 'static)) -> String {
         return match io.kind() {
             std::io::ErrorKind::ConnectionRefused => "connect: connection refused".to_string(),
             std::io::ErrorKind::ConnectionReset => "connection reset by peer".to_string(),
+            // Connection deadlines (`net::deadline`) already use Go's `read tcp A->B: ...`.
+            std::io::ErrorKind::TimedOut if io.to_string().ends_with("i/o timeout") => {
+                io.to_string()
+            }
             std::io::ErrorKind::TimedOut => "i/o timeout".to_string(),
             _ => io.to_string(),
         };

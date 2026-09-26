@@ -2,9 +2,10 @@
 //! TLS (`--insecure`, `certs/CAs`), and request interceptors (`-H`, `--debug`, `--limit-*`).
 
 use crate::config::model::AliasConfig;
+use crate::net::sigv2::SigV2AuthScheme;
 use crate::net::throttle::{Limiter, throttle_body};
 use crate::net::trace;
-use anyhow::{Result, bail};
+use anyhow::Result;
 use aws_config::BehaviorVersion;
 use aws_credential_types::{Credentials, provider::SharedCredentialsProvider};
 use aws_sdk_s3::Client;
@@ -20,17 +21,12 @@ use aws_smithy_runtime_api::client::interceptors::context::{
 };
 use aws_smithy_types::body::SdkBody;
 use aws_smithy_types::config_bag::{Storable, StoreReplace};
-use aws_smithy_types::timeout::TimeoutConfig;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Builds an S3 client for an alias. Cheap enough per command, but reuse the returned client
 /// for bulk operations (`Client` is `Clone` and shares its connection pool).
 pub async fn build_client(alias: &AliasConfig) -> Result<Client> {
-    if alias.api.eq_ignore_ascii_case("S3v2") {
-        bail!("API `{}` is not supported yet.", alias.api);
-    }
-
     let credentials = Credentials::new(
         alias.access_key.clone(),
         alias.secret_key.clone(),
@@ -40,8 +36,13 @@ pub async fn build_client(alias: &AliasConfig) -> Result<Client> {
     );
 
     let loader = aws_config::defaults(BehaviorVersion::latest())
-        .region(aws_sdk_s3::config::Region::new("us-east-1"))
-        .credentials_provider(SharedCredentialsProvider::new(credentials));
+        .region(aws_sdk_s3::config::Region::new("us-east-1"));
+    // Anonymous aliases (empty keys) send unsigned requests, like minio-go.
+    let loader = if alias.access_key.is_empty() || alias.secret_key.is_empty() {
+        loader.no_credentials()
+    } else {
+        loader.credentials_provider(SharedCredentialsProvider::new(credentials))
+    };
     let loader = match http_client(alias)? {
         Some(http_client) => loader.http_client(http_client),
         None => loader,
@@ -49,50 +50,37 @@ pub async fn build_client(alias: &AliasConfig) -> Result<Client> {
     let shared_config = loader.load().await;
 
     let force_path_style = force_path_style(alias)?;
-    let mut builder = aws_sdk_s3::config::Builder::from(&shared_config);
-    if let Some(timeouts) = conn_deadline_timeouts(shared_config.timeout_config()) {
-        builder = builder.timeout_config(timeouts);
-    }
-    let config = builder
+    let config = aws_sdk_s3::config::Builder::from(&shared_config)
         .endpoint_url(alias.url.clone())
         .force_path_style(force_path_style)
         .request_checksum_calculation(aws_sdk_s3::config::RequestChecksumCalculation::WhenRequired)
         .response_checksum_validation(aws_sdk_s3::config::ResponseChecksumValidation::WhenRequired)
         .interceptor(StripFlexibleChecksums)
-        .interceptor(GlobalFlags::from_globals())
-        .build();
+        .interceptor(GlobalFlags::from_globals());
+    let config = if is_s3v2(alias) {
+        config.push_auth_scheme(SigV2AuthScheme::new(!force_path_style))
+    } else {
+        config
+    }
+    .build();
 
     Ok(Client::from_conf(config))
 }
 
-static CONN_DEADLINES: OnceLock<(Option<Duration>, Option<Duration>)> = OnceLock::new();
+/// True for aliases with `api: S3v2` (AWS Signature Version 2).
+pub fn is_s3v2(alias: &AliasConfig) -> bool {
+    alias.api.eq_ignore_ascii_case("S3v2")
+}
 
-/// Stores mc's hidden `--conn-read-deadline` / `--conn-write-deadline` (0 = no deadline).
+/// Stores mc's hidden `--conn-read-deadline` / `--conn-write-deadline` (0 = no deadline):
+/// per-read / per-write socket deadlines of the custom HTTP stack (`net::deadline`).
 pub fn set_conn_deadlines(read: Option<Duration>, write: Option<Duration>) {
-    let positive = |value: Option<Duration>| value.filter(|d| !d.is_zero());
-    let _ = CONN_DEADLINES.set((positive(read), positive(write)));
+    crate::net::deadline::set(read, write);
 }
 
-/// mc sets per-read/per-write socket deadlines; the SDK has no per-I/O deadline, so the read
-/// deadline bounds the wait for each response (SDK read timeout) and the write deadline bounds
-/// connection setup (SDK connect timeout). None when neither flag is set (SDK defaults).
-fn conn_deadline_timeouts(base: Option<&TimeoutConfig>) -> Option<TimeoutConfig> {
-    let (read, write) = CONN_DEADLINES.get().copied().unwrap_or_default();
-    if read.is_none() && write.is_none() {
-        return None;
-    }
-    let mut builder = base.map(TimeoutConfig::to_builder).unwrap_or_default();
-    if let Some(read) = read {
-        builder = builder.read_timeout(read);
-    }
-    if let Some(write) = write {
-        builder = builder.connect_timeout(write);
-    }
-    Some(builder.build())
-}
-
-/// Picks the HTTP client for the global flags: the SDK default unless `--resolve` pins this
-/// endpoint, extra CAs exist in `certs/CAs`, or `--insecure` is set.
+/// Picks the HTTP client for the global flags: the SDK default unless `--insecure`, CAs in
+/// `certs/CAs` or connection deadlines need the custom stack, or `--resolve` pins this
+/// endpoint.
 fn http_client(alias: &AliasConfig) -> Result<Option<SharedHttpClient>> {
     let endpoint = url::Url::parse(&alias.url)?;
     let endpoint_host = endpoint.host_str().unwrap_or_default();
@@ -104,37 +92,95 @@ fn http_client(alias: &AliasConfig) -> Result<Option<SharedHttpClient>> {
         })
         .collect();
     let resolver = crate::resolve::PinnedDnsResolver::new(&mappings)?;
-
-    if crate::globals::insecure() {
-        return Ok(Some(crate::net::tls::insecure_http_client(resolver)?));
+    if let Some(client) = crate::net::tls::custom_http_client(resolver.clone())? {
+        return Ok(Some(client));
     }
-
-    let tls_context = crate::net::tls::custom_ca_context()?;
-    if mappings.is_empty() && tls_context.is_none() {
+    if mappings.is_empty() {
         return Ok(None);
     }
-    let tls_context = tls_context.unwrap_or_default();
-    let builder = HttpClientBuilder::new()
-        .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
-        .tls_context(tls_context);
-    Ok(Some(if mappings.is_empty() {
-        builder.build_https()
-    } else {
-        builder.build_with_resolver(resolver)
-    }))
+    Ok(Some(
+        HttpClientBuilder::new()
+            .tls_provider(tls::Provider::Rustls(CryptoMode::AwsLc))
+            .build_with_resolver(resolver),
+    ))
 }
 
+/// Path-style requests for the alias `path` setting (mc `getLookupType`): `on` = path,
+/// `off` = virtual host, anything else = auto, which uses virtual-host style only for Amazon
+/// S3, Google Cloud Storage and Aliyun OSS endpoints (minio-go `IsVirtualHostSupported`).
 pub fn force_path_style(alias: &AliasConfig) -> Result<bool> {
     match alias.path.to_ascii_lowercase().as_str() {
         "on" => Ok(true),
         "off" => Ok(false),
-        "dns" => Ok(false),
         _ => {
             let parsed = url::Url::parse(&alias.url)?;
             let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
-            Ok(!(host.ends_with("amazonaws.com") || host == "storage.googleapis.com"))
+            Ok(!(is_amazon_endpoint(&host)
+                || host == "storage.googleapis.com"
+                || host.ends_with("aliyuncs.com")))
         }
     }
+}
+
+/// minio-go `s3utils.IsAmazonEndpoint`: `s3.amazonaws.com`, `s3-external-1`, or a host with
+/// a region (`GetRegionFromURL`), except S3 on Outposts.
+fn is_amazon_endpoint(host: &str) -> bool {
+    use regex::Regex;
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    static OUTPOSTS: OnceLock<Regex> = OnceLock::new();
+    static ELB: OnceLock<Regex> = OnceLock::new();
+    if OUTPOSTS
+        .get_or_init(|| {
+            Regex::new(r"^(.+)\.s3-outposts\.([a-z0-9-]+)\.amazonaws\.com$").expect("regex")
+        })
+        .is_match(host)
+    {
+        return false;
+    }
+    if host == "s3-external-1.amazonaws.com" || host == "s3.amazonaws.com" {
+        return true;
+    }
+    if ELB
+        .get_or_init(|| Regex::new(r"elb(.*?).amazonaws.com(\.cn)?$").expect("regex"))
+        .is_match(host)
+    {
+        return false;
+    }
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            r"^s3-fips.dualstack.(.*?).amazonaws.com$",
+            r"^s3-fips.(.*?).amazonaws.com$",
+            r"^s3.dualstack.(.*?).amazonaws.com$",
+            r"^s3-(.*?).amazonaws.com$",
+            r"^s3.(cn.*?).amazonaws.com.cn$",
+            r"^s3.dualstack.(cn.*?).amazonaws.com.cn$",
+            r"^(?:bucket|accesspoint).vpce-.*?.s3.(.*?).vpce.amazonaws.com$",
+            r"^s3express-[a-z0-9]+(?:-[a-z0-9]+)*-az[0-9]+(?:\.dualstack)?\.([a-z0-9-]+)\.amazonaws\.com$",
+            r"^s3express-control(?:-dualstack)?\.([a-z0-9-]+)\.amazonaws\.com$",
+        ]
+        .iter()
+        .map(|pattern| Regex::new(pattern).expect("regex"))
+        .collect()
+    });
+    if patterns.iter().any(|re| {
+        re.captures(host)
+            .and_then(|caps| caps.get(1))
+            .is_some_and(|region| !region.as_str().is_empty())
+    }) {
+        return true;
+    }
+    // `s3.<region>.amazonaws.com`, but not the dualstack/control/website/express forms.
+    static DOT: OnceLock<Regex> = OnceLock::new();
+    DOT.get_or_init(|| Regex::new(r"^s3.(.*?).amazonaws.com$").expect("regex"))
+        .captures(host)
+        .and_then(|caps| caps.get(1))
+        .is_some_and(|region| {
+            let region = region.as_str();
+            !region.is_empty()
+                && !["xpress-", "dualstack.", "control.", "website-"]
+                    .iter()
+                    .any(|prefix| region.starts_with(prefix))
+        })
 }
 
 /// Strips unsigned SDK metadata headers that MinIO rejects. The SDK adds them in its own
@@ -294,10 +340,48 @@ mod tests {
     }
 
     #[test]
+    fn auto_lookup_matches_minio_go() {
+        let auto = |url: &str| {
+            force_path_style(&AliasConfig {
+                url: url.into(),
+                path: "auto".into(),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        for virtual_host in [
+            "https://s3.amazonaws.com",
+            "https://s3.us-west-2.amazonaws.com",
+            "https://s3-us-west-2.amazonaws.com",
+            "https://s3.dualstack.eu-west-1.amazonaws.com",
+            "https://s3.cn-north-1.amazonaws.com.cn",
+            "https://storage.googleapis.com",
+            "https://oss-cn-hangzhou.aliyuncs.com",
+        ] {
+            assert!(!auto(virtual_host), "{virtual_host}");
+        }
+        for path in [
+            "http://localhost:9000",
+            "https://play.min.io",
+            "https://my-elb-1.us-east-1.elb.amazonaws.com",
+            "https://op-01.s3-outposts.us-west-2.amazonaws.com",
+            "https://example.amazonaws.com",
+        ] {
+            assert!(auto(path), "{path}");
+        }
+        let dns = AliasConfig {
+            url: "http://localhost:9000".into(),
+            path: "dns".into(),
+            ..Default::default()
+        };
+        assert!(force_path_style(&dns).unwrap(), "mc treats `dns` as auto");
+    }
+
+    #[test]
     fn disables_path_style_for_aws_dns() {
         let alias = AliasConfig {
             url: "https://s3.amazonaws.com".into(),
-            path: "dns".into(),
+            path: "off".into(),
             ..Default::default()
         };
 

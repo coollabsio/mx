@@ -41,7 +41,7 @@ server support that varies between S3-compatible servers.
 | `undo` | Supported | `-r --force`, `--last`, `--action`, `--dry-run`. mc output and errors. |
 | `od` | Supported | Single-stream upload and download measurement. mc output and errors (local sources shown as absolute paths). |
 | `quota set`, `info`, `clear` | Supported | MinIO admin API. Sizes parsed like go-humanize (`1GB` = 10^9, `1GiB` = 2^30). |
-| `replicate add`, `update`, `ls`, `status`, `resync`, `export`, `import`, `rm`, `backlog` | Supported | MinIO admin API. `status` (incl. `--nodes`), `ls`, `export` text and JSON match mc (JSON re-marshaled through minio-go/madmin types). `backlog` text in mc is an interactive bubbletea view: without a terminal mx fails like mc (`could not open a new TTY`); on a terminal mx prints a static table. `backlog --json` matches mc. |
+| `replicate add`, `update`, `ls`, `status`, `resync`, `export`, `import`, `rm`, `backlog` | Supported | MinIO admin API. `status` (incl. `--nodes`), `ls`, `export` text and JSON match mc (JSON re-marshaled through minio-go/madmin types). `backlog` text in mc is an interactive bubbletea view: without a terminal mx fails like mc (`could not open a new TTY`); on a terminal mx shows an inline view with mc's columns (spinner while loading, `Total Unreplicated` summary, a 9-row scrollable table, `↑/k` `↓/j` `enter` `q`/ctrl+c). Styling approximates bubbles/lipgloss. `backlog --json` matches mc. |
 | `ping` | Supported | Uses the health endpoint. `-c`, `-e`, `-x/--exit`, `-i`, `-a/--distributed` and `--node` (node list from the admin ServerInfo API). Runs until interrupted when `-c` is not given. Text, summary table and JSON (Go `url.URL` endpoint) match mc; `dns` is always `0s`, and a failing ServerInfo call errors at once (mc retries forever). |
 | `ready` | Supported | `--cluster-read`, `--maintenance`. Retries until the server is ready. |
 | `admin user add`, `disable`, `enable`, `remove`, `list`, `info`, `policy` | Supported | MinIO admin API (madmin encrypted requests). `add` prompts for missing keys on a terminal, else reads them from stdin. mc text/JSON; `list` is sorted by access key (mc prints Go map order). `policy` prints the merged policy document. |
@@ -97,10 +97,27 @@ server support that varies between S3-compatible servers.
   defined: -bogus` (Go wording) plus mc's `SUPPORTED FLAGS:` block; unknown
   commands print mc's "not a recognized command" text with "Did you mean"
   suggestions; missing arguments print the command help. All exit 1.
-- `alias set` without `--api` probes the server like mc (and fails when it is
-  unreachable); access keys need 3+ and secret keys 8+ characters. The probe
-  always stores `S3v4`: S3v2 signing is not supported (`--api S3v2` is stored,
-  but commands on that alias fail).
+- `alias set` without `--api` probes the server like mc: S3v4 first, then S3v2
+  (stored as `s3v4` / `s3v2`; the S3v2 error is reported when both fail, and
+  unreachable servers fail). Access keys need 3+ and secret keys 8+ characters.
+- `api: S3v2` aliases sign with AWS Signature V2 exactly like minio-go
+  (`Authorization: AWS key:sig`, `Date`, canonical x-amz headers and
+  sub-resources); `share download` presigns with `AWSAccessKeyId`/`Expires`/
+  `Signature`, `share upload` signs a V2 POST policy. MinIO bucket
+  sub-resource requests (`replicate ls/export`, ...) are V2-signed too; admin API
+  requests always use SigV4 (like madmin). Anonymous aliases (empty keys) send
+  unsigned requests. The whole `live_mc_parity` suite also passes with
+  `MX_TEST_API=S3v2`, apart from fixtures MinIO rejects under V2 (tagging).
+- `--path auto` uses virtual-host style only for Amazon S3, Google Cloud Storage
+  and Aliyun OSS endpoints (minio-go `IsVirtualHostSupported`); `on` is path
+  style, `off` virtual-host style, other values mean auto (mc `getLookupType`).
+- On a terminal (not with `--insecure`/`--json`), `alias set` for an `https`
+  server with an untrusted self-signed certificate prints mc's `Fingerprint of
+  ALIAS public key: <sha256 of the public key info>` / `Confirm public key y/N:`
+  prompt and, on `y`/`yes`, saves it as `<config dir>/certs/CAs/ALIAS.crt`.
+  Certificates issued by an unknown CA, other answers and non-terminals fail with
+  mc's `x509: certificate signed by unknown authority` error. mc then fails its
+  own probe on the first run; mx trusts the saved certificate right away.
 - `MC_*` environment variables: `MC_CONFIG_DIR`, `MC_QUIET`, `MC_DISABLE_PAGER`,
   `MC_NO_COLOR`, `MC_JSON`, `MC_DEBUG`, `MC_RESOLVE` (comma separated),
   `MC_INSECURE`, `MC_LIMIT_UPLOAD`, `MC_LIMIT_DOWNLOAD`. Booleans use Go
@@ -112,10 +129,14 @@ server support that varies between S3-compatible servers.
 - `--config-dir` / `-C`
 - `--quiet` / `-q`
 - `--insecure` skips TLS certificate verification.
-- CA certificates in `<config dir>/certs/CAs/` are trusted.
-- `--debug` prints an mc-style HTTP trace to stderr. Credentials, signatures,
+- CA certificates in `<config dir>/certs/CAs/` are trusted; a certificate there that is
+  exactly the server's certificate is accepted even when it is a self-signed CA (Go
+  accepts it, webpki alone would not).
+- `--debug` prints an mc-style HTTP trace to stderr for S3 and admin API
+  requests. Credentials, signatures (SigV4 and `AWS **REDACTED**:**REDACTED**`),
   SSE-C keys, and session tokens are redacted.
-- `-H` / `--custom-header KEY:VALUE` (repeatable)
+- `-H` / `--custom-header KEY:VALUE` (repeatable), on S3 and admin API requests
+  (admin requests add them after signing, like mc).
 - `--limit-upload RATE`, `--limit-download RATE` (e.g. `10MiB`)
 - `--resolve HOST:PORT=IP` (repeatable)
 - `--disable-pager` / `--dp` and `--no-color` are accepted. They do nothing
@@ -127,9 +148,11 @@ server support that varies between S3-compatible servers.
   `License Apache-2.0 <...>` (mc names MinIO and AGPLv3 there).
 
 Hidden `--conn-read-deadline` and `--conn-write-deadline` (Go durations such as `10m`)
-are accepted. mc sets per-read/per-write socket deadlines; the SDK has no per-I/O deadline,
-so `mx` applies the read deadline as the S3 read timeout (time until a response arrives)
-and the write deadline as the connect timeout. Without the flags the SDK defaults apply.
+set per-read / per-write socket deadlines like mc's `deadlineconn`: every read or write on
+the connection (below TLS, S3 and admin requests) must finish within the duration from its
+start, and fails with Go's `read tcp LOCAL->REMOTE: i/o timeout`. mc only honors them after
+the command name (before it the subcommand's 10m default wins); mx honors both positions.
+Without the flags no deadline applies (mc defaults to 10m).
 
 ## Intentional differences from mc
 
@@ -157,10 +180,10 @@ and the write deadline as the connect timeout. Without the flags the SDK default
   (`tests/mc.version`) by `tests/live_mc_parity.rs`; all cases pass. Help text is
   not identical, and some errors differ where mc depends on minio-go internals
   (bucket location lookups).
-- No S3v2 signing, so `alias set` never detects S3v2 servers.
-- No TLS trust prompt flow for unknown certificates (use `certs/CAs/` or `--insecure`).
-- `--conn-write-deadline` is only a connect timeout (see above).
-- `replicate backlog` text is a static table, not mc's interactive view.
+- Transport errors of S3 commands (TLS verification, deadlines) lack mc's
+  `Get "URL": ` prefix, and JSON errors do not embed Go's `url.Error` struct.
+- `replicate backlog` on a terminal approximates the bubbletea view (no lipgloss colors
+  or exact borders).
 - `share upload` sorts the curl `-F` fields; `ping` reports `dns` as `0s`.
 
 ## Container and release binaries
