@@ -146,6 +146,63 @@ fn logs_argument_errors_match_mc() {
         .stderr("");
 }
 
+/// Alias URL of a server answering every request with 200 and `body`, plus a request count.
+fn fake_server(body: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://minio:minio123@{}", listener.local_addr().unwrap());
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    (url, hits)
+}
+
+#[test]
+fn heal_start_without_client_token_is_an_error() {
+    let (url, _) =
+        fake_server(r#"{"clientToken":"","clientAddress":"","startTime":"2026-01-01T00:00:00Z"}"#);
+    let h = home();
+    mx(&h)
+        .env("MC_HOST_live", url)
+        .args(["admin", "heal", "-r", "live/bucket"])
+        .timeout(Duration::from_secs(10))
+        .assert()
+        .code(1)
+        .stderr("mx: <ERROR> Unable to start healing. server returned no heal client token.\n");
+}
+
+#[test]
+fn logs_reconnect_backs_off_when_the_server_ends_the_stream() {
+    let (url, hits) = fake_server("");
+    let h = home();
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("mx"))
+        .env("HOME", h.path())
+        .env("MC_HOST_live", url)
+        .args(["admin", "logs", "live"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(2000));
+    let _ = child.kill();
+    let _ = child.wait();
+    let hits = hits.load(std::sync::atomic::Ordering::SeqCst);
+    assert!((1..=6).contains(&hits), "{hits} log requests in 2s");
+}
+
 #[test]
 fn heal_argument_errors_match_mc() {
     let h = home();
@@ -180,6 +237,13 @@ fn heal_argument_errors_match_mc() {
         .stderr(predicate::str::starts_with(
             "mx: <ERROR> Unable to start healing.",
         ));
+    // madmin rejects both force flags before any request (mc fails to stop).
+    mx(&h)
+        .args(["admin", "heal", "--force-start", "--force-stop", "dead/bucket"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr("mx: <ERROR> Unable to stop healing. forceStart and forceStop set to true is not allowed.\n");
 }
 
 #[test]

@@ -219,6 +219,11 @@ pub fn run(args: LogsArgs, json: bool) -> Result<()> {
                 };
                 quiet_pipe(emit(&text))?;
             }
+            // Don't spin (and replay `--last N`) when the server keeps ending the stream.
+            tokio::select! {
+                code = &mut signal => return Err(Exit(code).into()),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
         }
     })
 }

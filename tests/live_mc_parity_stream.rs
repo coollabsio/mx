@@ -295,6 +295,15 @@ fn parity_admin_heal_single_drive_errors() {
         &["admin", "heal", "-v", "{alias}"],
         &["admin", "heal", "-r", "{target}"],
         &["admin", "heal", "--force-stop", "{target}"],
+        &["admin", "heal", "--force-start", "--force-stop", "{target}"],
+        &[
+            "admin",
+            "heal",
+            "-r",
+            "--force-start",
+            "--force-stop",
+            "{alias}",
+        ],
         &["admin", "heal", "--pool", "0", "-r", "{target}"],
         &["admin", "heal", "nosuchalias"],
     ] {

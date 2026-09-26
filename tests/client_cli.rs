@@ -713,6 +713,35 @@ fn replicate_backlog_view_runs_on_a_tty_and_quits_with_q() {
 }
 
 #[test]
+fn replicate_backlog_view_quits_while_the_fetch_is_loading() {
+    if !have("script") {
+        eprintln!("skipping: needs `script`");
+        return;
+    }
+    // The backlog request stalls; `q` must not wait for it.
+    let (url, _) = fake_server(Arc::new(|request| {
+        if request.path.starts_with("/minio/admin/") {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+        (200, vec![], String::new())
+    }));
+    let home = tempfile::tempdir().unwrap();
+    mx(home.path())
+        .args([
+            "alias", "set", "rep", &url, "minio", "minio123", "--api", "S3v4",
+        ])
+        .assert()
+        .success();
+    let started = Instant::now();
+    let (output, success) = run_on_tty(home.path(), "replicate backlog rep/bucket", "q");
+    assert!(success, "{output}");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "quit waited for the fetch: {output}"
+    );
+}
+
+#[test]
 fn replicate_backlog_without_a_tty_keeps_mc_error() {
     let (url, _) = fake_server(Arc::new(|_| (200, vec![], String::new())));
     let home = tempfile::tempdir().unwrap();

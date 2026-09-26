@@ -44,6 +44,27 @@ pub fn stdout_is_terminal() -> bool {
     *TTY.get_or_init(|| std::io::stdout().is_terminal())
 }
 
+/// mc `isTerminal`: stdout and stderr are both terminals (gates confirmation prompts).
+pub fn is_terminal() -> bool {
+    stdout_is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// mc's `bufio.NewReader(os.Stdin).ReadString('\n')` confirmation read: a line without
+/// its newline (closed or redirected stdin) is an `EOF` error. Returns the trimmed,
+/// lowercased answer.
+pub fn read_answer() -> anyhow::Result<String> {
+    use std::io::BufRead;
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .map_err(|err| crate::error::McError::new(err.to_string()))?;
+    if !answer.ends_with('\n') {
+        return Err(crate::error::McError::new("EOF").into());
+    }
+    Ok(answer.trim().to_lowercase())
+}
+
 /// Serializes `value` like mc: compact when `line` is true (JSON lines, non-TTY), otherwise
 /// Go `json.MarshalIndent(v, "", " ")` (one-space indent). Like Go, `<`, `>`, `&`, U+2028 and
 /// U+2029 are escaped.

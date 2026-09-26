@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::Write;
 
 #[derive(Debug, Args)]
 pub struct HealArgs {
@@ -183,20 +183,14 @@ pub fn run(args: HealArgs, json: bool) -> Result<()> {
     if opts.recursive
         && opts.pool.is_none()
         && opts.set.is_none()
-        && output::stdout_is_terminal()
+        && output::is_terminal()
         && !args.force
     {
         print!(
             "You are about to scan and heal the whole namespace in all pools and sets, please confirm [y/N]: "
         );
         let _ = std::io::stdout().flush();
-        let mut answer = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut answer)
-            .map_err(|err| anyhow::Error::new(McError::new(err.to_string())))
-            .context("Unable to parse user input.")?;
-        let answer = answer.trim().to_lowercase();
+        let answer = output::read_answer().context("Unable to parse user input.")?;
         if answer != "y" && answer != "yes" {
             println!("Heal aborted!");
             return Ok(());
@@ -213,8 +207,15 @@ pub fn run(args: HealArgs, json: bool) -> Result<()> {
             false,
         ))
         .context("Unable to start healing.")?;
-    let HealReply::Started(start) = start else {
-        return Ok(());
+    let start = match start {
+        HealReply::Started(start) if !start.client_token.is_empty() => start,
+        // Following needs the sequence token; without it every poll would start a new heal.
+        _ => {
+            return Err(
+                anyhow::Error::new(McError::new("server returned no heal client token"))
+                    .context("Unable to start healing."),
+            );
+        }
     };
     let mut ui = Ui {
         bucket,
@@ -1096,7 +1097,7 @@ impl Ui {
                 reply = stream::heal(client, &self.bucket, &self.prefix, &self.opts, &self.token, self.force_start, false) => reply?,
             };
             let HealReply::Status(status) = reply else {
-                continue;
+                return Err(McError::new("unexpected heal start reply to a status request").into());
             };
             quiet_pipe(self.update_display(&status))?;
             if status.summary == "finished" {

@@ -8,7 +8,7 @@ use crate::s3::admin_server::{self as api, ServerUpdateStatus};
 use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::Write;
 
 #[derive(Debug, Args)]
 pub struct UpdateArgs {
@@ -33,15 +33,10 @@ struct UpdateMessage<'a> {
 
 pub fn run(args: UpdateArgs, json: bool) -> Result<()> {
     let client = api::admin_client(&args.target, "Unable to initialize admin connection.")?;
-    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() && !args.yes {
+    if crate::output::is_terminal() && !args.yes {
         print!("You are about to upgrade *MinIO Server*, please confirm [y/N]: ");
         std::io::stdout().flush()?;
-        let mut answer = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut answer)
-            .context("Unable to parse user input.")?;
-        let answer = answer.trim().to_lowercase();
+        let answer = crate::output::read_answer().context("Unable to parse user input.")?;
         if answer != "y" && answer != "yes" {
             println!("Upgrade aborted!");
             return Ok(());

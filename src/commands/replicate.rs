@@ -1725,6 +1725,12 @@ mod backlog_view {
             let _ = execute!(stdout, cursor::Show);
             let _ = terminal::disable_raw_mode();
             println!();
+            if result.is_ok() && view.loading {
+                // Quit during the fetch: exit now instead of joining the fetch thread,
+                // which only returns once the listing finishes (mc exits immediately).
+                let _ = std::io::Write::flush(&mut stdout);
+                std::process::exit(0);
+            }
             result
         })
     }

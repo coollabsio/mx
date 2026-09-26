@@ -2,6 +2,8 @@
 //! scanner status|cluster`, the hidden `admin tier|bucket|profile|subnet|health` and `update`.
 //! Nothing here needs a server (unreachable aliases, argument validation, local-only output).
 
+mod common;
+
 use assert_cmd::Command;
 
 struct Home {
@@ -422,4 +424,27 @@ fn update_is_not_supported() {
         text(&out.stdout),
         "{\"status\":\"error\",\"error\":{\"message\":\"Unable to update ‘mx’.\",\"cause\":{\"message\":\"self-update is not supported; install a newer release manually\",\"error\":{}},\"type\":\"error\"}}\n"
     );
+}
+
+#[test]
+fn admin_update_prompts_on_a_terminal_even_with_redirected_stdin() {
+    // mc `isTerminal()` checks stdout and stderr only; the prompt then reads EOF.
+    if !common::tty::have("script") {
+        eprintln!("skipping: needs `script`");
+        return;
+    }
+    let home = Home::with_alias("dead", DEAD);
+    let (out, ok) = common::tty::run(
+        &assert_cmd::cargo::cargo_bin("mx"),
+        home.dir.path(),
+        "admin update dead < /dev/null",
+        "",
+    );
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("You are about to upgrade *MinIO Server*, please confirm [y/N]: "),
+        "{out}"
+    );
+    assert!(out.contains("Unable to parse user input. EOF"), "{out}");
+    assert!(!out.contains("Unable to update the server."), "{out}");
 }

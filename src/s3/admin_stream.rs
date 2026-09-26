@@ -532,6 +532,12 @@ pub async fn heal(
     force_start: bool,
     force_stop: bool,
 ) -> Result<HealReply> {
+    if force_start && force_stop {
+        return Err(super::admin_iam::madmin_invalid_argument(
+            "forceStart and forceStop set to true is not allowed",
+        )
+        .into());
+    }
     let mut api = format!("heal/{bucket}");
     if !bucket.is_empty() && !prefix.is_empty() {
         api = format!("{api}/{prefix}");
