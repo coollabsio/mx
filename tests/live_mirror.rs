@@ -452,7 +452,7 @@ fn live_conn_deadlines_apply() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("timed out"));
+        .stderr(predicate::str::contains("i/o timeout"));
     live.cmd()
         .args([
             "--conn-read-deadline",

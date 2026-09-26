@@ -47,3 +47,4 @@ network); export both the host URL and the internal address when both are needed
 | file | exports |
 |------|---------|
 | `minio_pools.sh` | `MX_TEST_POOLS_URL`, `MX_TEST_POOLS_ACCESS_KEY`, `MX_TEST_POOLS_SECRET_KEY`, `MX_TEST_POOLS_POOL1` (`/data{1...4}`), `MX_TEST_POOLS_POOL2` (`/data{5...8}`) |
+| `client_selfsigned.sh` | `MX_TEST_SELFSIGNED_URL` (MinIO with a self-signed `CA:TRUE` certificate, root credentials), `MX_TEST_SELFSIGNED_CERT` (its PEM) |

@@ -1,10 +1,14 @@
 //! Networking helpers behind the global flags: TLS trust (`--insecure`, `certs/CAs`),
-//! bandwidth limits (`--limit-upload/--limit-download`) and the `--debug` HTTP trace.
+//! connection deadlines, bandwidth limits (`--limit-upload/--limit-download`), the `--debug`
+//! HTTP trace, and S3 Signature V2.
 //! Wired into every S3 client by [`crate::s3::client::build_client`].
 
+pub mod deadline;
+pub mod sigv2;
 pub mod throttle;
 pub mod tls;
 pub mod trace;
+pub mod x509;
 
 use anyhow::{Result, anyhow};
 

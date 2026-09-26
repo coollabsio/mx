@@ -1,7 +1,6 @@
 //! `mx replicate add|update|ls|status|resync|export|import|rm|backlog` (MinIO bucket
 //! replication: remote targets via the admin API, rules via `?replication`).
 
-use crate::commands::ilm_tier::{Align, render_table};
 use crate::commands::runtime;
 use crate::commands::util::require_s3;
 use crate::config::ConfigStore;
@@ -1392,18 +1391,15 @@ fn backlog(args: ReplicateBacklogArgs, json: bool) -> Result<()> {
     let src = source(&args.target)?;
     let rt = runtime()?;
     if !args.full {
-        if !json && let Some(err) = backlog_tty_error() {
-            return Err(err);
-        }
-        let entries = rt
-            .block_on(replication::replication_mrf(
-                &src.client,
-                &src.bucket,
-                &args.nodes,
-            ))
-            .map_err(|err| McError::new(err.to_string()))
-            .context("Unable to fetch replication backlog.")?;
         if json {
+            let entries = rt
+                .block_on(replication::replication_mrf(
+                    &src.client,
+                    &src.bucket,
+                    &args.nodes,
+                ))
+                .map_err(|err| McError::new(err.to_string()))
+                .context("Unable to fetch replication backlog.")?;
             #[derive(Serialize)]
             struct Mrf<'a> {
                 op: &'a str,
@@ -1424,38 +1420,47 @@ fn backlog(args: ReplicateBacklogArgs, json: bool) -> Result<()> {
             }
             return Ok(());
         }
-        let rows: Vec<Vec<String>> = entries
-            .iter()
-            .filter(|e| !e.object.is_empty())
-            .map(|e| {
-                vec![
-                    e.node_name.clone(),
-                    e.version_id.clone(),
-                    e.retry_count.to_string(),
-                    format!("{}/{}", e.bucket, e.object),
-                ]
-            })
-            .collect();
-        if rows.is_empty() {
-            println!("No recent replication failures found for {}.", args.target);
-            return Ok(());
+        if let Some(err) = backlog_tty_error() {
+            return Err(err);
         }
-        let headers = ["Node", "VersionID", "Retry", "Object"];
-        println!("{}", render_table(&headers, &rows, |_, _| Align::Center));
-        return Ok(());
+        return backlog_view::run(backlog_view::Op::Mrf, || {
+            let entries = rt
+                .block_on(replication::replication_mrf(
+                    &src.client,
+                    &src.bucket,
+                    &args.nodes,
+                ))
+                .map_err(|err| McError::new(err.to_string()))
+                .context("Unable to fetch replication backlog.")?;
+            Ok(entries
+                .iter()
+                .filter(|e| !e.object.is_empty())
+                .map(|e| {
+                    vec![
+                        e.node_name.clone(),
+                        e.version_id.clone(),
+                        e.retry_count.to_string(),
+                        format!("{}/{}", e.bucket, e.object),
+                    ]
+                })
+                .collect())
+        })
+        .context("Unable to fetch replication backlog");
     }
 
     let arn = args.arn.clone().unwrap_or_default();
-    let entries = rt.block_on(replication::replication_diff(
-        &src.client,
-        &src.bucket,
-        &src.prefix,
-        &arn,
-        args.verbose,
-    ));
+    let fetch = || {
+        rt.block_on(replication::replication_diff(
+            &src.client,
+            &src.bucket,
+            &src.prefix,
+            &arn,
+            args.verbose,
+        ))
+    };
     if json {
         // madmin reports a failed request as one `DiffInfo` carrying the error.
-        let entries = entries.unwrap_or_else(|err| {
+        let entries = fetch().unwrap_or_else(|err| {
             let detail = crate::error::mc_error(&err)
                 .map(|e| e.detail.clone())
                 .unwrap_or_default();
@@ -1472,63 +1477,402 @@ fn backlog(args: ReplicateBacklogArgs, json: bool) -> Result<()> {
     if let Some(err) = backlog_tty_error() {
         return Err(err);
     }
-    let entries = entries.context("Unable to fetch replication backlog")?;
-    let rows: Vec<Vec<String>> = entries
-        .iter()
-        .filter(|d| !d.object.is_empty())
-        .map(|d| {
-            let op = match (d.version_id.is_empty(), d.is_delete_marker) {
-                (true, _) => "",
-                (false, true) => "DEL",
-                (false, false) => "PUT",
-            };
-            let status = if arn.is_empty() {
-                if d.delete_replication_status.is_empty() {
-                    d.replication_status.clone()
+    backlog_view::run(backlog_view::Op::Diff, || {
+        let entries = fetch().context("Unable to fetch replication backlog")?;
+        Ok(entries
+            .iter()
+            .filter(|d| !d.object.is_empty())
+            .map(|d| diff_row(d, &arn))
+            .collect())
+    })
+}
+
+/// mc `toDiffRow`: Attempted At, Created, Status, VersionID, Op, Object.
+fn diff_row(d: &DiffInfo, arn: &str) -> Vec<String> {
+    let op = match (d.version_id.is_empty(), d.is_delete_marker) {
+        (true, _) => "",
+        (false, true) => "DEL",
+        (false, false) => "PUT",
+    };
+    let status = if arn.is_empty() {
+        if d.delete_replication_status.is_empty() {
+            d.replication_status.clone()
+        } else {
+            d.delete_replication_status.clone()
+        }
+    } else {
+        d.targets
+            .get(arn)
+            .map(|t| {
+                if t.delete_replication_status.is_empty() {
+                    t.replication_status.clone()
                 } else {
-                    d.delete_replication_status.clone()
+                    t.delete_replication_status.clone()
                 }
-            } else {
-                d.targets
-                    .get(&arn)
-                    .map(|t| {
-                        if t.delete_replication_status.is_empty() {
-                            t.replication_status.clone()
-                        } else {
-                            t.delete_replication_status.clone()
-                        }
-                    })
-                    .unwrap_or_default()
-            };
-            let attempted = if status == "PENDING" || op == "DEL" {
-                String::new()
-            } else {
-                print_date(&d.replication_timestamp)
-            };
-            vec![
-                attempted,
-                print_date(&d.last_modified),
-                status,
-                d.version_id.clone(),
-                op.to_string(),
-                d.object.clone(),
-            ]
-        })
-        .collect();
-    if rows.is_empty() {
-        println!("No unreplicated versions found for {}.", args.target);
-        return Ok(());
+            })
+            .unwrap_or_default()
+    };
+    let attempted = if status == "PENDING" || op == "DEL" {
+        String::new()
+    } else {
+        print_date(&d.replication_timestamp)
+    };
+    vec![
+        attempted,
+        print_date(&d.last_modified),
+        status,
+        d.version_id.clone(),
+        op.to_string(),
+        d.object.clone(),
+    ]
+}
+
+/// Interactive `replicate backlog` view (mc renders it with bubbletea): a spinner while the
+/// backlog loads, then the summary and a scrollable table of the unreplicated versions.
+/// Keys: up/k, down/j, enter/space (back to the top), q/ctrl+c (quit). Rendered inline and
+/// redrawn in place, like bubbletea's default renderer.
+mod backlog_view {
+    use anyhow::Result;
+    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use crossterm::{cursor, execute, queue, terminal};
+    use std::io::Write;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// mc buffers at most this many rows (`rowLimit`).
+    const ROW_LIMIT: usize = 10_000;
+    /// Visible table rows (`table.WithHeight(10)` minus the header).
+    const TABLE_ROWS: usize = 9;
+    /// bubbles `spinner.Points`.
+    const SPINNER: [&str; 4] = ["∙∙∙", "●∙∙", "∙●∙", "∙∙●"];
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Op {
+        /// `--full`: unreplicated versions.
+        Diff,
+        /// Most recent failures.
+        Mrf,
     }
-    let headers = [
-        "Attempted At",
-        "Created",
-        "Status",
-        "VersionID",
-        "Op",
-        "Object",
-    ];
-    println!("{}", render_table(&headers, &rows, |_, _| Align::Center));
-    Ok(())
+
+    impl Op {
+        /// mc `getBacklogDiffHeader` / `getBacklogMRFHeader`.
+        fn columns(self) -> &'static [(&'static str, usize)] {
+            match self {
+                Op::Diff => &[
+                    ("Attempted At", 23),
+                    ("Created", 23),
+                    ("Status", 9),
+                    ("VersionID", 36),
+                    ("Op", 3),
+                    ("Object", 60),
+                ],
+                Op::Mrf => &[
+                    ("Node", 40),
+                    ("VersionID", 36),
+                    ("Retry", 5),
+                    ("Object", 60),
+                ],
+            }
+        }
+    }
+
+    /// View state.
+    #[derive(Debug)]
+    pub struct View {
+        pub op: Op,
+        pub rows: Vec<Vec<String>>,
+        /// Rows received (may exceed the buffered rows).
+        pub count: usize,
+        pub loading: bool,
+        pub cursor: usize,
+        pub offset: usize,
+        pub frame: usize,
+        pub color: bool,
+    }
+
+    impl View {
+        pub fn new(op: Op, color: bool) -> Self {
+            Self {
+                op,
+                rows: Vec::new(),
+                count: 0,
+                loading: true,
+                cursor: 0,
+                offset: 0,
+                frame: 0,
+                color,
+            }
+        }
+
+        pub fn finish(&mut self, rows: Vec<Vec<String>>) {
+            self.count = rows.len();
+            self.rows = rows.into_iter().take(ROW_LIMIT).collect();
+            self.loading = false;
+        }
+
+        pub fn up(&mut self) {
+            self.cursor = self.cursor.saturating_sub(1);
+            self.offset = self.offset.min(self.cursor);
+        }
+
+        pub fn down(&mut self) {
+            if self.cursor + 1 < self.rows.len() {
+                self.cursor += 1;
+            }
+            if self.cursor >= self.offset + TABLE_ROWS {
+                self.offset = self.cursor + 1 - TABLE_ROWS;
+            }
+        }
+
+        pub fn top(&mut self) {
+            self.cursor = 0;
+            self.offset = 0;
+        }
+
+        fn paint(&self, code: &str, text: &str) -> String {
+            if self.color {
+                format!("\x1b[{code}m{text}\x1b[0m")
+            } else {
+                text.to_string()
+            }
+        }
+
+        /// Renders the whole view (lines separated by `\n`).
+        pub fn render(&self) -> String {
+            let mut out = String::new();
+            if self.loading {
+                out.push_str(&self.paint("38;5;205", SPINNER[self.frame % SPINNER.len()]));
+                out.push('\n');
+            }
+            if self.count > 0 {
+                let advisory = if self.count > ROW_LIMIT {
+                    "[ use --json flag for full listing]"
+                } else {
+                    ""
+                };
+                let total = format!("Total Unreplicated: {} • {advisory}", self.count);
+                out.push_str(&self.paint("38;5;239", "Unreplicated versions summary"));
+                out.push('\n');
+                out.push_str(&self.paint("38;5;237", &"─".repeat(total.chars().count())));
+                out.push('\n');
+                out.push_str(&total);
+                out.push_str("\n\n\n");
+                out.push_str(&self.table());
+            }
+            out.push('\n');
+            // bubbles `help.ShortHelpView` (the enter binding has an empty description).
+            out.push_str("enter/spacebar  • ↓/j Move down • ↑/k Move up • q quit");
+            out
+        }
+
+        fn table(&self) -> String {
+            let columns = self.op.columns();
+            let cell = |text: &str, width: usize| format!(" {} ", fit(text, width));
+            let inner: usize = columns.iter().map(|(_, w)| w + 2).sum();
+            let mut lines = vec![format!("┌{}┐", "─".repeat(inner))];
+            let header: String = columns.iter().map(|(title, w)| cell(title, *w)).collect();
+            lines.push(format!("│{header}│"));
+            lines.push(format!("│{}│", "─".repeat(inner)));
+            for index in self.offset..(self.offset + TABLE_ROWS) {
+                let text: String = match self.rows.get(index) {
+                    Some(row) => columns
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (_, w))| cell(row.get(i).map(String::as_str).unwrap_or(""), *w))
+                        .collect(),
+                    None => " ".repeat(inner),
+                };
+                let text = if index == self.cursor && index < self.rows.len() {
+                    self.paint("38;5;229;48;5;57", &text)
+                } else {
+                    text
+                };
+                lines.push(format!("│{text}│"));
+            }
+            lines.push(format!("└{}┘", "─".repeat(inner)));
+            lines.join("\n")
+        }
+    }
+
+    /// Pads or truncates (with `…`) to `width` characters.
+    fn fit(text: &str, width: usize) -> String {
+        let count = text.chars().count();
+        if count <= width {
+            format!("{text}{}", " ".repeat(width - count))
+        } else {
+            let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
+            out.push('…');
+            out
+        }
+    }
+
+    /// Runs the view until q/ctrl+c; `fetch` loads the rows in the background. A fetch error
+    /// ends the view and is returned.
+    pub fn run<F>(op: Op, fetch: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<Vec<Vec<String>>> + Send,
+    {
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let _ = tx.send(fetch());
+            });
+            let mut view = View::new(op, !crate::globals::no_color());
+            terminal::enable_raw_mode()?;
+            let mut stdout = std::io::stdout();
+            let _ = execute!(stdout, cursor::Hide);
+            let result = event_loop(&mut view, &rx, &mut stdout);
+            let _ = execute!(stdout, cursor::Show);
+            let _ = terminal::disable_raw_mode();
+            println!();
+            result
+        })
+    }
+
+    fn event_loop(
+        view: &mut View,
+        rx: &mpsc::Receiver<Result<Vec<Vec<String>>>>,
+        out: &mut std::io::Stdout,
+    ) -> Result<()> {
+        let mut drawn_lines = 0;
+        let mut drawn = String::new();
+        loop {
+            if view.loading {
+                match rx.try_recv() {
+                    Ok(Ok(rows)) => view.finish(rows),
+                    Ok(Err(err)) => return Err(err),
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => view.loading = false,
+                }
+            }
+            let frame = view.render();
+            if frame != drawn {
+                if drawn_lines > 0 {
+                    queue!(out, cursor::MoveToPreviousLine(drawn_lines))?;
+                } else {
+                    queue!(out, cursor::MoveToColumn(0))?;
+                }
+                queue!(out, terminal::Clear(terminal::ClearType::FromCursorDown))?;
+                write!(out, "{}", frame.replace('\n', "\r\n"))?;
+                out.flush()?;
+                drawn_lines = frame.matches('\n').count() as u16;
+                drawn = frame;
+            }
+            if !event::poll(Duration::from_millis(140))? {
+                view.frame += 1;
+                continue;
+            }
+            if let Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            }) = event::read()?
+            {
+                match code {
+                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(());
+                    }
+                    KeyCode::Up | KeyCode::Left | KeyCode::BackTab | KeyCode::Char('k') => {
+                        view.up()
+                    }
+                    KeyCode::Down | KeyCode::Right | KeyCode::Tab | KeyCode::Char('j') => {
+                        view.down()
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => view.top(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn rows(n: usize) -> Vec<Vec<String>> {
+            (0..n)
+                .map(|i| {
+                    vec![
+                        "node1".to_string(),
+                        format!("v{i}"),
+                        "2".to_string(),
+                        format!("bucket/object-{i}"),
+                    ]
+                })
+                .collect()
+        }
+
+        #[test]
+        fn renders_spinner_while_loading() {
+            let view = View::new(Op::Mrf, false);
+            assert_eq!(
+                view.render(),
+                "∙∙∙\n\nenter/spacebar  • ↓/j Move down • ↑/k Move up • q quit"
+            );
+        }
+
+        #[test]
+        fn renders_summary_and_table_with_mc_columns() {
+            let mut view = View::new(Op::Mrf, false);
+            view.finish(rows(2));
+            let text = view.render();
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines[0], "Unreplicated versions summary");
+            assert_eq!(lines[2], "Total Unreplicated: 2 • ");
+            assert!(lines[5].starts_with("┌─"));
+            assert_eq!(
+                lines[6],
+                format!(
+                    "│ {:<40}  {:<36}  {:<5}  {:<60} │",
+                    "Node", "VersionID", "Retry", "Object"
+                )
+            );
+            assert!(lines[8].contains("bucket/object-0"));
+            assert!(lines[9].contains("bucket/object-1"));
+            assert_eq!(lines.len(), 5 + 3 + TABLE_ROWS + 1 + 1);
+            assert!(text.ends_with("q quit"));
+            let widths: Vec<usize> = lines[5..=17].iter().map(|l| l.chars().count()).collect();
+            assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
+        }
+
+        #[test]
+        fn diff_columns_and_scrolling() {
+            let mut view = View::new(Op::Diff, false);
+            let mut data = rows(20);
+            for row in &mut data {
+                row.extend(["DEL".to_string(), "x".repeat(70)]);
+            }
+            view.finish(data);
+            assert!(view.render().contains("│ Attempted At "));
+            // Long values are truncated to the column width.
+            assert!(view.render().contains(&format!("{}…", "x".repeat(59))));
+            for _ in 0..12 {
+                view.down();
+            }
+            assert_eq!((view.cursor, view.offset), (12, 12 + 1 - TABLE_ROWS));
+            view.up();
+            assert_eq!(view.cursor, 11);
+            view.top();
+            assert_eq!((view.cursor, view.offset), (0, 0));
+            for _ in 0..30 {
+                view.down();
+            }
+            assert_eq!(view.cursor, 19);
+        }
+
+        #[test]
+        fn caps_buffered_rows_and_shows_advisory() {
+            let mut view = View::new(Op::Mrf, false);
+            view.finish(rows(ROW_LIMIT + 1));
+            assert_eq!(view.rows.len(), ROW_LIMIT);
+            assert!(view.render().contains(&format!(
+                "Total Unreplicated: {} • [ use --json flag for full listing]",
+                ROW_LIMIT + 1
+            )));
+        }
+    }
 }
 
 #[cfg(test)]

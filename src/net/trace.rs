@@ -73,8 +73,12 @@ fn redact(name: &str, value: &str) -> String {
     value.to_string()
 }
 
-/// `Credential=<access key>/...` and `Signature=<hex>` are replaced with `**REDACTED**`.
+/// `Credential=<access key>/...` and `Signature=<hex>` are replaced with `**REDACTED**`;
+/// SigV2 `AWS <key>:<signature>` becomes `AWS **REDACTED**:**REDACTED**` (mc `traceV2`).
 fn redact_authorization(value: &str) -> String {
+    if value.starts_with("AWS ") {
+        return format!("AWS {REDACTED}:{REDACTED}");
+    }
     value
         .split(", ")
         .map(|part| {
@@ -147,6 +151,14 @@ mod tests {
         assert!(!out.contains("AKIAEXAMPLE"));
         assert!(!out.contains("abcdef0123"));
         assert!(!out.contains("c2VjcmV0"));
+    }
+
+    #[test]
+    fn redacts_sigv2_authorization() {
+        let mut headers = Headers::new();
+        headers.insert("authorization", "AWS AKIAEXAMPLE:c2lnbmF0dXJl");
+        let out = format_request("GET", "http://h/b/", &headers);
+        assert!(out.contains("Authorization: AWS **REDACTED**:**REDACTED**\n"));
     }
 
     #[test]

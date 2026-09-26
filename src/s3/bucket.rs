@@ -580,6 +580,12 @@ pub async fn presign_get_version(
     version_id: Option<&str>,
     expire: Duration,
 ) -> Result<String> {
+    if super::client::is_s3v2(alias) {
+        let query = version_id
+            .map(|id| format!("versionId={}", crate::net::sigv2::encode_path(id)))
+            .unwrap_or_default();
+        return presign_v2(alias, "GET", bucket, key, &query, expire);
+    }
     let client = build_client(alias).await?;
     let request = client
         .get_object()
@@ -599,6 +605,9 @@ pub async fn presign_put(
     key: &str,
     expire: Duration,
 ) -> Result<String> {
+    if super::client::is_s3v2(alias) {
+        return presign_v2(alias, "PUT", bucket, key, "", expire);
+    }
     let client = build_client(alias).await?;
     let request = client
         .put_object()
@@ -609,6 +618,40 @@ pub async fn presign_put(
         .presigned(PresigningConfig::expires_in(expire)?)
         .await?;
     Ok(request.uri().to_string())
+}
+
+/// minio-go `PreSignV2` URL for S3v2 aliases (`AWSAccessKeyId`, `Expires`, `Signature`).
+fn presign_v2(
+    alias: &AliasConfig,
+    method: &str,
+    bucket: &str,
+    key: &str,
+    query: &str,
+    expire: Duration,
+) -> Result<String> {
+    let virtual_host = !super::force_path_style(alias)?;
+    let base = url::Url::parse(&bucket_url(alias, bucket)?)?;
+    let host = match base.port() {
+        Some(port) => format!("{}:{port}", base.host_str().unwrap_or_default()),
+        None => base.host_str().unwrap_or_default().to_string(),
+    };
+    let path = format!("{}{}", base.path(), crate::net::sigv2::encode_path(key));
+    let expires = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        + expire.as_secs();
+    let signable = crate::net::sigv2::SignableV2 {
+        method,
+        host: &host,
+        path: &path,
+        query,
+        headers: Vec::new(),
+        virtual_host,
+    };
+    let query =
+        crate::net::sigv2::presign_query(&signable, &alias.access_key, &alias.secret_key, expires);
+    Ok(format!("{}://{host}{path}?{query}", base.scheme()))
 }
 
 /// Presigned POST form (browser-style upload), as produced by minio-go `PresignedPostPolicy`.
@@ -666,7 +709,59 @@ pub fn sign_post_policy(input: &PostPolicyInput<'_>) -> BTreeMap<String, String>
     if let Some(token) = input.session_token {
         conditions.push(("eq", "$x-amz-security-token", token.to_string()));
     }
-    let expiration = utc_parts(input.expiration);
+    let policy_base64 = post_policy_base64(&conditions, input.expiration);
+    let signing_key =
+        aws_sigv4::sign::v4::generate_signing_key(input.secret_key, input.now, input.region, "s3");
+    let signature = aws_sigv4::sign::v4::calculate_signature(signing_key, policy_base64.as_bytes());
+    fields.insert("bucket".to_string(), input.bucket.to_string());
+    fields.insert("key".to_string(), input.key.to_string());
+    fields.insert("policy".to_string(), policy_base64);
+    fields.insert(
+        "x-amz-algorithm".to_string(),
+        "AWS4-HMAC-SHA256".to_string(),
+    );
+    fields.insert("x-amz-credential".to_string(), credential);
+    fields.insert("x-amz-date".to_string(), amz_date);
+    if let Some(token) = input.session_token {
+        fields.insert("x-amz-security-token".to_string(), token.to_string());
+    }
+    fields.insert("x-amz-signature".to_string(), signature);
+    fields
+}
+
+/// minio-go `PresignedPostPolicy` for S3v2 aliases: only the Content-Type/bucket/key
+/// conditions, signed with HMAC-SHA1 (`AWSAccessKeyId` + `signature` fields).
+pub fn sign_post_policy_v2(input: &PostPolicyInput<'_>, google: bool) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    let mut conditions: Vec<(&str, &str, String)> = Vec::new();
+    if let Some(content_type) = input.content_type {
+        conditions.push(("eq", "$Content-Type", content_type.to_string()));
+        fields.insert("Content-Type".to_string(), content_type.to_string());
+    }
+    conditions.push(("eq", "$bucket", input.bucket.to_string()));
+    if input.starts_with {
+        conditions.push(("starts-with", "$key", input.key.to_string()));
+    } else {
+        conditions.push(("eq", "$key", input.key.to_string()));
+    }
+    let policy_base64 = post_policy_base64(&conditions, input.expiration);
+    let signature = crate::net::sigv2::signature(input.secret_key, &policy_base64);
+    let id_name = if google {
+        "GoogleAccessId"
+    } else {
+        "AWSAccessKeyId"
+    };
+    fields.insert(id_name.to_string(), input.access_key.to_string());
+    fields.insert("bucket".to_string(), input.bucket.to_string());
+    fields.insert("key".to_string(), input.key.to_string());
+    fields.insert("policy".to_string(), policy_base64);
+    fields.insert("signature".to_string(), signature);
+    fields
+}
+
+/// Base64 of the POST policy JSON document (minio-go `PostPolicy.base64`).
+fn post_policy_base64(conditions: &[(&str, &str, String)], expiration: SystemTime) -> String {
+    let expiration = utc_parts(expiration);
     let conditions = conditions
         .iter()
         .map(|(kind, name, value)| {
@@ -689,24 +784,7 @@ pub fn sign_post_policy(input: &PostPolicyInput<'_>) -> BTreeMap<String, String>
         expiration.second,
         expiration.millis
     );
-    let policy_base64 = base64::engine::general_purpose::STANDARD.encode(policy);
-    let signing_key =
-        aws_sigv4::sign::v4::generate_signing_key(input.secret_key, input.now, input.region, "s3");
-    let signature = aws_sigv4::sign::v4::calculate_signature(signing_key, policy_base64.as_bytes());
-    fields.insert("bucket".to_string(), input.bucket.to_string());
-    fields.insert("key".to_string(), input.key.to_string());
-    fields.insert("policy".to_string(), policy_base64);
-    fields.insert(
-        "x-amz-algorithm".to_string(),
-        "AWS4-HMAC-SHA256".to_string(),
-    );
-    fields.insert("x-amz-credential".to_string(), credential);
-    fields.insert("x-amz-date".to_string(), amz_date);
-    if let Some(token) = input.session_token {
-        fields.insert("x-amz-security-token".to_string(), token.to_string());
-    }
-    fields.insert("x-amz-signature".to_string(), signature);
-    fields
+    base64::engine::general_purpose::STANDARD.encode(policy)
 }
 
 /// Presigned POST policy for uploading `key` (or any key starting with `key` when
@@ -731,7 +809,7 @@ pub async fn presign_post(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "us-east-1".to_string());
     let now = SystemTime::now();
-    let fields = sign_post_policy(&PostPolicyInput {
+    let input = PostPolicyInput {
         bucket,
         key,
         starts_with,
@@ -745,7 +823,13 @@ pub async fn presign_post(
             .session_token
             .as_deref()
             .filter(|token| !token.is_empty()),
-    });
+    };
+    let fields = if super::client::is_s3v2(alias) {
+        let google = url::Url::parse(&alias.url)?.host_str() == Some("storage.googleapis.com");
+        sign_post_policy_v2(&input, google)
+    } else {
+        sign_post_policy(&input)
+    };
     Ok(PostPolicyForm {
         url: bucket_url(alias, bucket)?,
         fields,
