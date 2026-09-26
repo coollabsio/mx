@@ -170,47 +170,6 @@ fn idp_stubs() {
 }
 
 // ---------------------------------------------------------------------------
-// SERVER
-// ---------------------------------------------------------------------------
-
-const SERVER: &[&[&str]] = &[
-    &["admin", "service", "restart", "a"],
-    &["admin", "service", "stop", "a"],
-    &["admin", "service", "unfreeze", "a"],
-    &["admin", "service", "freeze", "a"],
-    &["admin", "update", "a"],
-    &["admin", "info", "a"],
-    &["admin", "config", "get", "a"],
-    &["admin", "config", "set", "a"],
-    &["admin", "config", "reset", "a"],
-    &["admin", "config", "history", "a"],
-    &["admin", "config", "restore", "a", "a"],
-    &["admin", "config", "export", "a"],
-    &["admin", "config", "import", "a"],
-    &["admin", "prometheus", "generate", "a"],
-    &["admin", "prometheus", "metrics", "a"],
-    &["admin", "kms", "key", "create", "a"],
-    &["admin", "kms", "key", "status", "a"],
-    &["admin", "kms", "key", "list", "a"],
-    &["admin", "scanner", "status", "a"],
-    &["admin", "cluster", "bucket", "import", "a", "a"],
-    &["admin", "cluster", "bucket", "export", "a"],
-    &["admin", "cluster", "iam", "import", "a", "a"],
-    &["admin", "cluster", "iam", "export", "a"],
-    &["update"],
-    &["admin", "health"],
-    &["admin", "subnet"],
-    &["admin", "bucket"],
-    &["admin", "tier"],
-    &["admin", "profile"],
-];
-
-#[test]
-fn server_stubs() {
-    assert_stubs(SERVER);
-}
-
-// ---------------------------------------------------------------------------
 // STREAM
 // ---------------------------------------------------------------------------
 

@@ -185,6 +185,47 @@ impl AdminClient {
         ))
     }
 
+    /// Sends an unsigned request (e.g. Prometheus metrics with a bearer token) over the same
+    /// connector; `path` may carry a `?query` and must already be percent-encoded.
+    pub async fn send_unsigned(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+    ) -> Result<Response> {
+        let uri = format!("{}://{}{}", self.scheme, self.authority, path);
+        let mut builder = http::Request::builder()
+            .method(method)
+            .uri(&uri)
+            .header("host", self.authority.as_str());
+        for (name, value) in headers {
+            builder = builder.header(*name, value.as_str());
+        }
+        let request = builder.body(SdkBody::empty())?;
+        let request = aws_smithy_runtime_api::http::Request::try_from(request)?;
+        let response = self
+            .connector
+            .call(request)
+            .await
+            .map_err(|err| super::error::go_transport_error(&go_method(method), &uri, &err))?;
+        let status = response.status().as_u16();
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(n, v)| (n.to_ascii_lowercase(), v.to_string()))
+            .collect();
+        let body = ByteStream::new(response.into_body())
+            .collect()
+            .await?
+            .into_bytes()
+            .to_vec();
+        Ok(Response {
+            status,
+            body,
+            headers,
+        })
+    }
+
     /// Admin API request builder for `/minio/admin/v3/<api>` (see [`AdminRequest`]).
     pub fn request(&self, method: &str, api: &str) -> AdminRequest<'_> {
         self.request_at(method, &format!("{ADMIN_PREFIX}/{api}"))

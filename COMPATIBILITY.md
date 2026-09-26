@@ -46,6 +46,16 @@ server support that varies between S3-compatible servers.
 | `ready` | Supported | `--cluster-read`, `--maintenance`. Retries until the server is ready. |
 | `cors set`, `get`, `remove` | Preview | `set` accepts XML or JSON. Depends on server CORS support. |
 | `encrypt set`, `info`, `clear` | Supported | `set sse-s3 TARGET` or `set sse-kms KEY_ID TARGET`. `info` on a bucket without auto encryption fails with the server error, like mc. |
+| `admin info` | Supported | mc layout: per-server block (uptime, version, network, drives, pools), pool table, usage and drive summary; `--offline`. `--json` re-marshals the full `madmin.InfoMessage` in Go field order; a failed request is `{"status":"error","error":...}` with exit 0, like mc. |
+| `admin service restart`, `unfreeze` (hidden `stop`, `freeze`) | Supported | `restart --dry-run`, `-w/--wait` (polls `/minio/health/cluster`). Restart text is a bubbletea view in mc: without a terminal mx fails like mc (`could not open a new TTY`); on a terminal mx prints the final summary. JSON matches mc (restarting/waiting/done states). Legacy API fallback for restart/unfreeze like mc. |
+| `admin update` | Supported | Optional release URL argument, `-y`; confirmation prompt on a terminal. Server results in mc's go-pretty table; errors are the server's. |
+| `admin config get`, `set`, `reset`, `history`, `restore`, `export`, `import` | Supported | Server config text as-is; `--json` parses it like madmin (`kv`, `envOverride`). Without `key=value`, `set`/`reset`/`get` print the server's key help through a Go-compatible tabwriter (`--env`). Like mc, JSON error messages keep the unformatted `%s` template. `history -n/--count`, `-c/--clear`. |
+| `admin prometheus generate`, `metrics` | Supported | HS512 bearer token (100 years) signed with the alias secret, YAML/JSON scrape config, `--public`, `--api-version v2\|v3`, `--bucket`, mc's metric type validation. `metrics` prints the server text, `--json` the prom2json families (mc's family order is random). |
+| `admin kms key create`, `status`, `list` | Supported | `/minio/kms/v1` API. Like mc, `create` prints its confirmation only on a terminal. |
+| `admin scanner status` | Supported | `--json` streams `madmin.RealtimeMetrics` (`-n`, `--interval`, `--nodes`); like mc the documents are compact only when `--json` follows the command. Text is mc's live view (terminal only, like mc). `--bucket` stats and `--in` replay (not `.zst`). |
+| `admin cluster bucket import`, `export`; `admin cluster iam import`, `export` | Supported | Zip archives saved under mc's names (`ALIAS-BUCKET-metadata.zip`, `ALIAS-iam-info.zip`, `-o`), mode 0600, existing files moved aside with mc's timestamp suffix (UTC). Archives are validated like Go `zip.NewReader` before upload; import reports match mc. |
+| `admin tier`, `bucket`, `profile`, `subnet`, `health` (hidden) | Supported | Deprecated like mc: `admin tier info\|ls\|add\|edit\|verify\|rm` still run `ilm tier`, other forms point to the replacement (`ilm tier`, `quota`, `stat`, `replicate add\|update\|rm`, `support profile`, `support diag`, `support register`). |
+| `update` | Intentional difference | mx does not replace its own binary: reports `Unable to update ‘mx’.` like a failed mc update (exit 255). |
 
 ## Global options
 
