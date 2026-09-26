@@ -501,7 +501,7 @@ fn accesskey_list_and_sts_revoke() {
     );
     assert_eq!(
         requests[1].line,
-        "POST /minio/admin/v3/revoke-tokens/builtin?tokenRevokeType=&user=u1&fullRevoke=true HTTP/1.1"
+        "POST /minio/admin/v3/revoke-tokens/builtin?fullRevoke=true&tokenRevokeType=&user=u1 HTTP/1.1"
     );
 }
 

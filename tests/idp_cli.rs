@@ -369,7 +369,7 @@ fn config_add_update_send_encrypted_kv_and_report_restart() {
     assert!(
         requests[3]
             .line
-            .starts_with("POST /minio/admin/v3/idp-config?type=openid&name=_ "),
+            .starts_with("POST /minio/admin/v3/idp-config?name=_&type=openid "),
         "{}",
         requests[3].line
     );
@@ -520,7 +520,7 @@ fn accesskey_and_policy_requests() {
     // mc revokes through the builtin provider endpoint.
     assert!(
         requests[0].line.starts_with(
-            "POST /minio/admin/v3/revoke-tokens/builtin?tokenRevokeType=&user=bob&fullRevoke=true "
+            "POST /minio/admin/v3/revoke-tokens/builtin?fullRevoke=true&tokenRevokeType=&user=bob "
         ),
         "{}",
         requests[0].line

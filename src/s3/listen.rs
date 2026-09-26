@@ -172,7 +172,7 @@ mod tests {
         let head = server.requests().remove(0).head;
         assert!(
             head.starts_with(
-                "GET /b/?ping=10&prefix=a%2F&suffix=&events=s3%3AObjectCreated%3A%2A&events=s3%3AObjectRemoved%3A%2A "
+                "GET /b/?events=s3%3AObjectCreated%3A%2A&events=s3%3AObjectRemoved%3A%2A&ping=10&prefix=a%2F&suffix= "
             ),
             "{head}"
         );

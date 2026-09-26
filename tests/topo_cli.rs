@@ -516,7 +516,7 @@ fn replicate_add_sends_encrypted_peer_sites() {
     let requests = server.join().unwrap();
     assert_eq!(
         requests[0].line,
-        "PUT /minio/admin/v3/site-replication/add?replicateILMExpiry=true&force=false&api-version=1 HTTP/1.1"
+        "PUT /minio/admin/v3/site-replication/add?api-version=1&force=false&replicateILMExpiry=true HTTP/1.1"
     );
     // madmin.EncryptData: the credentials never travel in clear text.
     let body = mx::s3::admin::decrypt_response("skey1234", &requests[0].body).expect("decrypt");
@@ -587,7 +587,7 @@ fn replicate_status_remove_and_update_output() {
     let requests = server.join().unwrap();
     assert_eq!(
         requests[0].line,
-        "GET /minio/admin/v3/site-replication/status?buckets=false&policies=false&users=true&groups=false&showDeleted=false&metrics=false&ilm-expiry-rules=false&peer-state=false&api-version=1 HTTP/1.1"
+        "GET /minio/admin/v3/site-replication/status?api-version=1&buckets=false&groups=false&ilm-expiry-rules=false&metrics=false&peer-state=false&policies=false&showDeleted=false&users=true HTTP/1.1"
     );
     assert_eq!(
         requests[2].line,
@@ -602,7 +602,7 @@ fn replicate_status_remove_and_update_output() {
         r#"{"requestingDepID":"","sites":null,"all":true}"#
     );
     assert!(requests[4].line.starts_with(
-        "PUT /minio/admin/v3/site-replication/edit?disableILMExpiryReplication=false&enableILMExpiryReplication=false&api-version=1 "
+        "PUT /minio/admin/v3/site-replication/edit?api-version=1&disableILMExpiryReplication=false&enableILMExpiryReplication=false "
     ));
     let body = mx::s3::admin::decrypt_response("skey1234", &requests[4].body).expect("decrypt");
     let peer: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -668,7 +668,7 @@ fn replicate_resync_resolves_the_peer() {
     assert_eq!(requests[1].line, "GET /minio/admin/v3/info HTTP/1.1");
     assert_eq!(
         requests[2].line,
-        "PUT /minio/admin/v3/site-replication/resync/op?operation=start&api-version=1 HTTP/1.1"
+        "PUT /minio/admin/v3/site-replication/resync/op?api-version=1&operation=start HTTP/1.1"
     );
     let peer: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
     assert_eq!(peer["name"], "sr2");

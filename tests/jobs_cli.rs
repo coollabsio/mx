@@ -362,7 +362,7 @@ fn batch_status_streams_realtime_metrics() {
     let recorded = server.join().unwrap();
     assert!(
         recorded[1].line.starts_with(
-            "GET /minio/admin/v3/metrics?types=8&n=0&interval=1s&hosts=&disks=&by-jobID=r-1 "
+            "GET /minio/admin/v3/metrics?by-jobID=r-1&disks=&hosts=&interval=1s&n=0&types=8 "
         ),
         "{:?}",
         recorded[1]

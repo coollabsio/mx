@@ -1018,7 +1018,7 @@ mod tests {
                 .starts_with("POST /minio/admin/v3/rebalance/start ")
         );
         assert!(requests[3].head.starts_with(
-            "PUT /minio/admin/v3/site-replication/resync/op?operation=start&api-version=1 "
+            "PUT /minio/admin/v3/site-replication/resync/op?api-version=1&operation=start "
         ));
         let body: serde_json::Value = serde_json::from_slice(&requests[3].body).unwrap();
         assert_eq!(body["deploymentID"], "");

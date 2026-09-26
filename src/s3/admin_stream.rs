@@ -99,7 +99,8 @@ pub struct TraceOpts {
 }
 
 impl TraceOpts {
-    /// Query parameters in madmin `AddParams` order.
+    /// Query parameters as madmin `AddParams` sets them (the request encodes them sorted by
+    /// key, like Go `url.Values.Encode`).
     pub fn params(&self) -> Vec<(&'static str, String)> {
         let b = |v: bool| v.to_string();
         vec![
@@ -1116,7 +1117,7 @@ mod tests {
         let head = server.requests().remove(0).head;
         assert!(
             head.starts_with(
-                "GET /minio/admin/v3/trace?err=true&threshold=5ms&s3=true&internal=false&storage=false&os=false&scanner=false&decommission=false&healing=false&batch-replication=false&batch-keyrotation=false&batch-expire=false&rebalance=false&replication-resync=false&bootstrap=false&ftp=false&ilm=false&kms=false&formatting=false "
+                "GET /minio/admin/v3/trace?batch-expire=false&batch-keyrotation=false&batch-replication=false&bootstrap=false&decommission=false&err=true&formatting=false&ftp=false&healing=false&ilm=false&internal=false&kms=false&os=false&rebalance=false&replication-resync=false&s3=true&scanner=false&storage=false&threshold=5ms "
             ),
             "{head}"
         );
@@ -1210,7 +1211,7 @@ mod tests {
         assert!(
             server.requests()[0]
                 .head
-                .starts_with("GET /minio/admin/v3/log?node=&limit=0&logType=all ")
+                .starts_with("GET /minio/admin/v3/log?limit=0&logType=all&node= ")
         );
     }
 }
