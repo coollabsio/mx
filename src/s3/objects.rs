@@ -128,7 +128,27 @@ impl ObjectHeaders {
     }
 }
 
+/// mc `guessURLContentType`: MIME type by file extension (case-insensitive), or
+/// `application/octet-stream`. mc sends it for uploads from local files and for `pipe`
+/// (from the target key).
+pub fn guess_content_type(path: impl AsRef<Path>) -> String {
+    mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string()
+}
+
 impl PutOptions {
+    /// Uploading the local file `path`: sends its guessed Content-Type (mc takes it from the
+    /// source file) unless [`PutOptions::content_type`] is set. `--attr Content-Type=...`
+    /// entries in `metadata` still win.
+    pub fn local_source(&mut self, path: &Path) {
+        if self.content_type.is_none() {
+            self.metadata
+                .insert(0, ("Content-Type".to_string(), guess_content_type(path)));
+        }
+    }
+
     /// Splits `metadata` into standard headers and user metadata. `content_type` wins over a
     /// `Content-Type` attr.
     pub fn headers(&self) -> Result<ObjectHeaders> {
@@ -969,6 +989,27 @@ pub async fn list_zip_objects(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guesses_content_type_by_extension() {
+        assert_eq!(guess_content_type("a/b.TXT"), "text/plain");
+        assert_eq!(guess_content_type("x.json"), "application/json");
+        assert_eq!(guess_content_type("x.gz"), "application/gzip");
+        assert_eq!(guess_content_type("noext"), "application/octet-stream");
+        let mut options = PutOptions {
+            metadata: vec![("Content-Type".into(), "text/x-custom".into())],
+            ..Default::default()
+        };
+        options.local_source(Path::new("page.html"));
+        let headers = options.headers().unwrap();
+        assert_eq!(headers.content_type.as_deref(), Some("text/x-custom"));
+        let mut options = PutOptions::default();
+        options.local_source(Path::new("page.html"));
+        assert_eq!(
+            options.headers().unwrap().content_type.as_deref(),
+            Some("text/html")
+        );
+    }
 
     #[test]
     fn splits_standard_headers_from_user_metadata() {

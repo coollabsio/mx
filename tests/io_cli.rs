@@ -236,12 +236,13 @@ fn put_help_and_validation() {
             .failure()
             .stderr(predicate::str::contains(message));
     }
-    // -sc is rewritten to --storage-class and accepted by the parser.
+    // -sc is rewritten to --storage-class and accepted by the parser. Like mc, problems found
+    // while preparing the upload are reported with exit status 0.
     mx(dir.path())
         .args(["put", "-sc", "STANDARD", path(&file), "missing/bucket/"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("unexpected argument").not());
+        .success()
+        .stderr("mx: <ERROR> Unable to upload. Target is not s3.\n");
     // Multiple sources need a folder target; folders cannot be uploaded.
     mx(dir.path())
         .args(["put", path(&file), path(&file), "play/bucket/obj"])
@@ -251,8 +252,10 @@ fn put_help_and_validation() {
     mx(dir.path())
         .args(["put", path(dir.path()), "play/bucket/"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("is a folder"));
+        .success()
+        .stderr(predicate::str::contains(
+            "Unable to upload. Invalid arguments provided",
+        ));
 }
 
 #[test]
@@ -264,7 +267,8 @@ fn pipe_writes_local_files_and_accepts_both_quiet_spellings() {
         .write_stdin("hello")
         .assert()
         .success()
-        .stdout(format!("5 bytes -> `{}`\n", path(&out)));
+        // mc's progress residue (also when stdout is not a terminal).
+        .stdout(format!("\r 0 B / ? 5 bytes -> `{}`\n", path(&out)));
     assert_eq!(fs::read_to_string(&out).unwrap(), "hello");
     for flag in ["-q", "--quiet"] {
         mx(dir.path())
@@ -272,13 +276,13 @@ fn pipe_writes_local_files_and_accepts_both_quiet_spellings() {
             .write_stdin("again")
             .assert()
             .success()
-            .stdout("");
+            .stdout(format!("5 bytes -> `{}`\n", path(&out)));
         mx(dir.path())
             .args([flag, "pipe", path(&out)])
             .write_stdin("again")
             .assert()
             .success()
-            .stdout("");
+            .stdout(format!("5 bytes -> `{}`\n", path(&out)));
     }
     mx(dir.path())
         .args(["pipe", "--attr", "a=b", path(&out)])

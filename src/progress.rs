@@ -57,6 +57,11 @@ impl Progress {
         self.transferred.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Grows the total as sources are discovered.
+    pub fn add_total(&self, bytes: u64) {
+        self.total.fetch_add(bytes, Ordering::Relaxed);
+    }
+
     pub fn transferred(&self) -> u64 {
         self.transferred.load(Ordering::Relaxed)
     }
@@ -105,6 +110,50 @@ impl Progress {
         let _ = std::io::stdout().flush();
     }
 
+    /// mc `doCopy` announcement: the bar caption, or the `copyMessage` line / JSON document.
+    pub fn announce(&self, message: &CopyMessage, json: bool) -> anyhow::Result<()> {
+        if self.bar {
+            self.set_caption(&format!("{}:", message.source));
+        } else if json {
+            #[derive(Serialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Json<'a> {
+                status: &'static str,
+                source: &'a str,
+                target: &'a str,
+                size: u64,
+                total_count: u64,
+                /// Always 0 in mc (the running total is a shadowed variable in `cp-main.go`).
+                total_size: u64,
+            }
+            crate::output::print_json(&Json {
+                status: "success",
+                source: message.source,
+                target: message.target,
+                size: message.size,
+                total_count: message.total_count,
+                total_size: 0,
+            })?;
+        } else {
+            println!("`{}` -> `{}`", message.source, message.target);
+        }
+        Ok(())
+    }
+
+    /// mc `showLastProgressBar` after a successful session: without a bar, the accounting
+    /// summary (table, or JSON document).
+    pub fn print_summary(&self, json: bool) -> anyhow::Result<()> {
+        if !self.bar {
+            let stat = self.stat();
+            if json {
+                crate::output::print_json(&stat)?;
+            } else {
+                println!("{}", stat.table());
+            }
+        }
+        Ok(())
+    }
+
     /// Final accounting (mc `accountStat`).
     pub fn stat(&self) -> AccountStat {
         let transferred = self.transferred();
@@ -117,6 +166,14 @@ impl Progress {
             speed: speed(transferred, elapsed),
         }
     }
+}
+
+/// One transfer announced by `cp`/`mv`/`put`/`get` (mc `copyMessage`).
+pub struct CopyMessage<'a> {
+    pub source: &'a str,
+    pub target: &'a str,
+    pub size: u64,
+    pub total_count: u64,
 }
 
 /// mc `accountStat` JSON: `duration` is in nanoseconds, `speed` in bytes per second.

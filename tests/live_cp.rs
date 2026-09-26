@@ -390,6 +390,87 @@ fn live_cp_preserve_roundtrip() {
     assert_eq!(meta.modified().unwrap(), old);
 }
 
+#[test]
+fn live_cp_preserve_xattrs_and_stream_copy_tags() {
+    let Some(live) = Live::new() else { return };
+    let client = client(&live);
+    let file = live.local_file("attrs.txt", "x\n");
+    // mc uploads extended attributes (except `system.*`) as user metadata with `-a`.
+    if xattr::set(&file, "user.color", b"blue").is_ok() {
+        live.cmd()
+            .args(["cp", "-a", &s(&file), &live.url("attrs.txt")])
+            .assert()
+            .success();
+        let object = head(&client, &live.bucket, "attrs.txt");
+        assert_eq!(
+            object
+                .metadata()
+                .unwrap()
+                .get("user.color")
+                .map(String::as_str),
+            Some("blue")
+        );
+        live.cmd()
+            .args(["cp", &s(&file), &live.url("plain.txt")])
+            .assert()
+            .success();
+        let object = head(&client, &live.bucket, "plain.txt");
+        assert!(
+            object
+                .metadata()
+                .is_none_or(|m| !m.contains_key("user.color"))
+        );
+    } else {
+        eprintln!("skipping xattr check: filesystem without user xattrs");
+    }
+
+    // Cross-server (streamed) copies keep the source tags only with `-a`, like mc.
+    let Some(bucket2) = live.make_bucket2(BucketOpts::default()) else {
+        eprintln!("skipping stream copy tags; set MX_TEST_URL2");
+        return;
+    };
+    let alias2 = live.alias2.clone().unwrap();
+    live.cmd()
+        .args([
+            "cp",
+            "--tags",
+            "a=1&b=2",
+            &s(&file),
+            &live.url("tagged.txt"),
+        ])
+        .assert()
+        .success();
+    let dst = |key: &str| format!("{alias2}/{bucket2}/{key}");
+    live.cmd()
+        .args(["cp", &live.url("tagged.txt"), &dst("plain.txt")])
+        .assert()
+        .success();
+    live.cmd()
+        .args(["cp", "-a", &live.url("tagged.txt"), &dst("kept.txt")])
+        .assert()
+        .success();
+    let client2 = rt()
+        .block_on(s3::build_client(&live::alias_config_from_home(
+            live.home.path(),
+            &alias2,
+        )))
+        .expect("client2");
+    let tags = |key: &str| {
+        let mut tags: Vec<(String, String)> = rt()
+            .block_on(s3::object_tags(&client2, &bucket2, key, None))
+            .expect("tags")
+            .into_iter()
+            .collect();
+        tags.sort();
+        tags
+    };
+    assert!(tags("plain.txt").is_empty());
+    assert_eq!(
+        tags("kept.txt"),
+        vec![("a".into(), "1".into()), ("b".into(), "2".into())]
+    );
+}
+
 fn rfc3339(time: SystemTime) -> String {
     aws_sdk_s3::primitives::DateTime::from(time)
         .fmt(aws_sdk_s3::primitives::DateTimeFormat::DateTime)

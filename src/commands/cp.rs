@@ -16,13 +16,12 @@ use crate::flags::{
     VersionIdFlag, resolve_sse,
 };
 use crate::location::{Location, parse_location};
-use crate::progress::{Progress, ProgressReader};
+use crate::progress::{CopyMessage, Progress, ProgressReader};
 use crate::s3::S3ResultExt;
 use crate::s3::{GetOptions, ObjectRef, PutOptions};
 use anyhow::{Context, Result, anyhow, bail};
 use aws_sdk_s3::Client;
 use clap::Args;
-use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -246,6 +245,14 @@ impl Item {
         match self {
             Item::Local(path) => path.display().to_string(),
             Item::S3 { alias, bucket, key } => format!("{alias}/{bucket}/{key}"),
+        }
+    }
+
+    /// How mc prints a copy source: local paths are made absolute (`filepath.Abs`).
+    fn source_display(&self) -> String {
+        match self {
+            Item::Local(path) => crate::error::abs_path(&path.to_string_lossy()),
+            item => item.display(),
         }
     }
 }
@@ -794,26 +801,12 @@ async fn expand_source(
 // execution
 // ---------------------------------------------------------------------------
 
-/// mc `copyMessage`.
-#[derive(Debug, Serialize)]
-struct CopyMessage<'a> {
-    status: &'static str,
-    source: &'a str,
-    target: &'a str,
-    size: u64,
-    #[serde(rename = "totalCount")]
-    total_count: u64,
-    #[serde(rename = "totalSize")]
-    total_size: u64,
-}
-
 struct Session {
     clients: Clients,
     options: CopyOptions,
     progress: Arc<Progress>,
     json: bool,
     total_count: u64,
-    total_size: u64,
 }
 
 impl Session {
@@ -841,30 +834,16 @@ impl Session {
         }
     }
 
-    fn announce(&self, task: &CopyTask) -> Result<()> {
-        let source = task.source.display();
-        if self.progress.is_bar() {
-            self.progress.set_caption(&format!("{source}:"));
-            return Ok(());
-        }
-        let target = task.target.display();
-        if self.json {
-            crate::output::print_json(&CopyMessage {
-                status: "success",
-                source: &source,
-                target: &target,
+    async fn copy(&self, task: &CopyTask) -> Result<()> {
+        self.progress.announce(
+            &CopyMessage {
+                source: &task.source.source_display(),
+                target: &task.target.display(),
                 size: task.size,
                 total_count: self.total_count,
-                total_size: self.total_size,
-            })?;
-        } else {
-            println!("`{source}` -> `{target}`");
-        }
-        Ok(())
-    }
-
-    async fn copy(&self, task: &CopyTask) -> Result<()> {
-        self.announce(task)?;
+            },
+            self.json,
+        )?;
         match (&task.source, &task.target) {
             (Item::Local(path), Item::S3 { alias, bucket, key }) => {
                 self.upload(task, path, alias, bucket, key).await?
@@ -904,14 +883,15 @@ impl Session {
     ) -> Result<()> {
         let mut put = self.put_options(&task.target.display())?;
         if self.options.preserve {
-            put.metadata.insert(
-                0,
-                (
-                    crate::transfer::ATTRS_METADATA_KEY.to_string(),
-                    crate::transfer::file_attrs(path)?,
-                ),
-            );
+            // mc: source xattrs and `mc-attrs` first; `--attr` entries override them.
+            let mut preserved = crate::transfer::file_xattrs(path);
+            preserved.push((
+                crate::transfer::ATTRS_METADATA_KEY.to_string(),
+                crate::transfer::file_attrs(path)?,
+            ));
+            put.metadata.splice(0..0, preserved);
         }
+        put.local_source(path);
         let file = tokio::fs::File::open(path)
             .await
             .with_context(|| format!("Unable to read local file `{}`.", path.display()))?;
@@ -1034,6 +1014,18 @@ impl Session {
             return Ok(());
         }
 
+        if self.options.preserve {
+            // mc `--preserve` reads the source tags along with the object (MinIO
+            // `X-Amz-Tagging-Directive: ACCESS`) and they replace `--tags`.
+            if let Ok(tags) =
+                crate::s3::object_tags(src_client, src_bucket, src_key, get.version_id.as_deref())
+                    .await
+                && !tags.is_empty()
+            {
+                put.tags = tags.into_iter().collect();
+                put.tags.sort();
+            }
+        }
         let response = crate::s3::get_object(src_client, src_bucket, src_key, &get).await?;
         put.metadata = crate::s3::merge_metadata(
             [
@@ -1056,7 +1048,10 @@ impl Session {
 }
 
 /// Streams `reader` into `path` via `<path>.part.minio`, creating parent folders.
-async fn write_local<R: tokio::io::AsyncRead + Unpin>(mut reader: R, path: &Path) -> Result<()> {
+pub(crate) async fn write_local<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    path: &Path,
+) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         tokio::fs::create_dir_all(parent)
             .await
@@ -1134,7 +1129,6 @@ pub(crate) fn run_session(paths: &[String], options: CopyOptions, json: bool) ->
             progress: Progress::new(total_size, bar),
             json,
             total_count: plan.tasks.len() as u64,
-            total_size,
             options,
         });
         let failures = execute(session.clone(), plan.tasks.clone()).await;
@@ -1159,15 +1153,7 @@ pub(crate) fn run_session(paths: &[String], options: CopyOptions, json: bool) ->
                 remove_empty_dirs(dir, *include_root);
             }
         }
-        if !session.progress.is_bar() {
-            let stat = session.progress.stat();
-            if json {
-                crate::output::print_json(&stat)?;
-            } else {
-                println!("{}", stat.table());
-            }
-        }
-        Ok(())
+        session.progress.print_summary(json)
     })
 }
 
@@ -1177,7 +1163,7 @@ async fn execute(session: Arc<Session>, tasks: Vec<CopyTask>) -> Vec<(String, an
     let mut failures = Vec::new();
     let mut record = |joined: Result<(CopyTask, Result<()>), tokio::task::JoinError>| match joined {
         Ok((_, Ok(()))) => {}
-        Ok((task, Err(error))) => failures.push((task.source.display(), error)),
+        Ok((task, Err(error))) => failures.push((task.source.source_display(), error)),
         Err(error) => failures.push((String::from("?"), anyhow!(error))),
     };
     for task in tasks {

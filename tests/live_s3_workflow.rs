@@ -184,7 +184,8 @@ fn live_coolify_pipe_json_and_ignore_existing_work() {
         .write_stdin("streamed archive")
         .assert()
         .success()
-        .stdout("");
+        // Like mc, --quiet keeps the result line (it only drops the progress residue).
+        .stdout(format!("16 bytes -> `{object}`\n"));
     live::mx()
         .env("HOME", home.path())
         .args(["stat", "--json", &object])

@@ -676,6 +676,9 @@ impl Normalizer {
             r"(X-Amz-(?:Algorithm|Credential|Date|Expires|SignedHeaders|Signature|Security-Token))=[^&\s\x22\\]+",
             "$1=<X>",
         );
+        // Volatile JSON numbers (transfer timing); before the hex rules, which would match
+        // long float fractions.
+        n.rule(r#"("(?:duration|speed)":\s*)[0-9.eE+-]+"#, "${1}0");
         // Go time.Time default format: 2026-09-26 12:00:00.123 +0000 UTC
         n.rule(
             r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)? [+-]\d{4} [A-Z]{3,4}",
@@ -702,8 +705,6 @@ impl Normalizer {
         n.rule(r"\b[0-9a-f]{32}(?:-\d+)?\b", "<ETAG>");
         // MinIO request IDs.
         n.rule(r"\b[0-9A-F]{16}\b", "<REQUEST_ID>");
-        // Volatile JSON numbers (transfer timing).
-        n.rule(r#"("(?:duration|speed)":\s*)[0-9.eE+-]+"#, "${1}0");
         // xid-style generated IDs (ILM rule IDs).
         n.rule(r"\b[0-9a-v]{20}\b", "<ID>");
         // Retention countdown.

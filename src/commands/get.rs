@@ -1,12 +1,14 @@
 use crate::commands::cat::EncCFlag;
-use crate::commands::cp::{resolve_local_destination, source_name_from_key};
+use crate::commands::cp::{resolve_local_destination, source_name_from_key, write_local};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::error::{McError, nonfatal};
 use crate::flags::{VersionIdFlag, resolve_sse};
 use crate::location::{Location, parse_location};
 use crate::output;
+use crate::progress::{CopyMessage, Progress, ProgressReader};
 use crate::s3::GetOptions;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args;
 
 #[derive(Debug, Args)]
@@ -24,17 +26,30 @@ pub struct GetArgs {
     pub target: Option<String>,
 }
 
-pub fn run(args: GetArgs, _json: bool) -> Result<()> {
+pub fn run(args: GetArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
-    let Location::S3(source) = parse_location(&args.source, store.config()) else {
-        return Err(
-            anyhow::Error::new(crate::error::McError::new("Source is not s3."))
-                .context(crate::error::nonfatal("Unable to download.")),
+    // mc reports problems found while preparing the download with `errorIf` and exits 0.
+    let prepare_error = |message: &str| {
+        output::print_error(
+            &anyhow::Error::new(McError::new(message)).context(nonfatal("Unable to download.")),
         );
+        Ok(())
     };
+    let Location::S3(source) = parse_location(&args.source, store.config()) else {
+        return prepare_error("Source is not s3.");
+    };
+    let Some(bucket) = source.bucket.clone().filter(|bucket| !bucket.is_empty()) else {
+        return prepare_error("Please set bucket for s3 resource.");
+    };
+    let key = source.key_with_trailing_slash().unwrap_or_default();
+    if key.is_empty() {
+        return prepare_error("Please set a full path for s3 resource.");
+    }
+    let target = args.target.as_deref().unwrap_or(".");
+    if matches!(parse_location(target, store.config()), Location::S3(_)) {
+        return prepare_error("Target is not local filesystem.");
+    }
     let alias = alias_config(&store, &source.alias)?;
-    let bucket = source.require_bucket()?.to_string();
-    let key = source.require_object_key()?;
     let options = GetOptions {
         version_id: args.version.version_id.clone(),
         sse_c: resolve_sse(
@@ -44,25 +59,73 @@ pub fn run(args: GetArgs, _json: bool) -> Result<()> {
         .and_then(|sse| sse.customer_key()),
         ..Default::default()
     };
-    let fallback = source_name_from_key(&key);
-    let destination = match args.target {
-        Some(path) => resolve_local_destination(std::path::Path::new(&path), fallback)?,
-        None => std::env::current_dir()?.join(fallback),
-    };
-    let bytes = runtime()?
-        .block_on(crate::s3::download_object_to_path_with(
-            &alias,
-            &bucket,
-            &key,
-            &destination,
-            &options,
-        ))
-        .context(crate::error::nonfatal("Unable to download."))?;
-    output::print_plain(&format!(
-        "Downloaded `{}` -> `{}` ({} bytes).",
-        args.source,
-        destination.display(),
-        bytes
-    ));
-    Ok(())
+    let destination =
+        resolve_local_destination(std::path::Path::new(target), source_name_from_key(&key))?;
+
+    let bar = !json && !crate::globals::quiet() && output::stdout_is_terminal();
+    // mc `get` does not stat the source: the total and the announced size stay 0.
+    let progress = Progress::new(0, bar);
+    progress.announce(
+        &CopyMessage {
+            source: &format!("{}/{bucket}/{key}", source.alias),
+            target: &clean_path(&destination.to_string_lossy()),
+            size: 0,
+            total_count: 0,
+        },
+        json,
+    )?;
+    let result = runtime()?.block_on(async {
+        let client = crate::s3::build_client(&alias).await?;
+        let response = crate::s3::get_object(&client, &bucket, &key, &options).await?;
+        let reader = ProgressReader::new(response.body.into_async_read(), progress.clone());
+        write_local(reader, &destination).await
+    });
+    if let Err(err) = result {
+        progress.finish(false);
+        // mc returns the error from the command; `main` prints it as plain text (also with
+        // --json) and exits 1.
+        let report = output::report(&err);
+        let text = output::format_fatal_text(&report.message, &report.cause);
+        eprintln!("{}: <ERROR> {}", output::prog_name(), text.trim_end());
+        return Err(output::Exit(1).into());
+    }
+    progress.finish(true);
+    progress.print_summary(json)
+}
+
+/// Go `filepath.Clean` for display (mc prints the cleaned target path).
+fn clean_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|last| *last != "..") => {
+                parts.pop();
+            }
+            ".." if absolute => {}
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    match (absolute, joined.is_empty()) {
+        (true, _) => format!("/{joined}"),
+        (false, true) => ".".to_string(),
+        (false, false) => joined,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_path;
+
+    #[test]
+    fn cleans_paths_like_go() {
+        assert_eq!(clean_path("./a.txt"), "a.txt");
+        assert_eq!(clean_path("sub//b/../c"), "sub/c");
+        assert_eq!(clean_path("/tmp/x/../y/./z"), "/tmp/y/z");
+        assert_eq!(clean_path("../a"), "../a");
+        assert_eq!(clean_path("./"), ".");
+        assert_eq!(clean_path("/.."), "/");
+    }
 }

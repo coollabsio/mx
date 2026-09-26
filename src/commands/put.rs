@@ -1,12 +1,13 @@
 use crate::commands::cp::{resolve_destination_key, source_name_from_local};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::error::{McError, abs_path, nonfatal};
 use crate::flags::{ChecksumFlag, EncFlags, parse_size};
 use crate::location::{Location, parse_location};
+use crate::progress::{CopyMessage, Progress, ProgressReader};
 use crate::s3::{BlockingReader, PutOptions, upload_stream};
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use serde::Serialize;
 
 #[derive(Debug, Args)]
 pub struct PutArgs {
@@ -45,9 +46,19 @@ pub fn run(args: PutArgs, json: bool) -> Result<()> {
         bail!("Invalid number of threads `{}`", args.parallel);
     }
     let part_size = parse_size(&args.part_size).context("Unable to parse part size")?;
+    let enc = args.enc.entries()?;
     let store = ConfigStore::load_or_create()?;
-    let Location::S3(dst) = parse_location(&args.target, store.config()) else {
-        bail!("`put` target must be an S3 object target.");
+    // mc reports problems found while preparing the upload with `errorIf` and exits 0.
+    let prepare_error = |err: anyhow::Error| {
+        crate::output::print_error(&err.context(nonfatal("Unable to upload.")));
+        Ok(())
+    };
+    let dst = match parse_location(&args.target, store.config()) {
+        Location::S3(dst) if dst.bucket.as_deref().is_some_and(|b| !b.is_empty()) => dst,
+        Location::S3(_) => {
+            return prepare_error(McError::new("Bucket should not be empty.").into());
+        }
+        Location::Local(_) => return prepare_error(McError::new("Target is not s3.").into()),
     };
     let alias = alias_config(&store, &dst.alias)?;
     let bucket = dst.require_bucket()?.to_string();
@@ -61,7 +72,31 @@ pub fn run(args: PutArgs, json: bool) -> Result<()> {
             args.target
         );
     }
-    let enc = args.enc.entries()?;
+
+    // Resolve every source first, like mc's URL preparation.
+    let mut uploads = Vec::new();
+    for source in &args.sources {
+        if source == "-" {
+            uploads.push((None, "-".to_string(), "stdin".to_string(), 0));
+            continue;
+        }
+        match parse_location(source, store.config()) {
+            Location::Local(path) => match std::fs::metadata(&path) {
+                Err(error) => return prepare_error(crate::error::io_error(&error, source).into()),
+                Ok(meta) if meta.is_dir() => {
+                    return prepare_error(McError::invalid_argument().into());
+                }
+                Ok(meta) => {
+                    let name = source_name_from_local(&path)?;
+                    uploads.push((Some(path), abs_path(source), name, meta.len()));
+                }
+            },
+            Location::S3(_) => {
+                return prepare_error(McError::new("Source is not local filepath.").into());
+            }
+        }
+    }
+
     let rt = runtime()?;
     let client = rt.block_on(crate::s3::build_client(&alias))?;
     let client = if args.if_not_exists {
@@ -69,86 +104,53 @@ pub fn run(args: PutArgs, json: bool) -> Result<()> {
     } else {
         client
     };
-
-    for source in &args.sources {
-        let (path, name) = if source == "-" {
-            (None, "stdin".to_string())
-        } else {
-            match parse_location(source, store.config()) {
-                Location::Local(path) if path.is_dir() => {
-                    bail!("`{source}` is a folder. Folder cannot be uploaded with `put`.")
-                }
-                Location::Local(path) => {
-                    if !path.exists() {
-                        return Err(anyhow::Error::new(crate::error::local_not_found(source))
-                            .context(crate::error::nonfatal("Unable to upload.")));
-                    }
-                    let name = source_name_from_local(&path)?;
-                    (Some(path), name)
-                }
-                Location::S3(_) => bail!("`put` source must be local path or `-`."),
-            }
-        };
+    let bar = !json && !crate::globals::quiet() && crate::output::stdout_is_terminal();
+    let progress = Progress::new(0, bar);
+    for (path, source, name, size) in uploads {
         let key = resolve_destination_key(&dst, name)?;
-        let options = PutOptions {
+        let target = format!("{}/{bucket}/{key}", dst.alias);
+        progress.add_total(size);
+        // mc `put` never fills in the running totals.
+        progress.announce(
+            &CopyMessage {
+                source: &source,
+                target: &target,
+                size,
+                total_count: 0,
+            },
+            json,
+        )?;
+        let mut options = PutOptions {
             storage_class: args.storage_class.clone(),
-            sse: crate::flags::resolve_sse(&enc, &format!("{}/{bucket}/{key}", dst.alias)),
+            sse: crate::flags::resolve_sse(&enc, &target),
             checksum: args.checksum.checksum,
             disable_multipart: args.disable_multipart,
             part_size: Some(part_size),
             parallel: Some(args.parallel as usize),
             ..Default::default()
         };
-        let outcome = rt
-            .block_on(async {
-                match &path {
-                    Some(path) => {
-                        let file = tokio::fs::File::open(path).await.with_context(|| {
-                            format!("Unable to read local file `{}`.", path.display())
-                        })?;
-                        let size = file.metadata().await.ok().map(|meta| meta.len());
-                        upload_stream(&client, &bucket, &key, file, size, &options).await
-                    }
-                    None => {
-                        let stdin = BlockingReader::new(std::io::stdin().lock());
-                        upload_stream(&client, &bucket, &key, stdin, None, &options).await
-                    }
+        let result = rt.block_on(async {
+            match &path {
+                Some(path) => {
+                    options.local_source(path);
+                    let file = tokio::fs::File::open(path).await.with_context(|| {
+                        format!("Unable to read local file `{}`.", path.display())
+                    })?;
+                    let reader = ProgressReader::new(file, progress.clone());
+                    upload_stream(&client, &bucket, &key, reader, Some(size), &options).await
                 }
-            })
-            .context("unable to upload")?;
-        let result = PutResult::new(
-            source.clone(),
-            format!("{}/{bucket}/{key}", dst.alias),
-            outcome.size,
-        );
-        if json {
-            crate::output::print_json(&result)?;
-        } else {
-            println!(
-                "Uploaded `{}` -> `{}` successfully.",
-                result.source, result.target
-            );
+                None => {
+                    let stdin = BlockingReader::new(std::io::stdin().lock());
+                    let reader = ProgressReader::new(stdin, progress.clone());
+                    upload_stream(&client, &bucket, &key, reader, None, &options).await
+                }
+            }
+        });
+        if let Err(err) = result {
+            progress.finish(false);
+            return Err(err.context("unable to upload"));
         }
     }
-    Ok(())
-}
-
-#[derive(Debug, Serialize)]
-pub struct PutResult {
-    status: &'static str,
-    source: String,
-    target: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bytes: Option<i64>,
-}
-
-impl PutResult {
-    fn new(source: String, target: String, bytes: Option<i64>) -> Self {
-        Self {
-            status: "success",
-            source,
-            target,
-            bytes,
-        }
-    }
+    progress.finish(true);
+    progress.print_summary(json)
 }
