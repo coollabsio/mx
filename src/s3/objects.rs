@@ -11,7 +11,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::primitives::{ByteStream, DateTime, DateTimeFormat};
-use aws_sdk_s3::types::{MetadataDirective, TaggingDirective};
+use aws_sdk_s3::types::{
+    CompletedMultipartUpload, CompletedPart, MetadataDirective, TaggingDirective,
+};
 use aws_smithy_runtime_api::client::orchestrator::HttpRequest;
 use base64::Engine;
 use md5::{Digest, Md5};
@@ -613,6 +615,349 @@ pub async fn copy_object(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// copy helpers (cp/mv)
+// ---------------------------------------------------------------------------
+
+/// Minimum part size for server-side multipart copies (UploadPartCopy).
+pub const COPY_PART_SIZE: u64 = 512 * 1024 * 1024;
+
+/// Byte ranges `(start, end_inclusive)` for copying `size` bytes with UploadPartCopy:
+/// parts of `max(512 MiB, ceil(size / 10000))` rounded up to 1 MiB.
+pub fn plan_copy_parts(size: u64) -> Vec<(u64, u64)> {
+    const MIB: u64 = 1024 * 1024;
+    let needed = size.div_ceil(super::MAX_PARTS as u64).div_ceil(MIB) * MIB;
+    let part = needed.max(COPY_PART_SIZE);
+    (0..size.div_ceil(part))
+        .map(|index| {
+            let start = index * part;
+            (start, (start + part).min(size) - 1)
+        })
+        .collect()
+}
+
+/// Server-side copy that switches to a multipart copy (UploadPartCopy) above 5 GiB.
+pub async fn server_side_copy_sized(
+    client: &Client,
+    source: ObjectRef<'_>,
+    target: ObjectRef<'_>,
+    source_options: &GetOptions,
+    put: &PutOptions,
+    size: u64,
+) -> Result<PutOutcome> {
+    if size <= super::MAX_SINGLE_PUT_SIZE {
+        return server_side_copy(client, source, target, source_options, put).await;
+    }
+    if put.disable_multipart {
+        bail!("object exceeds the 5 GiB single copy limit; enable multipart");
+    }
+    multipart_copy(client, source, target, source_options, put, size).await
+}
+
+/// Copies `size` bytes server-side with CreateMultipartUpload + UploadPartCopy. Keeps the
+/// source content headers, user metadata and tags unless `put` overrides them.
+pub async fn multipart_copy(
+    client: &Client,
+    source: ObjectRef<'_>,
+    target: ObjectRef<'_>,
+    source_options: &GetOptions,
+    put: &PutOptions,
+    size: u64,
+) -> Result<PutOutcome> {
+    let mut put = put.clone();
+    if put.metadata.is_empty() && put.content_type.is_none() {
+        let head =
+            super::head_object_with(client, source.bucket, source.key, source_options).await?;
+        put.metadata = merge_metadata(
+            [
+                ("Content-Type", head.content_type()),
+                ("Cache-Control", head.cache_control()),
+                ("Content-Encoding", head.content_encoding()),
+                ("Content-Disposition", head.content_disposition()),
+                ("Content-Language", head.content_language()),
+            ],
+            head.metadata(),
+            &[],
+        );
+    }
+    if put.tags.is_empty() {
+        let tagging = client
+            .get_object_tagging()
+            .bucket(source.bucket)
+            .key(source.key)
+            .set_version_id(source_options.version_id.clone())
+            .send()
+            .await?;
+        put.tags = tagging
+            .tag_set()
+            .iter()
+            .map(|tag| (tag.key().to_string(), tag.value().to_string()))
+            .collect();
+    }
+    let headers = put.headers()?;
+    let mut request = apply_put_options!(
+        client
+            .create_multipart_upload()
+            .bucket(target.bucket)
+            .key(target.key),
+        &put,
+        &headers
+    );
+    if let Some(algorithm) = effective_checksum(&put) {
+        request = request.checksum_algorithm(algorithm.to_sdk());
+    }
+    let created = request.send().await?;
+    let upload_id = created
+        .upload_id()
+        .context("S3 did not return a multipart upload ID")?
+        .to_string();
+    let copy_source = encode_copy_source(
+        source.bucket,
+        source.key,
+        source_options.version_id.as_deref(),
+    );
+    let target_key = put.sse.as_ref().and_then(Sse::customer_key);
+
+    let result = async {
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut parts = Vec::new();
+        for (index, (start, end)) in plan_copy_parts(size).into_iter().enumerate() {
+            while tasks.len() >= 4 {
+                if let Some(joined) = tasks.join_next().await {
+                    parts.push(joined??);
+                }
+            }
+            let part_number = index as i32 + 1;
+            let mut request = client
+                .upload_part_copy()
+                .bucket(target.bucket)
+                .key(target.key)
+                .upload_id(&upload_id)
+                .part_number(part_number)
+                .copy_source(&copy_source)
+                .copy_source_range(format!("bytes={start}-{end}"));
+            if let Some(key) = &source_options.sse_c {
+                let (algorithm, encoded, md5) = sse_c_headers(key);
+                request = request
+                    .copy_source_sse_customer_algorithm(algorithm)
+                    .copy_source_sse_customer_key(encoded)
+                    .copy_source_sse_customer_key_md5(md5);
+            }
+            if let Some(key) = &target_key {
+                let (algorithm, encoded, md5) = sse_c_headers(key);
+                request = request
+                    .sse_customer_algorithm(algorithm)
+                    .sse_customer_key(encoded)
+                    .sse_customer_key_md5(md5);
+            }
+            tasks.spawn(async move {
+                let response = request.send().await?;
+                let result = response.copy_part_result();
+                Ok::<_, anyhow::Error>(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .set_e_tag(result.and_then(|r| r.e_tag()).map(str::to_string))
+                        .set_checksum_crc32(
+                            result.and_then(|r| r.checksum_crc32()).map(str::to_string),
+                        )
+                        .set_checksum_crc32_c(
+                            result
+                                .and_then(|r| r.checksum_crc32_c())
+                                .map(str::to_string),
+                        )
+                        .set_checksum_sha1(
+                            result.and_then(|r| r.checksum_sha1()).map(str::to_string),
+                        )
+                        .set_checksum_sha256(
+                            result.and_then(|r| r.checksum_sha256()).map(str::to_string),
+                        )
+                        .build(),
+                )
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            parts.push(joined??);
+        }
+        parts.sort_by_key(|part: &CompletedPart| part.part_number());
+        let mut complete = client
+            .complete_multipart_upload()
+            .bucket(target.bucket)
+            .key(target.key)
+            .upload_id(&upload_id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build(),
+            );
+        if let Some(key) = &target_key {
+            let (algorithm, encoded, md5) = sse_c_headers(key);
+            complete = complete
+                .sse_customer_algorithm(algorithm)
+                .sse_customer_key(encoded)
+                .sse_customer_key_md5(md5);
+        }
+        let response = complete.send().await?;
+        Ok::<PutOutcome, anyhow::Error>(PutOutcome {
+            size: Some(size as i64),
+            etag: response.e_tag().map(str::to_string),
+            version_id: response.version_id().map(str::to_string),
+        })
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = client
+            .abort_multipart_upload()
+            .bucket(target.bucket)
+            .key(target.key)
+            .upload_id(&upload_id)
+            .send()
+            .await;
+    }
+    result
+}
+
+/// Source content headers + user metadata as `--attr`-style pairs, with `overrides` replacing
+/// entries of the same name (case-insensitive, `X-Amz-Meta-` prefix optional).
+pub fn merge_metadata(
+    standard: [(&str, Option<&str>); 5],
+    user: Option<&HashMap<String, String>>,
+    overrides: &[(String, String)],
+) -> Vec<(String, String)> {
+    fn normalized(key: &str) -> String {
+        let lower = key.trim().to_ascii_lowercase();
+        lower
+            .strip_prefix("x-amz-meta-")
+            .map(str::to_string)
+            .unwrap_or(lower)
+    }
+    let mut pairs: Vec<(String, String)> = standard
+        .iter()
+        .filter_map(|(name, value)| value.map(|v| (name.to_string(), v.to_string())))
+        .collect();
+    let mut user: Vec<_> = user
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    user.sort();
+    pairs.extend(user);
+    for (key, value) in overrides {
+        let name = normalized(key);
+        pairs.retain(|(existing, _)| normalized(existing) != name);
+        pairs.push((key.clone(), value.clone()));
+    }
+    pairs
+}
+
+/// True when at least one object exists under `prefix`.
+pub async fn prefix_exists(client: &Client, bucket: &str, prefix: &str) -> Result<bool> {
+    let response = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix(prefix)
+        .max_keys(1)
+        .send()
+        .await?;
+    Ok(!response.contents().is_empty() || !response.common_prefixes().is_empty())
+}
+
+/// The version of exactly `key` that was current at `at` (None if it did not exist or was
+/// deleted then).
+pub async fn object_version_at(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    at: SystemTime,
+) -> Result<Option<super::ObjectInfo>> {
+    let mut items = Vec::new();
+    let mut key_marker: Option<String> = None;
+    let mut version_marker: Option<String> = None;
+    loop {
+        let response = client
+            .list_object_versions()
+            .bucket(bucket)
+            .prefix(key)
+            .set_key_marker(key_marker.take())
+            .set_version_id_marker(version_marker.take())
+            .send()
+            .await?;
+        for version in response.versions() {
+            if version.key() == Some(key) {
+                items.push(super::ObjectInfo {
+                    key: key.to_string(),
+                    size: version.size().unwrap_or(0),
+                    last_modified: version.last_modified().and_then(super::to_system_time),
+                    version_id: version.version_id().map(str::to_string),
+                    is_latest: version.is_latest().unwrap_or(false),
+                    ..Default::default()
+                });
+            }
+        }
+        for marker in response.delete_markers() {
+            if marker.key() == Some(key) {
+                items.push(super::ObjectInfo {
+                    key: key.to_string(),
+                    last_modified: marker.last_modified().and_then(super::to_system_time),
+                    version_id: marker.version_id().map(str::to_string),
+                    is_latest: marker.is_latest().unwrap_or(false),
+                    is_delete_marker: true,
+                    ..Default::default()
+                });
+            }
+        }
+        if response.is_truncated() != Some(true) {
+            break;
+        }
+        key_marker = response.next_key_marker().map(str::to_string);
+        version_marker = response.next_version_id_marker().map(str::to_string);
+        if key_marker.is_none() && version_marker.is_none() {
+            break;
+        }
+    }
+    Ok(super::resolve_rewind(items, at).into_iter().next())
+}
+
+/// Recursively lists the files inside a zip object on MinIO (`x-minio-extract: true`).
+/// `prefix` is `path/to/archive.zip/` (optionally followed by a folder). Keys are absolute.
+pub async fn list_zip_objects(
+    client: &Client,
+    bucket: &str,
+    prefix: &str,
+) -> Result<Vec<super::ObjectInfo>> {
+    let mut items = Vec::new();
+    let mut continuation = None;
+    loop {
+        let response = client
+            .list_objects_v2()
+            .bucket(bucket)
+            .prefix(prefix)
+            .set_continuation_token(continuation)
+            .customize()
+            .mutate_request(add_zip_extract_header)
+            .send()
+            .await?;
+        for object in response.contents() {
+            let Some(key) = object.key() else { continue };
+            items.push(super::ObjectInfo {
+                key: key.to_string(),
+                size: object.size().unwrap_or(0),
+                last_modified: object.last_modified().and_then(super::to_system_time),
+                is_latest: true,
+                ..Default::default()
+            });
+        }
+        if response.is_truncated() != Some(true) {
+            break;
+        }
+        continuation = response.next_continuation_token().map(str::to_string);
+        if continuation.is_none() {
+            break;
+        }
+    }
+    Ok(items)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,6 +1011,57 @@ mod tests {
         assert_eq!(
             encode_copy_source("bkt", "k", Some("v1")),
             "bkt/k?versionId=v1"
+        );
+    }
+
+    #[test]
+    fn plans_multipart_copy_parts() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let parts = plan_copy_parts(6 * GIB);
+        assert_eq!(parts.len(), 12);
+        assert_eq!(parts[0], (0, COPY_PART_SIZE - 1));
+        assert_eq!(parts[11].1, 6 * GIB - 1);
+        let parts = plan_copy_parts(5 * GIB + 1);
+        assert_eq!(parts.len(), 11);
+        assert_eq!(parts[10], (5 * GIB, 5 * GIB));
+        for window in parts.windows(2) {
+            assert_eq!(window[0].1 + 1, window[1].0);
+        }
+        let huge = 5 * 1024 * GIB;
+        let parts = plan_copy_parts(huge);
+        assert!(parts.len() <= 10_000);
+        assert_eq!(parts.last().unwrap().1, huge - 1);
+        assert!(plan_copy_parts(0).is_empty());
+    }
+
+    #[test]
+    fn merges_source_metadata_with_overrides() {
+        let user: HashMap<String, String> = [
+            ("owner".to_string(), "alice".to_string()),
+            ("a".into(), "1".into()),
+        ]
+        .into();
+        let merged = merge_metadata(
+            [
+                ("Content-Type", Some("text/plain")),
+                ("Cache-Control", None),
+                ("Content-Encoding", None),
+                ("Content-Disposition", None),
+                ("Content-Language", None),
+            ],
+            Some(&user),
+            &[
+                ("X-Amz-Meta-Owner".into(), "bob".into()),
+                ("content-type".into(), "application/json".into()),
+            ],
+        );
+        assert_eq!(
+            merged,
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("X-Amz-Meta-Owner".to_string(), "bob".to_string()),
+                ("content-type".to_string(), "application/json".to_string()),
+            ]
         );
     }
 
