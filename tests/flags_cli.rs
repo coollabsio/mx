@@ -1,28 +1,10 @@
-//! Offline checks for foundation wiring: stub commands, argv rewriting, new mb flags.
+//! Offline checks for foundation wiring: command registration, argv rewriting, new mb flags.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn mx() -> Command {
     Command::cargo_bin("mx").expect("binary")
-}
-
-#[test]
-fn stub_commands_are_registered_and_fail_cleanly() {
-    let home = tempfile::tempdir().unwrap();
-    let cases: &[&[&str]] = &[
-        &["replicate", "ls", "local/b"],
-        &["replicate", "backlog", "local/b"],
-        &["quota", "info", "local/b"],
-        &["ilm", "tier", "ls", "local"],
-    ];
-    for args in cases {
-        mx().env("HOME", home.path())
-            .args(*args)
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("not implemented yet"));
-    }
 }
 
 #[test]
