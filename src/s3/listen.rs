@@ -109,10 +109,6 @@ pub async fn listen(
         query.push(("prefix", prefix));
         query.push(("suffix", suffix));
     }
-    // MinIO signs the query with Go `url.Values.Encode` (values in request order) while SigV4
-    // signers sort values: send them sorted so both agree.
-    let mut events = events.to_vec();
-    events.sort_unstable();
     query.extend(events.iter().map(|event| ("events", *event)));
     let (mut response, body) = client
         .send_streaming("GET", &path, &query, &[], Vec::new())
