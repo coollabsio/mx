@@ -11,21 +11,10 @@ fn mx() -> Command {
 fn stub_commands_are_registered_and_fail_cleanly() {
     let home = tempfile::tempdir().unwrap();
     let cases: &[&[&str]] = &[
-        &["retention", "info", "local/b/o"],
-        &["retention", "set", "GOVERNANCE", "1d", "local/b/o"],
-        &["retention", "clear", "local/b/o"],
-        &["legalhold", "set", "local/b/o"],
-        &["legalhold", "info", "local/b/o"],
-        &["event", "add", "local/b", "arn:minio:sqs::1:webhook"],
-        &["event", "remove", "local/b", "--force"],
-        &["event", "list", "local/b"],
-        &["undo", "local/b/o"],
-        &["od", "if=/dev/null", "of=local/b/o"],
         &["replicate", "ls", "local/b"],
         &["replicate", "backlog", "local/b"],
         &["quota", "info", "local/b"],
         &["ilm", "tier", "ls", "local"],
-        &["ilm", "restore", "local/b/o"],
     ];
     for args in cases {
         mx().env("HOME", home.path())
@@ -62,15 +51,22 @@ fn help_lists_new_commands() {
 fn multichar_short_flags_are_rewritten() {
     let home = tempfile::tempdir().unwrap();
     mx().env("HOME", home.path())
-        .args(["ilm", "restore", "-vid", "v1", "local/b/o"])
+        .args(["ilm", "restore", "-vid", "v1", "-r", "local/b/o"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not implemented yet"));
+        .stderr(predicate::str::contains("combine --version-id"));
     mx().env("HOME", home.path())
-        .args(["legalhold", "info", "--vid", "v1", "local/b/o"])
+        .args([
+            "legalhold",
+            "info",
+            "--vid",
+            "v1",
+            "--versions",
+            "local/b/o",
+        ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not implemented yet"));
+        .stderr(predicate::str::contains("You cannot pass --version-id"));
     // A command without the flag reports the rewritten long form.
     mx().env("HOME", home.path())
         .args(["ping", "-vid", "v1", "local"])
