@@ -89,7 +89,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Version(args) => version::run(args.command, json),
         Commands::Cors(args) => cors::run(args.command, json),
         Commands::Encrypt(args) => encrypt::run(args.command, json),
-        Commands::Anonymous(args) => anonymous::run(args.command, json),
+        Commands::Anonymous(args) => anonymous::run(args, json),
         Commands::Ilm(args) => ilm::run(args.command, json),
         Commands::Retention(args) => retention::run(args, json),
         Commands::Legalhold(args) => legalhold::run(args, json),

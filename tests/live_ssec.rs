@@ -216,3 +216,186 @@ fn live_ssec_multipart_put() {
         "{value}"
     );
 }
+
+/// `ilm restore --enc-c`: the key is accepted, and like mc a non-transitioned object fails the
+/// restore request (RestoreObject carries no SSE-C headers; only the status HEAD does).
+#[test]
+fn live_ssec_ilm_restore_non_transitioned() {
+    let Some(tls) = Tls::new() else { return };
+    tls.trust_ca();
+    let file = tls.home.path().join("warm.txt");
+    std::fs::write(&file, "warm").unwrap();
+    let enc = enc_c(&tls, "", 6);
+    tls.cmd()
+        .args([
+            "put",
+            "--enc-c",
+            &enc,
+            file.to_str().unwrap(),
+            &tls.target("warm.txt"),
+        ])
+        .assert()
+        .success();
+    // Like mc, the status HEAD runs even though the request failed; with the key it succeeds
+    // and reports no restore, without it MinIO rejects the HEAD of the SSE-C object.
+    let output = tls
+        .cmd()
+        .args(["ilm", "restore", "--enc-c", &enc, &tls.target("warm.txt")])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout(&output).contains("Sent restore requests to 0 object(s)"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not valid for the current state of the object"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("warm.txt` did not receive restore request"),
+        "{stderr}"
+    );
+    let output = tls
+        .cmd()
+        .args(["ilm", "restore", &tls.target("warm.txt")])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Unable to check for restore status"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("did not receive restore request"),
+        "{stderr}"
+    );
+}
+
+/// Polls `check` every second for up to `secs`; returns whether it became true.
+fn wait_until(secs: u64, mut check: impl FnMut() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed().as_secs() < secs {
+        if check() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    check()
+}
+
+/// End to end: an SSE-C object transitioned to a tier on server 2 is restored with `--enc-c`
+/// (the status HEAD needs the key). Best effort: skipped if MinIO does not transition it.
+#[test]
+fn live_ssec_ilm_restore_transitioned() {
+    let Some(tls) = Tls::new() else { return };
+    tls.trust_ca();
+    let (Ok(internal), Some(alias2)) = (
+        std::env::var("MX_TEST_URL2_INTERNAL"),
+        common::live::configure_second_alias(tls.home.path()),
+    ) else {
+        eprintln!("skipping; second server not configured");
+        return;
+    };
+    let remote_bucket = format!("{}-tier", tls.bucket);
+    tls.cmd()
+        .args(["mb", &format!("{alias2}/{remote_bucket}")])
+        .assert()
+        .success();
+    let tier = format!("X{}", tls.bucket.replace('-', "")).to_uppercase();
+    struct Cleanup<'a>(&'a Tls, Vec<String>);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            let _ = self.0.cmd().args(&self.1).output();
+        }
+    }
+    let _remote = Cleanup(
+        &tls,
+        vec![
+            "rb".into(),
+            "--force".into(),
+            format!("{alias2}/{remote_bucket}"),
+        ],
+    );
+    let _tier = Cleanup(
+        &tls,
+        ["ilm", "tier", "rm", "--force", "--dangerous", "tls", &tier]
+            .map(String::from)
+            .to_vec(),
+    );
+    tls.cmd()
+        .args([
+            "ilm",
+            "tier",
+            "add",
+            "minio",
+            "tls",
+            &tier,
+            "--endpoint",
+            internal.trim_end_matches('/'),
+            "--access-key",
+            &std::env::var("MX_TEST_ACCESS_KEY2").unwrap(),
+            "--secret-key",
+            &std::env::var("MX_TEST_SECRET_KEY2").unwrap(),
+            "--bucket",
+            &remote_bucket,
+        ])
+        .assert()
+        .success();
+    tls.cmd()
+        .args([
+            "ilm",
+            "rule",
+            "add",
+            &format!("tls/{}", tls.bucket),
+            "--transition-days",
+            "0",
+            "--transition-tier",
+            &tier,
+        ])
+        .assert()
+        .success();
+
+    let file = tls.home.path().join("cold.txt");
+    std::fs::write(&file, "cold sse-c data").unwrap();
+    let enc = enc_c(&tls, "", 7);
+    let target = tls.target("cold.txt");
+    tls.cmd()
+        .args(["put", "--enc-c", &enc, file.to_str().unwrap(), &target])
+        .assert()
+        .success();
+    let stat = || -> serde_json::Value {
+        let output = tls
+            .cmd()
+            .args(["--json", "stat", "--enc-c", &enc, &target])
+            .output()
+            .unwrap();
+        serde_json::from_slice(&output.stdout).unwrap_or_default()
+    };
+    if !wait_until(90, || stat()["storageClass"] == tier.as_str()) {
+        eprintln!("skipping restore part: MinIO did not transition the SSE-C object in 90s");
+        return;
+    }
+
+    tls.cmd()
+        .args(["ilm", "restore", "--enc-c", &enc, &target])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "1/1 object(s) successfully restored",
+        ));
+    tls.cmd()
+        .args(["cat", "--enc-c", &enc, &target])
+        .assert()
+        .success()
+        .stdout("cold sse-c data");
+
+    // Without the key the restore request is sent, but the status HEAD fails.
+    let output = tls
+        .cmd()
+        .args(["ilm", "restore", &target])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Unable to check for restore status"),
+        "{output:?}"
+    );
+}

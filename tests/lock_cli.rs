@@ -243,16 +243,58 @@ fn ilm_restore_rejects_bad_arguments() {
         &["ilm", "restore", "--days", "0", "dead/b/o"],
         "--days should be equal or greater than 1",
     );
-    fails_with(
-        &home,
-        &["ilm", "restore", "-r", "--vid", "v1", "dead/b/"],
-        "You cannot combine --version-id",
-    );
-    fails_with(
-        &home,
+    // mc never rejects these combinations (its check reads a string flag as a bool). The
+    // unreachable server is then reported per object, exiting 0 like mc.
+    for args in [
+        &["ilm", "restore", "-r", "--vid", "v1", "dead/b/"][..],
         &["ilm", "restore", "--versions", "dead/b/o"],
-        "--versions requires --recursive",
-    );
+    ] {
+        mx(&home)
+            .args(args)
+            .assert()
+            .stderr(predicate::str::contains("You cannot combine").not())
+            .stderr(predicate::str::contains("requires --recursive").not());
+    }
+}
+
+/// `--enc-c` is parsed before the target is resolved (mc `validateAndCreateEncryptionKeys`);
+/// the key itself is never echoed.
+#[test]
+fn ilm_restore_validates_enc_c_keys() {
+    let home = home();
+    for value in ["dead/b/=secretbadkey", "dead/b/"] {
+        mx(&home)
+            .args(["ilm", "restore", "--enc-c", value, "dead/b/o"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("Unable to parse encryption keys."))
+            .stderr(predicate::str::contains("secretbadkey").not());
+    }
+    // A valid key gets past parsing; the unreachable server is reported per object, and
+    // like mc the command still exits 0.
+    mx(&home)
+        .args([
+            "ilm",
+            "restore",
+            "--enc-c",
+            "dead/b/=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDA",
+            "dead/b/o",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\x1b[1A\x1b[KSent restore requests to 0 object(s)..",
+        ))
+        .stderr(predicate::str::contains("Unable to send restore request."))
+        .stderr(predicate::str::contains(
+            "Unable to check for restore status",
+        ))
+        .stderr(predicate::str::contains("encryption keys").not());
+    mx(&home)
+        .args(["ilm", "restore", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--enc-c value"));
 }
 
 #[test]

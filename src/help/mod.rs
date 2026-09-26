@@ -411,21 +411,7 @@ mod tests {
     }
 
     /// mc flags mx does not accept (`path -flag`).
-    const MISSING_MC_FLAGS: &[&str] = &[
-        "anonymous -recursive",
-        "anonymous -r",
-        "anonymous set -recursive",
-        "anonymous set -r",
-        "anonymous set-json -recursive",
-        "anonymous set-json -r",
-        "anonymous get -recursive",
-        "anonymous get -r",
-        "anonymous get-json -recursive",
-        "anonymous get-json -r",
-        "anonymous list -recursive",
-        "anonymous list -r",
-        "ilm restore -enc-c",
-    ];
+    const MISSING_MC_FLAGS: &[&str] = &[];
 
     /// Visible mx flags mc does not have (`path --flag`); help lists mc's flags only.
     const MX_EXTENSION_FLAGS: &[&str] = &["ilm rule add --id"];
@@ -444,7 +430,9 @@ mod tests {
     /// up to the documented lists.
     #[test]
     fn every_command_has_a_page_with_known_flags() {
-        let root = crate::cli::Cli::command();
+        // Built so global flags (`anonymous -r`) propagate to subcommands.
+        let mut root = crate::cli::Cli::command();
+        root.build();
         let mut missing = Vec::new();
         let mut extensions = Vec::new();
         for path in mx_paths() {

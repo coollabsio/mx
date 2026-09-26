@@ -31,9 +31,9 @@ server support that varies between S3-compatible servers.
 | `share download`, `upload`, `list` | Supported | `-r`, `--version-id`, `-E/--expire` (default `168h`), `-T`. Presigned URLs carry the same query parameters as mc (no SDK `x-id`); JSON keeps `&` unescaped like mc. `upload` prints a `curl` command with a POST policy; its `-F` fields are sorted (mc's order is random). `list` uses mc's share database in `<config dir>/share/`. |
 | `tag set`, `list`, `remove` | Supported | Object and bucket tags. `--version-id`, `--rewind`, `--versions`, `-r`, `--exclude-folders`. |
 | `version enable`, `suspend`, `info` | Supported | `--excluded-prefixes`, `--exclude-folders` (MinIO). Like mc, `enable`/`suspend` JSON has an empty `versioning` object (`status:""`). |
-| `anonymous set`, `get`, `set-json`, `get-json`, `list`, `links` | Supported | `private` is a synonym for `none`. Supports prefix policies. |
+| `anonymous set`, `get`, `set-json`, `get-json`, `list`, `links` | Supported | `private` is a synonym for `none`. Supports prefix policies. `-r/--recursive` is accepted before or after the operation like mc; only `links` uses it. |
 | `ilm rule add`, `edit`, `ls`, `rm`, `export`, `import` | Supported | Supports every mc rule flag. `ls` tables use go-pretty alignment (numbers right, text left); `ls`/`export` JSON carry `updatedAt`. A bucket without lifecycle fails with the server error like mc. |
-| `ilm restore` | Supported | `--days`, `-r`, `--version-id`, `--versions`. |
+| `ilm restore` | Supported | mc's flow and output: the status line is redrawn with mc's escape codes and cycling dots, the status of every selected object is checked even when its request failed, per-object errors are reported and the exit code stays 0 (JSON summary `status` is always `success`). `--version-id`/`--versions` are not checked against `-r` (mc's check never fires). `--days`, `-r`, `--version-id`, `--versions`, `--enc-c` (SSE-C key sent on the restore-status HEAD, like mc; RestoreObject itself has no SSE-C headers). Invalid keys fail with mc's `Unable to parse encryption keys.`; the cause text differs because mx never echoes the key. |
 | `ilm tier add`, `edit`, `update`, `ls`, `info`, `rm`, `check`, `verify` | Supported | MinIO admin API. All tier types (`minio`, `s3`, `azure` incl. service principal, `gcs`) with madmin's request JSON; mc's messages, errors and lipgloss tables (no terminal). Like mc, `rm`/`update` print an empty line. |
 | `retention set`, `clear`, `info` | Supported | Object and bucket default retention (`--default`). `-r`, `--versions`, `--version-id`, `--rewind`, `--bypass`. Object JSON has mc's `validity:""` and `error` (`null`, or the Go-marshaled server error). |
 | `legalhold set`, `clear`, `info` | Supported | Object legal hold. Works recursively and on versions. Single-object errors follow mc (`info` fatal, `set`/`clear` reported with exit 0). Intentional difference: `info -r --json` prints one document per object (mc prints nothing, a bug). |
@@ -110,8 +110,7 @@ server support that varies between S3-compatible servers.
   urfave's `help` page shows mx's release as `VERSION`. Help lists mc's flags only: the
   mx-only `ilm rule add --id` and the `put` alias `out` are not shown, and
   `replicate resync cancel` (mx-only) has an mc-style page in `src/help/mx.txt` but is not
-  listed under `replicate resync`. mc flags mx does not accept yet (listed in help):
-  `anonymous -r/--recursive`, `ilm restore --enc-c`.
+  listed under `replicate resync`.
 - Deprecated commands name `mc` literally in their replacement hint like mc
   (`Please use 'mc support inspect' instead.`).
 - `alias set` without `--api` probes the server like mc: S3v4 first, then S3v2

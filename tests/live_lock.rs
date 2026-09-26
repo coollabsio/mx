@@ -628,11 +628,17 @@ fn live_ilm_restore_non_transitioned_object() {
     live.cmd()
         .args(["ilm", "restore", "--days", "2", &live.url("cold.txt")])
         .assert()
-        .failure()
+        .success() // like mc: failures are reported, the exit code stays 0
         .stdout(predicate::str::contains(
             "Sent restore requests to 0 object(s)",
         ))
+        .stdout(predicate::str::contains(
+            "0/0 object(s) successfully restored",
+        ))
         .stderr(predicate::str::contains("Unable to send restore request"))
+        .stderr(predicate::str::contains(
+            "Unable to check for restore status",
+        ))
         .stderr(predicate::str::contains(
             "not valid for the current state of the object",
         ));
@@ -641,14 +647,11 @@ fn live_ilm_restore_non_transitioned_object() {
         .args(["--json", "ilm", "restore", "-r", &live.url("")])
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert!(output.status.success());
     let json = json_lines(&output.stdout);
-    // Per-object failures and the final error are mc error documents.
+    // Per-object failures are mc error documents; the summary still says `success` like mc.
     assert_eq!(json[0]["status"], "error");
-    let summary = json
-        .iter()
-        .find(|doc| doc.get("restored").is_some())
-        .unwrap();
-    assert_eq!(summary["status"], "failure");
+    let summary = json.last().unwrap();
+    assert_eq!(summary["status"], "success");
     assert_eq!(summary["restored"], 0);
 }

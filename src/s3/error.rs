@@ -53,7 +53,9 @@ impl ErrorResponse {
                     request_id: text("RequestId"),
                     host_id: text("HostId"),
                     region: text("Region"),
-                    ..Self::default()
+                    // minio-go keeps `Server` only when the XML body decodes; the header
+                    // fallback below rebuilds the response without it.
+                    server: header("Server").unwrap_or_default(),
                 }
             }
             None => {
@@ -104,7 +106,6 @@ impl ErrorResponse {
                 }
             }
         };
-        resp.server = header("Server").unwrap_or_default();
         if let Some(code) = header("x-minio-error-code").filter(|c| !c.is_empty()) {
             resp.code = code;
         }
@@ -357,6 +358,11 @@ mod tests {
         assert_eq!(resp.code, "BucketAlreadyOwnedByYou");
         assert_eq!(resp.resource, "/b/");
         assert_eq!(resp.server, "MinIO");
+        // No body (HEAD): minio-go's header fallback drops `Server`.
+        assert_eq!(
+            ErrorResponse::from_http(400, header, b"", "b", "k").server,
+            ""
+        );
         let err = resp.to_mc_error("b");
         assert_eq!(
             err.message,

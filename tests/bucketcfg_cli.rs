@@ -61,6 +61,7 @@ fn help_lists_new_subcommands_and_flags() {
             &["anonymous", "--help"],
             &["set", "set-json", "get", "get-json", "list", "links"],
         ),
+        (&["anonymous", "--help"], &["--recursive, -r"]),
         (&["anonymous", "links", "--help"], &["--recursive"]),
         (
             &["ilm", "rule", "--help"],
@@ -275,6 +276,40 @@ fn anonymous_validates_permissions_and_files() {
         home.path(),
         &["anonymous", "set-json", file.to_str().unwrap(), "local/b"],
         "is not valid JSON",
+    );
+}
+
+/// mc's `-r/--recursive` belongs to `anonymous` itself: accepted before or after the operation
+/// (only `links` uses it), never a usage error.
+#[test]
+fn anonymous_accepts_recursive_anywhere() {
+    let home = home();
+    for args in [
+        &["anonymous", "-r", "links", "dead/b"][..],
+        &["anonymous", "links", "dead/b", "--recursive"],
+        &["anonymous", "--recursive", "list", "dead/b"],
+    ] {
+        fails_with(
+            home.path(),
+            args,
+            "Unable to list policies of target `dead/b`.",
+        );
+    }
+    for args in [
+        &["anonymous", "-r", "get", "dead/b"][..],
+        &["anonymous", "get-json", "-r", "dead/b"],
+    ] {
+        mx(home.path())
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("anonymous `` for `dead/b`."))
+            .stderr(predicate::str::contains("Invalid command usage").not());
+    }
+    fails_with(
+        home.path(),
+        &["anonymous", "set", "-r", "public", "dead/b"],
+        "Unable to set anonymous `public` for `dead/b`.",
     );
 }
 

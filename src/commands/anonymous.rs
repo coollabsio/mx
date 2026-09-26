@@ -16,6 +16,9 @@ use std::io::Read;
 
 #[derive(Debug, Args)]
 pub struct AnonymousArgs {
+    /// list recursively (mc accepts it anywhere; only `links` uses it)
+    #[arg(short = 'r', long, global = true)]
+    pub recursive: bool,
     #[command(subcommand)]
     pub command: AnonymousCommand,
 }
@@ -54,20 +57,18 @@ pub struct AnonymousSetJsonArgs {
 
 #[derive(Debug, Args)]
 pub struct AnonymousLinksArgs {
-    /// list recursively
-    #[arg(short = 'r', long)]
-    pub recursive: bool,
     pub target: String,
 }
 
-pub fn run(command: AnonymousCommand, json: bool) -> Result<()> {
-    match command {
+pub fn run(args: AnonymousArgs, json: bool) -> Result<()> {
+    let recursive = args.recursive;
+    match args.command {
         AnonymousCommand::Set(args) => set(args, json),
         AnonymousCommand::SetJson(args) => set_json(args, json),
         AnonymousCommand::Get(args) => get(&args.target, "get", json),
         AnonymousCommand::GetJson(args) => get(&args.target, "get-json", json),
         AnonymousCommand::List(args) => list(&args.target, json),
-        AnonymousCommand::Links(args) => links(args, json),
+        AnonymousCommand::Links(args) => links(args, recursive, json),
     }
 }
 
@@ -287,7 +288,7 @@ struct LinkMessage<'a> {
     url: &'a str,
 }
 
-fn links(args: AnonymousLinksArgs, json: bool) -> Result<()> {
+fn links(args: AnonymousLinksArgs, recursive: bool, json: bool) -> Result<()> {
     let target = load_target(&args.target)
         .with_context(|| format!("Unable to list policies of target `{}`.", args.target))?;
     let path = format!("{}/{}", target.bucket, target.prefix);
@@ -305,19 +306,21 @@ fn links(args: AnonymousLinksArgs, json: bool) -> Result<()> {
         let prefix = anonymous_path
             .strip_prefix(&format!("{}/", target.bucket))
             .unwrap_or_default();
-        let items = rt
+        let mut items = rt
             .block_on(crate::s3::list_objects_with(
                 &client,
                 &target.bucket,
                 Some(prefix).filter(|prefix| !prefix.is_empty()),
                 &ListOptions {
-                    recursive: args.recursive,
+                    recursive,
                     ..Default::default()
                 },
             ))
             .with_context(|| format!("Unable to list `{}/{anonymous_path}`.", target.alias_name))?;
+        // mc lists objects and folders in one lexical order.
+        items.sort_by(|a, b| a.key.cmp(&b.key));
         for item in items {
-            if item.is_prefix && args.recursive {
+            if item.is_prefix && recursive {
                 continue;
             }
             let url = format!("{base_url}{}", crate::s3::full_key(prefix, &item.key));

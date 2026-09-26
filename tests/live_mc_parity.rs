@@ -915,6 +915,56 @@ case!(
     ["anonymous", "set", "upload", "{target}/drop/"]
 );
 
+/// Seeded bucket with `dir/` downloadable (for `links`).
+fn public_dir() -> Option<Parity> {
+    with_setup(seeded(), &["anonymous", "set", "download", "{target}/dir/"])
+}
+
+case!(
+    anonymous_links_text,
+    text,
+    public_dir(),
+    ["anonymous", "links", "{target}/"]
+);
+case!(
+    anonymous_links_recursive_text,
+    text,
+    public_dir(),
+    ["anonymous", "links", "-r", "{target}/"]
+);
+case!(
+    anonymous_links_recursive_json,
+    json,
+    public_dir(),
+    ["anonymous", "links", "--recursive", "{target}/"]
+);
+// mc's `-r` is a flag of `anonymous` itself: accepted before the operation and ignored by
+// everything but `links`.
+case!(
+    anonymous_recursive_before_links_text,
+    text,
+    public_dir(),
+    ["anonymous", "--recursive", "links", "{target}/"]
+);
+case!(
+    anonymous_recursive_get_text,
+    text,
+    public_dir(),
+    ["anonymous", "-r", "get", "{target}/dir/"]
+);
+case!(
+    anonymous_list_recursive_json,
+    json,
+    public_dir(),
+    ["anonymous", "list", "-r", "{target}"]
+);
+case!(
+    anonymous_set_recursive_json,
+    json,
+    empty(),
+    ["anonymous", "set", "-r", "public", "{target}"]
+);
+
 // ---------------------------------------------------------------------------
 // cors / encrypt / event
 // ---------------------------------------------------------------------------
@@ -1086,6 +1136,42 @@ case!(
     text,
     empty(),
     ["ilm", "rule", "ls", "{target}"]
+);
+
+/// `--enc-c` key from mc's `ilm restore` help example.
+const ENC_C_KEY: &str = "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDA";
+
+macro_rules! ilm_restore_enc_c {
+    ($name:ident, $mode:ident) => {
+        case!(
+            $name,
+            $mode,
+            seeded(),
+            [
+                "ilm",
+                "restore",
+                "--enc-c",
+                &format!("{{target}}/={ENC_C_KEY}"),
+                "{target}/a.txt"
+            ]
+        );
+    };
+}
+
+// Not transitioned: the restore request fails like for any other object.
+ilm_restore_enc_c!(ilm_restore_enc_c_text, text);
+ilm_restore_enc_c!(ilm_restore_enc_c_json, json);
+case!(
+    ilm_restore_missing_object_text,
+    text,
+    seeded(),
+    ["ilm", "restore", "{target}/nope.txt"]
+);
+case!(
+    ilm_restore_recursive_json,
+    json,
+    seeded(),
+    ["ilm", "restore", "-r", "{target}/dir/"]
 );
 
 // ---------------------------------------------------------------------------

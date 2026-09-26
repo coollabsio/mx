@@ -33,10 +33,12 @@ fn help_lists_new_commands() {
 fn multichar_short_flags_are_rewritten() {
     let home = tempfile::tempdir().unwrap();
     mx().env("HOME", home.path())
-        .args(["ilm", "restore", "-vid", "v1", "-r", "local/b/o"])
+        .args(["ilm", "restore", "-vid", "v1", "--days", "0", "local/b/o"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("combine --version-id"));
+        .stderr(predicate::str::contains(
+            "--days should be equal or greater",
+        ));
     mx().env("HOME", home.path())
         .args([
             "legalhold",

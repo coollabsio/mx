@@ -423,21 +423,28 @@ pub async fn restore_object(
 }
 
 /// Restore state from HeadObject `x-amz-restore`: `None` = no restore requested,
-/// `Some(true)` = still in progress, `Some(false)` = restored.
+/// `Some(true)` = still in progress, `Some(false)` = restored. `sse_c` is the customer key of
+/// an SSE-C object (mc `--enc-c`), required by HEAD on such objects.
 pub async fn restore_ongoing(
     client: &Client,
     bucket: &str,
     key: &str,
     version_id: Option<&str>,
+    sse_c: Option<&[u8; 32]>,
 ) -> Result<Option<bool>> {
-    let head = client
+    let mut request = client
         .head_object()
         .bucket(bucket)
         .key(key)
-        .set_version_id(version_id.map(str::to_string))
-        .send()
-        .await
-        .s3(bucket, "")?;
+        .set_version_id(version_id.map(str::to_string));
+    if let Some(customer_key) = sse_c {
+        let (algorithm, encoded, md5) = super::objects::sse_c_headers(customer_key);
+        request = request
+            .sse_customer_algorithm(algorithm)
+            .sse_customer_key(encoded)
+            .sse_customer_key_md5(md5);
+    }
+    let head = request.send().await.s3_object(bucket, key)?;
     Ok(head.restore().map(parse_restore_ongoing))
 }
 
