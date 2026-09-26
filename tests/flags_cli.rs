@@ -21,10 +21,6 @@ fn stub_commands_are_registered_and_fail_cleanly() {
         &["event", "list", "local/b"],
         &["undo", "local/b/o"],
         &["od", "if=/dev/null", "of=local/b/o"],
-        &["replicate", "ls", "local/b"],
-        &["replicate", "backlog", "local/b"],
-        &["quota", "info", "local/b"],
-        &["ilm", "tier", "ls", "local"],
         &["ilm", "restore", "local/b/o"],
     ];
     for args in cases {

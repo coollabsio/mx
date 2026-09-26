@@ -3,6 +3,7 @@
 #
 # Server 1 -> MX_TEST_ALIAS=local  (MX_TEST_URL / MX_TEST_ACCESS_KEY / MX_TEST_SECRET_KEY)
 # Server 2 -> MX_TEST_ALIAS2=local2 (MX_TEST_URL2 / MX_TEST_ACCESS_KEY2 / MX_TEST_SECRET_KEY2)
+#            MX_TEST_URL2_INTERNAL = server 2 URL reachable from inside server 1
 #
 # Server 1 has a static KMS key (SSE-S3 / SSE-KMS key id `mx-test-key`). Extra docker env for
 # server 1 can be put in tests/minio.env (KEY=VALUE lines, e.g. notification targets).
@@ -67,6 +68,8 @@ wait_ready() {
 
 url="$(server_url "$server")"
 url2="$(server_url "$server2")"
+# Server 2 as seen from inside server 1 (default bridge network), for tiers/replication targets.
+ip2="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$server2")"
 wait_ready "$url"
 wait_ready "$url2"
 
@@ -81,6 +84,7 @@ export MX_TEST_ALIAS2=local2
 export MX_TEST_URL2="$url2"
 export MX_TEST_ACCESS_KEY2="$user"
 export MX_TEST_SECRET_KEY2="$password"
+export MX_TEST_URL2_INTERNAL="http://${ip2}:9000"
 export MX_TEST_KMS_KEY_ID=mx-test-key
 export MX_TEST_BUCKET_PREFIX=mx-live
 
