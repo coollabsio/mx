@@ -1650,6 +1650,692 @@ case!(
 case!(err_unknown_command_text, text, bare(), ["bogus"]);
 
 // ---------------------------------------------------------------------------
+// quota / ilm tier / replicate (MinIO admin API)
+// ---------------------------------------------------------------------------
+
+fn quota_set() -> Option<Parity> {
+    with_setup(empty(), &["quota", "set", "{target}", "--size", "64MiB"])
+}
+
+case!(
+    quota_set_text,
+    text,
+    empty(),
+    ["quota", "set", "{target}", "--size", "1GB"]
+);
+case!(
+    quota_set_json,
+    json,
+    empty(),
+    ["quota", "set", "{target}", "--size", "64MiB"]
+);
+case!(
+    quota_info_text,
+    text,
+    quota_set(),
+    ["quota", "info", "{target}"]
+);
+case!(
+    quota_info_json,
+    json,
+    quota_set(),
+    ["quota", "info", "{target}"]
+);
+case!(
+    quota_info_unset_text,
+    text,
+    empty(),
+    ["quota", "info", "{target}"]
+);
+case!(
+    quota_info_unset_json,
+    json,
+    empty(),
+    ["quota", "info", "{target}"]
+);
+case!(
+    quota_clear_text,
+    text,
+    quota_set(),
+    ["quota", "clear", "{target}"]
+);
+case!(
+    quota_clear_json,
+    json,
+    quota_set(),
+    ["quota", "clear", "{target}"]
+);
+case!(
+    quota_set_missing_size_text,
+    text,
+    empty(),
+    ["quota", "set", "{target}"]
+);
+case!(
+    quota_set_bad_size_json,
+    json,
+    empty(),
+    ["quota", "set", "{target}", "--size", "abc"]
+);
+case!(
+    quota_missing_bucket_text,
+    text,
+    bare(),
+    ["quota", "info", "{target}"]
+);
+case!(
+    quota_missing_bucket_json,
+    json,
+    bare(),
+    ["quota", "info", "{target}"]
+);
+case!(
+    quota_missing_alias_text,
+    text,
+    bare(),
+    ["quota", "info", "nosuch/bucket"]
+);
+
+/// Configures the second server (`{alias2}`); None when it is not available.
+fn second(p: Option<Parity>) -> Option<Parity> {
+    let mut p = p?;
+    p.second_server().then_some(p)
+}
+
+/// Upper-cased fixture names (tier names) and shared `{base}` names.
+fn shared_names(p: &mut Parity) {
+    let prefix = regex::escape(&common::live::bucket_prefix());
+    p.normalizer
+        .rule(&format!(r"(?i)\b{prefix}-p\d+(?:-m[cx])?\b"), "<BASE>");
+}
+
+/// Minio tier `{BASE}` on server 1 (shared by both sides), backed by bucket `{base}` on
+/// server 2.
+fn tiered() -> Option<Parity> {
+    let mut p = second(bare())?;
+    p.setup_once(&["mb", "{alias2}/{base}"]);
+    p.setup_once(&[
+        "ilm",
+        "tier",
+        "add",
+        "minio",
+        "{alias}",
+        "{BASE}",
+        "--endpoint",
+        "{endpoint2}",
+        "--access-key",
+        "{access_key2}",
+        "--secret-key",
+        "{secret_key2}",
+        "--bucket",
+        "{base}",
+        "--prefix",
+        "p/",
+    ]);
+    p.cleanup_on_drop(&["ilm", "tier", "rm", "{alias}", "{BASE}"]);
+    shared_names(&mut p);
+    Some(p)
+}
+
+/// Bucket `{bucket}` on server 2 per side for `ilm tier add`; the tiers are removed on drop.
+fn tier_target() -> Option<Parity> {
+    let mut p = second(bare())?;
+    p.setup(&["mb", "{alias2}/{bucket}"]);
+    p.cleanup_on_drop(&["ilm", "tier", "rm", "{alias}", "{BUCKET}"]);
+    shared_names(&mut p);
+    Some(p)
+}
+
+/// A (fake) GCS credentials file `creds.json` in each work dir.
+fn gcs_creds() -> Option<Parity> {
+    let p = bare()?;
+    p.file(
+        "creds.json",
+        r#"{"type":"service_account","project_id":"mx-parity"}"#,
+    );
+    Some(p)
+}
+
+macro_rules! tier_add_minio {
+    ($name:ident, $mode:ident) => {
+        case!(
+            $name,
+            $mode,
+            tier_target(),
+            [
+                "ilm",
+                "tier",
+                "add",
+                "minio",
+                "{alias}",
+                "{bucket}",
+                "--endpoint",
+                "{endpoint2}",
+                "--access-key",
+                "{access_key2}",
+                "--secret-key",
+                "{secret_key2}",
+                "--bucket",
+                "{bucket}",
+                "--prefix",
+                "p/"
+            ]
+        );
+    };
+}
+
+tier_add_minio!(ilm_tier_add_minio_text, text);
+tier_add_minio!(ilm_tier_add_minio_json, json);
+case!(
+    ilm_tier_add_s3_json,
+    json,
+    tier_target(),
+    [
+        "ilm",
+        "tier",
+        "add",
+        "s3",
+        "{alias}",
+        "{bucket}",
+        "--endpoint",
+        "{endpoint2}",
+        "--access-key",
+        "{access_key2}",
+        "--secret-key",
+        "{secret_key2}",
+        "--bucket",
+        "{bucket}",
+        "--storage-class",
+        "STANDARD",
+        "--region",
+        "us-east-1"
+    ]
+);
+// Azure and GCS need real cloud accounts: these check that MinIO receives, decrypts and
+// validates the request and that the errors match mc's.
+case!(
+    ilm_tier_add_gcs_text,
+    text,
+    gcs_creds(),
+    [
+        "ilm",
+        "tier",
+        "add",
+        "gcs",
+        "{alias}",
+        "gcstier",
+        "--credentials-file",
+        "creds.json",
+        "--bucket",
+        "gcsbucket",
+        "--prefix",
+        "p/"
+    ]
+);
+case!(
+    ilm_tier_add_gcs_json,
+    json,
+    gcs_creds(),
+    [
+        "ilm",
+        "tier",
+        "add",
+        "gcs",
+        "{alias}",
+        "gcstier",
+        "--credentials-file",
+        "creds.json",
+        "--bucket",
+        "gcsbucket"
+    ]
+);
+case!(
+    ilm_tier_add_azure_unreachable_text,
+    text,
+    bare(),
+    [
+        "ilm",
+        "tier",
+        "add",
+        "azure",
+        "{alias}",
+        "aztier",
+        "--account-name",
+        "account",
+        "--account-key",
+        "a2V5",
+        "--bucket",
+        "container",
+        "--endpoint",
+        "http://127.0.0.1:1"
+    ]
+);
+case!(
+    ilm_tier_add_azure_no_account_text,
+    text,
+    bare(),
+    [
+        "ilm",
+        "tier",
+        "add",
+        "azure",
+        "{alias}",
+        "aztier",
+        "--account-key",
+        "a2V5",
+        "--bucket",
+        "container"
+    ]
+);
+case!(
+    ilm_tier_add_azure_no_credentials_json,
+    json,
+    bare(),
+    [
+        "ilm",
+        "tier",
+        "add",
+        "azure",
+        "{alias}",
+        "aztier",
+        "--account-name",
+        "account",
+        "--az-sp-tenant-id",
+        "tenant",
+        "--bucket",
+        "container"
+    ]
+);
+case!(
+    ilm_tier_add_gcs_missing_file_text,
+    text,
+    bare(),
+    [
+        "ilm",
+        "tier",
+        "add",
+        "gcs",
+        "{alias}",
+        "gcstier",
+        "--credentials-file",
+        "nope.json",
+        "--bucket",
+        "gcsbucket"
+    ]
+);
+case!(
+    ilm_tier_add_bad_type_text,
+    text,
+    bare(),
+    ["ilm", "tier", "add", "bogus", "{alias}", "t1"]
+);
+case!(
+    ilm_tier_add_minio_no_creds_json,
+    json,
+    bare(),
+    [
+        "ilm",
+        "tier",
+        "add",
+        "minio",
+        "{alias}",
+        "t1",
+        "--endpoint",
+        "http://127.0.0.1:1",
+        "--bucket",
+        "b1"
+    ]
+);
+case!(
+    ilm_tier_add_extra_arg_text,
+    text,
+    bare(),
+    ["ilm", "tier", "add", "minio", "{alias}", "t1", "extra"]
+);
+case!(
+    ilm_tier_edit_azure_missing_text,
+    text,
+    bare(),
+    [
+        "ilm",
+        "tier",
+        "edit",
+        "{alias}",
+        "NOSUCHTIER",
+        "--account-key",
+        "a2V5"
+    ]
+);
+case!(
+    ilm_tier_edit_gcs_missing_json,
+    json,
+    gcs_creds(),
+    [
+        "ilm",
+        "tier",
+        "edit",
+        "{alias}",
+        "NOSUCHTIER",
+        "--credentials-file",
+        "creds.json"
+    ]
+);
+case!(
+    ilm_tier_edit_no_creds_text,
+    text,
+    bare(),
+    ["ilm", "tier", "edit", "{alias}", "NOSUCHTIER"]
+);
+case!(
+    ilm_tier_ls_text,
+    text,
+    tiered(),
+    ["ilm", "tier", "ls", "{alias}"]
+);
+case!(
+    ilm_tier_ls_json,
+    json,
+    tiered(),
+    ["ilm", "tier", "ls", "{alias}"]
+);
+case!(
+    ilm_tier_ls_empty_text,
+    text,
+    second(bare()),
+    ["ilm", "tier", "ls", "{alias2}"]
+);
+/// mc prints the "no tiers" note as text even with --json.
+#[test]
+fn ilm_tier_ls_empty_json() {
+    let Some(p) = second(bare()) else { return };
+    p.assert_parity(&["--json", "ilm", "tier", "ls", "{alias2}"], None);
+}
+case!(
+    ilm_tier_info_text,
+    text,
+    tiered(),
+    ["ilm", "tier", "info", "{alias}", "{BASE}"]
+);
+case!(
+    ilm_tier_info_json,
+    json,
+    tiered(),
+    ["ilm", "tier", "info", "{alias}"]
+);
+case!(
+    ilm_tier_info_no_match_text,
+    text,
+    tiered(),
+    ["ilm", "tier", "info", "{alias}", "NOSUCHTIER"]
+);
+case!(
+    ilm_tier_info_name_json,
+    json,
+    tiered(),
+    ["ilm", "tier", "info", "{alias}", "{BASE}"]
+);
+case!(
+    ilm_tier_check_text,
+    text,
+    tiered(),
+    ["ilm", "tier", "check", "{alias}", "{BASE}"]
+);
+case!(
+    ilm_tier_check_json,
+    json,
+    tiered(),
+    ["ilm", "tier", "check", "{alias}", "{BASE}"]
+);
+case!(
+    ilm_tier_verify_text,
+    text,
+    tiered(),
+    ["ilm", "tier", "verify", "{alias}", "{BASE}"]
+);
+case!(
+    ilm_tier_edit_text,
+    text,
+    tiered(),
+    [
+        "ilm",
+        "tier",
+        "edit",
+        "{alias}",
+        "{BASE}",
+        "--access-key",
+        "{access_key2}",
+        "--secret-key",
+        "{secret_key2}"
+    ]
+);
+case!(
+    ilm_tier_update_json,
+    json,
+    tiered(),
+    [
+        "ilm",
+        "tier",
+        "update",
+        "{alias}",
+        "{BASE}",
+        "--access-key",
+        "{access_key2}",
+        "--secret-key",
+        "{secret_key2}"
+    ]
+);
+case!(
+    ilm_tier_check_missing_text,
+    text,
+    bare(),
+    ["ilm", "tier", "check", "{alias}", "NOSUCHTIER"]
+);
+case!(
+    ilm_tier_check_missing_json,
+    json,
+    bare(),
+    ["ilm", "tier", "check", "{alias}", "NOSUCHTIER"]
+);
+case!(
+    ilm_tier_rm_text,
+    text,
+    tiered(),
+    ["ilm", "tier", "rm", "{alias}", "{BASE}"]
+);
+case!(
+    ilm_tier_rm_json,
+    json,
+    tiered(),
+    ["ilm", "tier", "rm", "{alias}", "{BASE}"]
+);
+case!(
+    ilm_tier_rm_force_text,
+    text,
+    bare(),
+    ["ilm", "tier", "rm", "--force", "{alias}", "NOSUCHTIER"]
+);
+case!(
+    ilm_tier_missing_alias_text,
+    text,
+    bare(),
+    ["ilm", "tier", "ls", "nosuch"]
+);
+
+/// Replication `{target}` -> `{alias2}/{bucket}` (rule `r1`). Uptime, latencies and rates
+/// vary between runs; the status table's padding follows the widest line, so trailing
+/// spaces are dropped.
+fn replicated_with(extra: &[&str]) -> Option<Parity> {
+    let mut p = second(Parity::with(Opts {
+        bucket: true,
+        versioning: true,
+        ..Opts::default()
+    }))?;
+    p.setup(&["mb", "--with-versioning", "{alias2}/{bucket}"]);
+    let mut args = vec![
+        "replicate",
+        "add",
+        "{target}",
+        "--remote-bucket",
+        "{remote2}/{bucket}",
+        "--priority",
+        "1",
+        "--id",
+        "r1",
+    ];
+    args.extend_from_slice(extra);
+    p.setup(&args);
+    p.normalizer
+        .rule(r"(?m)^(  Replication status since ).*$", "${1}<UPTIME>")
+        .rule(r"\| (?:now|a long while|\d+ [a-z]+) *\|", "| <UPTIME> |")
+        .rule(
+            r#""(uptime|curr|avg|max|avgRate|peakRate|currRate|totalDowntime|currentBandwidth)":-?[0-9][0-9.e+-]*"#,
+            r#""$1":0"#,
+        )
+        .rule(r"(?m) +$", "");
+    Some(p)
+}
+
+fn replicated() -> Option<Parity> {
+    replicated_with(&[])
+}
+
+/// Synchronous replication with one replicated object (single-target status view).
+fn replicated_object() -> Option<Parity> {
+    let p = replicated_with(&["--sync"])?;
+    p.object("a.txt", "alpha\n");
+    Some(p)
+}
+
+case!(
+    replicate_ls_text,
+    text,
+    replicated(),
+    ["replicate", "ls", "{target}"]
+);
+case!(
+    replicate_ls_json,
+    json,
+    replicated(),
+    ["replicate", "ls", "{target}"]
+);
+case!(
+    replicate_ls_unset_text,
+    text,
+    empty(),
+    ["replicate", "ls", "{target}"]
+);
+case!(
+    replicate_ls_unset_json,
+    json,
+    empty(),
+    ["replicate", "ls", "{target}"]
+);
+case!(
+    replicate_export_text,
+    text,
+    replicated(),
+    ["replicate", "export", "{target}"]
+);
+case!(
+    replicate_export_json,
+    json,
+    replicated(),
+    ["replicate", "export", "{target}"]
+);
+case!(
+    replicate_export_unset_text,
+    text,
+    empty(),
+    ["replicate", "export", "{target}"]
+);
+case!(
+    replicate_export_unset_json,
+    json,
+    empty(),
+    ["replicate", "export", "{target}"]
+);
+case!(
+    replicate_status_text,
+    text,
+    replicated(),
+    ["replicate", "status", "{target}"]
+);
+case!(
+    replicate_status_json,
+    json,
+    replicated(),
+    ["replicate", "status", "{target}"]
+);
+case!(
+    replicate_status_object_text,
+    text,
+    replicated_object(),
+    ["replicate", "status", "{target}"]
+);
+case!(
+    replicate_status_object_json,
+    json,
+    replicated_object(),
+    ["replicate", "status", "{target}"]
+);
+case!(
+    replicate_status_nodes_text,
+    text,
+    replicated(),
+    ["replicate", "status", "--nodes", "{target}"]
+);
+case!(
+    replicate_status_nodes_json,
+    json,
+    replicated(),
+    ["replicate", "status", "--nodes", "{target}"]
+);
+case!(
+    replicate_status_unset_text,
+    text,
+    empty(),
+    ["replicate", "status", "{target}"]
+);
+case!(
+    replicate_status_unset_json,
+    json,
+    empty(),
+    ["replicate", "status", "{target}"]
+);
+// `replicate backlog` text is an interactive bubbletea view in mc (see COMPATIBILITY.md);
+// only JSON is compared.
+case!(
+    replicate_backlog_json,
+    json,
+    replicated(),
+    ["replicate", "backlog", "{target}"]
+);
+case!(
+    replicate_backlog_full_json,
+    json,
+    replicated_object(),
+    ["replicate", "backlog", "--full", "{target}"]
+);
+case!(
+    replicate_backlog_missing_bucket_json,
+    json,
+    bare(),
+    ["replicate", "backlog", "{target}"]
+);
+case!(
+    replicate_backlog_full_missing_bucket_json,
+    json,
+    bare(),
+    ["replicate", "backlog", "--full", "{target}"]
+);
+case!(
+    replicate_backlog_no_bucket_text,
+    text,
+    bare(),
+    ["replicate", "backlog", "{alias}"]
+);
+
+// ---------------------------------------------------------------------------
 // --version
 // ---------------------------------------------------------------------------
 

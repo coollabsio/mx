@@ -98,9 +98,32 @@ impl Side {
     }
 
     /// Expands `{alias}`, `{bucket}`, `{target}`, `{work}`, `{url}`, `{access_key}`,
-    /// `{secret_key}` in `arg`.
+    /// `{secret_key}` in `arg`. Second server ([`Parity::second_server`]): `{alias2}`,
+    /// `{endpoint2}` (server 2 URL as seen from server 1), `{remote2}` (the same with
+    /// credentials, for `replicate add --remote-bucket`), `{access_key2}`, `{secret_key2}`.
+    /// Names shared by both sides: `{base}` (bucket name without `-mc`/`-mx`), `{BASE}`
+    /// (upper-cased, e.g. a tier name). `{BUCKET}` is the upper-cased bucket name.
     pub fn expand(&self, arg: &str) -> String {
         let alias = live::alias_name();
+        let base = self
+            .bucket
+            .trim_end_matches(&format!("-{}", self.tool.label()))
+            .to_string();
+        let endpoint2 = env_or("MX_TEST_URL2_INTERNAL", "");
+        let (access2, secret2) = (
+            env_or("MX_TEST_ACCESS_KEY2", ""),
+            env_or("MX_TEST_SECRET_KEY2", ""),
+        );
+        let remote2 = endpoint2.replacen("://", &format!("://{access2}:{secret2}@"), 1);
+        let arg = arg
+            .replace("{alias2}", &env_or("MX_TEST_ALIAS2", "local2"))
+            .replace("{endpoint2}", &endpoint2)
+            .replace("{remote2}", &remote2)
+            .replace("{access_key2}", &access2)
+            .replace("{secret_key2}", &secret2)
+            .replace("{base}", &base)
+            .replace("{BASE}", &base.to_uppercase())
+            .replace("{BUCKET}", &self.bucket.to_uppercase());
         arg.replace("{target}", &format!("{alias}/{}", self.bucket))
             .replace("{bucket}", &self.bucket)
             .replace("{alias}", &alias)
@@ -131,6 +154,10 @@ pub struct Parity {
     /// so `cp -r` / `mirror` output order is not deterministic). JSON docs are re-serialized,
     /// so key order is not compared in this mode.
     pub unordered: bool,
+    /// Second server alias configured ([`Parity::second_server`]).
+    alias2: bool,
+    /// Commands (already expanded) run with the reference mc on drop, best effort.
+    cleanups: Vec<Vec<String>>,
 }
 
 impl Parity {
@@ -188,6 +215,8 @@ impl Parity {
             _bin_dir: bin_dir,
             env: Vec::new(),
             unordered: false,
+            alias2: false,
+            cleanups: Vec::new(),
         };
         parity.normalizer.bucket_prefix(&live::bucket_prefix());
         for tool in [Tool::Mc, Tool::Mx] {
@@ -299,6 +328,77 @@ impl Parity {
                 "setup `mc {}` failed: {out:?}",
                 args.join(" ")
             );
+        }
+    }
+
+    /// Configures the second server (`{alias2}`) for both sides and for setup. False (with a
+    /// skip note) when MX_TEST_URL2 / MX_TEST_URL2_INTERNAL are not set.
+    pub fn second_server(&mut self) -> bool {
+        let (Some(server), Ok(_)) = (
+            live::second_server(),
+            std::env::var("MX_TEST_URL2_INTERNAL"),
+        ) else {
+            eprintln!("skipping parity test; second server (MX_TEST_URL2*) not configured");
+            return false;
+        };
+        let args: Vec<String> = vec![
+            "alias".into(),
+            "set".into(),
+            server.alias,
+            server.url,
+            server.access_key,
+            server.secret_key,
+        ];
+        for side in [&self.mc, &self.mx] {
+            let out = self.exec(side, &args, None, &[]);
+            assert_eq!(out.code, Some(0), "alias set (server 2) failed: {out:?}");
+        }
+        let out = run_program(
+            &self.mc_bin,
+            self.setup_home.path(),
+            self.setup_home.path(),
+            &args,
+            None,
+            &[],
+        );
+        assert_eq!(
+            out.code,
+            Some(0),
+            "setup alias set (server 2) failed: {out:?}"
+        );
+        self.alias2 = true;
+        true
+    }
+
+    /// Runs a templated setup command once (expanded for the mc side), for fixtures shared
+    /// by both sides (`{base}`, `{BASE}` names).
+    pub fn setup_once(&self, args: &[&str]) {
+        let args: Vec<String> = args.iter().map(|arg| self.mc.expand(arg)).collect();
+        let out = run_program(
+            &self.mc_bin,
+            self.setup_home.path(),
+            &self.mc.work,
+            &args,
+            None,
+            &[],
+        );
+        assert_eq!(
+            out.code,
+            Some(0),
+            "setup `mc {}` failed: {out:?}",
+            args.join(" ")
+        );
+    }
+
+    /// Registers a templated command to run with the reference mc when the fixture is
+    /// dropped (best effort, expanded for each side; duplicates run once), e.g. removing a
+    /// tier.
+    pub fn cleanup_on_drop(&mut self, args: &[&str]) {
+        for side in [&self.mc, &self.mx] {
+            let args: Vec<String> = args.iter().map(|arg| side.expand(arg)).collect();
+            if !self.cleanups.contains(&args) {
+                self.cleanups.push(args);
+            }
         }
     }
 
@@ -463,8 +563,30 @@ impl Parity {
 
 impl Drop for Parity {
     fn drop(&mut self) {
-        // Remove every bucket the fixture may have created (`{bucket}` and `{bucket}-*`).
-        let alias = live::alias_name();
+        for args in &self.cleanups {
+            let _ = run_program(
+                &self.mc_bin,
+                self.setup_home.path(),
+                self.setup_home.path(),
+                args,
+                None,
+                &[],
+            );
+        }
+        let mut aliases = vec![live::alias_name()];
+        if self.alias2 {
+            aliases.push(env_or("MX_TEST_ALIAS2", "local2"));
+        }
+        for alias in aliases {
+            self.remove_buckets(&alias);
+        }
+    }
+}
+
+impl Parity {
+    /// Removes every bucket the fixture may have created on `alias` (`{base}`, `{bucket}`
+    /// and `{bucket}-*`).
+    fn remove_buckets(&self, alias: &str) {
         let out = run_program(
             &self.mc_bin,
             self.setup_home.path(),

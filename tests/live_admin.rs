@@ -196,11 +196,12 @@ fn live_ilm_tier_lifecycle() {
         .success()
         .stdout(predicate::str::contains(r#""status":"success""#));
 
+    // Like mc (its command is named `remove`, which has no message): an empty line.
     live.cmd()
         .args(["ilm", "tier", "rm", &live.alias, &name])
         .assert()
         .success()
-        .stdout(format!("Removed remote tier {name}\n"));
+        .stdout("\n");
     live.cmd()
         .args(["ilm", "tier", "check", &live.alias, &name])
         .assert()
@@ -320,7 +321,24 @@ fn live_replicate_workflow() {
         .args(["replicate", "status", &source])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Replication status since"));
+        .stdout(predicate::str::contains("  Replication status since"))
+        .stdout(predicate::str::contains(
+            "  Replicated:                   1 objects",
+        ))
+        .stdout(predicate::str::contains("● online (total downtime:"));
+    live.cmd()
+        .args(["replicate", "status", "--nodes", &source])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Large Objects (>=128 MiB)"));
+    let out = stdout(
+        live.cmd()
+            .args(["--json", "replicate", "status", "--nodes", &source])
+            .assert()
+            .success(),
+    );
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(value["nodes"][0]["nodeName"].is_string(), "{out}");
     let out = stdout(
         live.cmd()
             .args(["--json", "replicate", "status", &source])
@@ -400,8 +418,9 @@ fn live_replicate_workflow() {
     );
 
     // backlog and resync
+    // Text output is an interactive view (needs a terminal); scripts use --json.
     live.cmd()
-        .args(["replicate", "backlog", &source])
+        .args(["--json", "replicate", "backlog", &source])
         .assert()
         .success();
     live.cmd()
@@ -580,4 +599,68 @@ fn live_ilm_tier_transition_and_restore() {
         .assert()
         .success()
         .stdout("cold data");
+}
+
+/// Azure and GCS tiers need real cloud accounts: check that MinIO accepts, decrypts and
+/// validates mx's madmin `TierConfig` (it then fails to reach the backend).
+#[test]
+fn live_ilm_tier_add_azure_gcs_reach_backend_validation() {
+    let Some(live) = Live::new() else { return };
+    let creds = live.local_file("creds.json", r#"{"type":"service_account"}"#);
+    live.cmd()
+        .args([
+            "ilm",
+            "tier",
+            "add",
+            "gcs",
+            &live.alias,
+            "gcstier",
+            "--credentials-file",
+            creds.to_str().unwrap(),
+            "--bucket",
+            "gcsbucket",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Unable to configure remote tier target. Unable to setup remote tier, check tier configuration.",
+        ));
+    live.cmd()
+        .args([
+            "ilm",
+            "tier",
+            "add",
+            "azure",
+            &live.alias,
+            "aztier",
+            "--account-name",
+            "account",
+            "--account-key",
+            "a2V5",
+            "--bucket",
+            "container",
+            "--endpoint",
+            "http://127.0.0.1:1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            r#"Unable to configure remote tier target: failed to perform PUT: Put "http://127.0.0.1:1/container/probeobject""#,
+        ));
+    // Editing credentials of an unknown tier reaches the server's lookup.
+    live.cmd()
+        .args([
+            "ilm",
+            "tier",
+            "edit",
+            &live.alias,
+            "NOSUCHTIER",
+            "--account-key",
+            "a2V5",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Unable to edit remote tier. Specified remote tier was not found.",
+        ));
 }

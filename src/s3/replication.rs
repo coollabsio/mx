@@ -4,10 +4,13 @@
 //! `replicate export`/`import`, XML includes MinIO's `DeleteReplication` extension). Remote
 //! targets are managed with the MinIO admin API (`set-remote-target`, ...).
 
-use super::admin::{AdminClient, check_status, encrypt_data, error_code};
+use super::admin::{
+    AdminClient, GO_ZERO_TIME, check_s3_status, encrypt_data, error_code, go_f32, go_f64,
+};
 use anyhow::{Result, anyhow, bail};
 use aws_smithy_xml::decode::{Document, ScopedDecoder, try_data};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Configuration model
@@ -15,7 +18,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReplicationConfig {
-    #[serde(rename = "Rules", default)]
+    /// Go nil slice: `null` when empty.
+    #[serde(
+        rename = "Rules",
+        default,
+        serialize_with = "null_if_empty",
+        deserialize_with = "vec_or_null"
+    )]
     pub rules: Vec<Rule>,
     #[serde(rename = "Role", default)]
     pub role: String,
@@ -91,6 +100,25 @@ pub struct Tag {
 pub struct SourceSelectionCriteria {
     #[serde(rename = "ReplicaModifications", default)]
     pub replica_modifications: StatusField,
+}
+
+/// Serializes an empty Vec as `null` (Go nil slice).
+fn null_if_empty<T: Serialize, S: Serializer>(
+    items: &[T],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    if items.is_empty() {
+        serializer.serialize_none()
+    } else {
+        items.serialize(serializer)
+    }
+}
+
+/// Deserializes `null` as an empty Vec.
+fn vec_or_null<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<T>, D::Error> {
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 pub const ENABLED: &str = "Enabled";
@@ -533,7 +561,16 @@ pub fn from_xml(text: &str) -> Result<ReplicationConfig> {
 // Remote targets (admin API)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+fn zero_time() -> String {
+    GO_ZERO_TIME.to_string()
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
+}
+
+/// madmin `Credentials` of a remote target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TargetCredentials {
     #[serde(
         rename = "accessKey",
@@ -547,56 +584,119 @@ pub struct TargetCredentials {
         skip_serializing_if = "String::is_empty"
     )]
     pub secret_key: String,
-}
-
-/// `madmin.BucketTarget`. Fields mx does not use are kept in `extra` so updates round-trip.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct BucketTarget {
-    #[serde(rename = "sourcebucket", default)]
-    pub source_bucket: String,
-    #[serde(default)]
-    pub endpoint: String,
-    #[serde(default)]
-    pub credentials: Option<TargetCredentials>,
-    #[serde(rename = "targetbucket", default)]
-    pub target_bucket: String,
-    #[serde(default)]
-    pub secure: bool,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub path: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub api: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub arn: String,
-    #[serde(rename = "type", default)]
-    pub target_type: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub region: String,
-    #[serde(rename = "bandwidthlimit", default, skip_serializing_if = "is_zero")]
-    pub bandwidth_limit: i64,
-    #[serde(rename = "replicationSync", default)]
-    pub replication_sync: bool,
     #[serde(
-        rename = "storageclass",
+        rename = "sessionToken",
         default,
         skip_serializing_if = "String::is_empty"
     )]
-    pub storage_class: String,
-    /// Nanoseconds (Go `time.Duration`).
-    #[serde(
-        rename = "healthCheckDuration",
-        default,
-        skip_serializing_if = "is_zero"
-    )]
-    pub health_check_duration: i64,
-    #[serde(rename = "disableProxy", default)]
-    pub disable_proxy: bool,
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    pub session_token: String,
+    #[serde(default = "zero_time")]
+    pub expiration: String,
 }
 
-fn is_zero(value: &i64) -> bool {
-    *value == 0
+impl Default for TargetCredentials {
+    fn default() -> Self {
+        Self {
+            access_key: String::new(),
+            secret_key: String::new(),
+            session_token: String::new(),
+            expiration: zero_time(),
+        }
+    }
+}
+
+/// madmin `LatencyStat` (nanoseconds).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LatencyStat {
+    pub curr: i64,
+    pub avg: i64,
+    pub max: i64,
+}
+
+/// `madmin.BucketTarget` with madmin's field order; times are kept as Go-formatted strings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BucketTarget {
+    #[serde(rename = "sourcebucket")]
+    pub source_bucket: String,
+    pub endpoint: String,
+    pub credentials: Option<TargetCredentials>,
+    #[serde(rename = "targetbucket")]
+    pub target_bucket: String,
+    pub secure: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub api: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub arn: String,
+    #[serde(rename = "type")]
+    pub target_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub region: String,
+    #[serde(rename = "bandwidthlimit", skip_serializing_if = "is_zero")]
+    pub bandwidth_limit: i64,
+    #[serde(rename = "replicationSync")]
+    pub replication_sync: bool,
+    #[serde(rename = "storageclass", skip_serializing_if = "String::is_empty")]
+    pub storage_class: String,
+    /// Nanoseconds (Go `time.Duration`).
+    #[serde(rename = "healthCheckDuration", skip_serializing_if = "is_zero")]
+    pub health_check_duration: i64,
+    #[serde(rename = "disableProxy")]
+    pub disable_proxy: bool,
+    #[serde(rename = "resetBeforeDate")]
+    pub reset_before_date: String,
+    #[serde(rename = "resetID", skip_serializing_if = "String::is_empty")]
+    pub reset_id: String,
+    /// Nanoseconds.
+    #[serde(rename = "totalDowntime")]
+    pub total_downtime: i64,
+    #[serde(rename = "lastOnline")]
+    pub last_online: String,
+    #[serde(rename = "isOnline")]
+    pub online: bool,
+    pub latency: LatencyStat,
+    #[serde(rename = "deploymentID", skip_serializing_if = "String::is_empty")]
+    pub deployment_id: String,
+    pub edge: bool,
+    #[serde(rename = "edgeSyncBeforeExpiry")]
+    pub edge_sync_before_expiry: bool,
+    #[serde(rename = "offlineCount")]
+    pub offline_count: i64,
+}
+
+impl Default for BucketTarget {
+    fn default() -> Self {
+        Self {
+            source_bucket: String::new(),
+            endpoint: String::new(),
+            credentials: None,
+            target_bucket: String::new(),
+            secure: false,
+            path: String::new(),
+            api: String::new(),
+            arn: String::new(),
+            target_type: String::new(),
+            region: String::new(),
+            bandwidth_limit: 0,
+            replication_sync: false,
+            storage_class: String::new(),
+            health_check_duration: 0,
+            disable_proxy: false,
+            reset_before_date: zero_time(),
+            reset_id: String::new(),
+            total_downtime: 0,
+            last_online: zero_time(),
+            online: false,
+            latency: LatencyStat::default(),
+            deployment_id: String::new(),
+            edge: false,
+            edge_sync_before_expiry: false,
+            offline_count: 0,
+        }
+    }
 }
 
 pub async fn set_remote_target(
@@ -669,7 +769,7 @@ pub async fn get_replication(client: &AdminClient, bucket: &str) -> Result<Repli
     {
         return Ok(ReplicationConfig::default());
     }
-    from_xml(&check_status(response)?.text())
+    from_xml(&check_s3_status(response, bucket)?.text())
 }
 
 /// PutBucketReplication (an empty configuration deletes it, like minio-go).
@@ -699,8 +799,8 @@ pub async fn delete_replication(client: &AdminClient, bucket: &str) -> Result<()
     Ok(())
 }
 
-/// `GetBucketReplicationMetricsV2` (raw JSON).
-pub async fn replication_metrics(client: &AdminClient, bucket: &str) -> Result<serde_json::Value> {
+/// `GetBucketReplicationMetricsV2`.
+pub async fn replication_metrics(client: &AdminClient, bucket: &str) -> Result<MetricsV2> {
     let response = client
         .bucket("GET", bucket, &[("replication-metrics", "2")], Vec::new())
         .await?;
@@ -754,7 +854,7 @@ pub async fn replication_mrf(
     client: &AdminClient,
     bucket: &str,
     node: &str,
-) -> Result<Vec<serde_json::Value>> {
+) -> Result<Vec<ReplicationMrf>> {
     let mut query = vec![("bucket", bucket)];
     if !node.is_empty() {
         query.push(("node", node));
@@ -772,7 +872,7 @@ pub async fn replication_diff(
     prefix: &str,
     arn: &str,
     verbose: bool,
-) -> Result<Vec<serde_json::Value>> {
+) -> Result<Vec<DiffInfo>> {
     let mut query = vec![("bucket", bucket)];
     if verbose {
         query.push(("verbose", "true"));
@@ -789,11 +889,360 @@ pub async fn replication_diff(
     json_stream(&response.body)
 }
 
-fn json_stream(body: &[u8]) -> Result<Vec<serde_json::Value>> {
+fn json_stream<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<Vec<T>> {
     serde_json::Deserializer::from_slice(body)
-        .into_iter::<serde_json::Value>()
+        .into_iter::<T>()
         .map(|item| item.map_err(Into::into))
         .collect()
+}
+
+/// madmin `ReplicationMRF`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplicationMrf {
+    #[serde(rename = "nodeName")]
+    pub node_name: String,
+    pub bucket: String,
+    pub object: String,
+    #[serde(rename = "versionId")]
+    pub version_id: String,
+    #[serde(rename = "retryCount")]
+    pub retry_count: i64,
+    #[serde(rename = "error", skip_serializing_if = "String::is_empty")]
+    pub err: String,
+}
+
+/// madmin `TgtDiffInfo`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TgtDiffInfo {
+    #[serde(rename = "rStatus", skip_serializing_if = "String::is_empty")]
+    pub replication_status: String,
+    #[serde(rename = "drStatus", skip_serializing_if = "String::is_empty")]
+    pub delete_replication_status: String,
+}
+
+/// madmin `DiffInfo` (`error` is the Go-marshaled error value).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiffInfo {
+    pub object: String,
+    #[serde(rename = "versionId")]
+    pub version_id: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub targets: BTreeMap<String, TgtDiffInfo>,
+    /// Go-marshaled request error (madmin sends failures as one `DiffInfo`).
+    #[serde(skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub error: Option<crate::error::Detail>,
+    #[serde(rename = "rStatus", skip_serializing_if = "String::is_empty")]
+    pub replication_status: String,
+    #[serde(rename = "dStatus", skip_serializing_if = "String::is_empty")]
+    pub delete_replication_status: String,
+    #[serde(rename = "replTimestamp")]
+    pub replication_timestamp: String,
+    #[serde(rename = "lastModified")]
+    pub last_modified: String,
+    #[serde(rename = "deletemarker")]
+    pub is_delete_marker: bool,
+}
+
+impl Default for DiffInfo {
+    fn default() -> Self {
+        Self {
+            object: String::new(),
+            version_id: String::new(),
+            targets: BTreeMap::new(),
+            error: None,
+            replication_status: String::new(),
+            delete_replication_status: String::new(),
+            replication_timestamp: zero_time(),
+            last_modified: zero_time(),
+            is_delete_marker: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replication metrics (minio-go `replication.MetricsV2`, re-marshaled like mc)
+// ---------------------------------------------------------------------------
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_f64(value: &f64) -> bool {
+    *value == 0.0
+}
+
+/// minio-go `RStat`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RStat {
+    #[serde(serialize_with = "go_f64")]
+    pub count: f64,
+    pub bytes: i64,
+}
+
+/// minio-go `TimedErrStats`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TimedErrStats {
+    #[serde(rename = "lastMinute")]
+    pub last_minute: RStat,
+    #[serde(rename = "lastHour")]
+    pub last_hour: RStat,
+    pub totals: RStat,
+}
+
+/// minio-go `TargetMetrics`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TargetMetrics {
+    #[serde(rename = "replicationCount", skip_serializing_if = "is_zero_u64")]
+    pub replicated_count: u64,
+    #[serde(
+        rename = "completedReplicationSize",
+        skip_serializing_if = "is_zero_u64"
+    )]
+    pub replicated_size: u64,
+    #[serde(rename = "limitInBits", skip_serializing_if = "is_zero")]
+    pub bandwidth_limit: i64,
+    #[serde(
+        rename = "currentBandwidth",
+        skip_serializing_if = "is_zero_f64",
+        serialize_with = "go_f64"
+    )]
+    pub current_bandwidth: f64,
+    pub failed: TimedErrStats,
+    #[serde(rename = "pendingReplicationSize", skip_serializing_if = "is_zero_u64")]
+    pub pending_size: u64,
+    #[serde(rename = "replicaSize", skip_serializing_if = "is_zero_u64")]
+    pub replica_size: u64,
+    #[serde(rename = "failedReplicationSize", skip_serializing_if = "is_zero_u64")]
+    pub failed_size: u64,
+    #[serde(
+        rename = "pendingReplicationCount",
+        skip_serializing_if = "is_zero_u64"
+    )]
+    pub pending_count: u64,
+    #[serde(rename = "failedReplicationCount", skip_serializing_if = "is_zero_u64")]
+    pub failed_count: u64,
+}
+
+/// minio-go `QStat`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QStat {
+    #[serde(serialize_with = "go_f64")]
+    pub count: f64,
+    #[serde(serialize_with = "go_f64")]
+    pub bytes: f64,
+}
+
+/// minio-go `InQueueMetric` (its `peak` field never matches the server's `max`, so it is
+/// always zero in mc).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InQueueMetric {
+    pub curr: QStat,
+    pub avg: QStat,
+    pub peak: QStat,
+}
+
+/// minio-go `Metrics`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Metrics {
+    #[serde(rename = "Stats")]
+    pub stats: Option<BTreeMap<String, TargetMetrics>>,
+    #[serde(
+        rename = "completedReplicationSize",
+        skip_serializing_if = "is_zero_u64"
+    )]
+    pub replicated_size: u64,
+    #[serde(rename = "replicaSize", skip_serializing_if = "is_zero_u64")]
+    pub replica_size: u64,
+    #[serde(rename = "replicaCount", skip_serializing_if = "is_zero")]
+    pub replica_count: i64,
+    #[serde(rename = "replicationCount", skip_serializing_if = "is_zero")]
+    pub replicated_count: i64,
+    #[serde(rename = "failed")]
+    pub errors: TimedErrStats,
+    #[serde(rename = "queued")]
+    pub qstats: InQueueMetric,
+    #[serde(rename = "pendingReplicationSize", skip_serializing_if = "is_zero_u64")]
+    pub pending_size: u64,
+    #[serde(rename = "failedReplicationSize", skip_serializing_if = "is_zero_u64")]
+    pub failed_size: u64,
+    #[serde(
+        rename = "pendingReplicationCount",
+        skip_serializing_if = "is_zero_u64"
+    )]
+    pub pending_count: u64,
+    #[serde(rename = "failedReplicationCount", skip_serializing_if = "is_zero_u64")]
+    pub failed_count: u64,
+}
+
+/// minio-go `WorkerStat`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkerStat {
+    pub curr: i32,
+    #[serde(serialize_with = "go_f32")]
+    pub avg: f32,
+    pub max: i32,
+}
+
+/// minio-go `XferStats`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct XferStats {
+    #[serde(rename = "avgRate", serialize_with = "go_f64")]
+    pub avg_rate: f64,
+    #[serde(rename = "peakRate", serialize_with = "go_f64")]
+    pub peak_rate: f64,
+    #[serde(rename = "currRate", serialize_with = "go_f64")]
+    pub curr_rate: f64,
+}
+
+/// minio-go `ReplMRFStats`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplMrfStats {
+    #[serde(rename = "failedCount_last5min")]
+    pub last_failed_count: u64,
+    #[serde(rename = "droppedCount_since_uptime")]
+    pub total_dropped_count: u64,
+    #[serde(rename = "droppedBytes_since_uptime")]
+    pub total_dropped_bytes: u64,
+}
+
+/// minio-go `CounterSummary`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CounterSummary {
+    pub last1hr: u64,
+    pub last1m: u64,
+    pub total: u64,
+}
+
+/// minio-go `ReplQNodeStats`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplQNodeStats {
+    #[serde(rename = "nodeName")]
+    pub node_name: String,
+    pub uptime: i64,
+    #[serde(rename = "activeWorkers")]
+    pub workers: WorkerStat,
+    #[serde(rename = "transferSummary")]
+    pub xfer_stats: Option<BTreeMap<String, XferStats>>,
+    #[serde(rename = "tgtTransferStats")]
+    pub tgt_xfer_stats: Option<BTreeMap<String, BTreeMap<String, XferStats>>>,
+    #[serde(rename = "queueStats")]
+    pub qstats: InQueueMetric,
+    #[serde(rename = "mrfStats")]
+    pub mrf_stats: ReplMrfStats,
+    pub retries: CounterSummary,
+    pub errors: CounterSummary,
+}
+
+/// minio-go `ReplQueueStats`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReplQueueStats {
+    pub nodes: Option<Vec<ReplQNodeStats>>,
+}
+
+/// minio-go `Stat`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Stat {
+    pub total: i64,
+    pub avg: i64,
+    pub max: i64,
+}
+
+/// minio-go `DowntimeInfo`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DowntimeInfo {
+    pub duration: Stat,
+    pub count: Stat,
+}
+
+/// minio-go `MetricsV2`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetricsV2 {
+    pub uptime: i64,
+    #[serde(rename = "currStats")]
+    pub current_stats: Metrics,
+    #[serde(rename = "queueStats")]
+    pub queue_stats: ReplQueueStats,
+    #[serde(rename = "downtimeInfo")]
+    pub downtime_info: Option<BTreeMap<String, DowntimeInfo>>,
+}
+
+/// Cluster-wide queue summary (minio-go `ReplQueueStats.QStats()`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReplQStats {
+    pub workers: WorkerStat,
+    pub xfer_stats: BTreeMap<String, XferStats>,
+    pub tgt_xfer_stats: BTreeMap<String, BTreeMap<String, XferStats>>,
+}
+
+impl ReplQueueStats {
+    fn nodes(&self) -> &[ReplQNodeStats] {
+        self.nodes.as_deref().unwrap_or_default()
+    }
+
+    /// minio-go `Workers()`: summed current/average workers averaged over nodes, max of max.
+    pub fn workers(&self) -> WorkerStat {
+        let mut total = WorkerStat::default();
+        for node in self.nodes() {
+            total.avg += node.workers.avg;
+            total.curr += node.workers.curr;
+            total.max = total.max.max(node.workers.max);
+        }
+        let count = self.nodes().len();
+        if count > 0 {
+            total.avg /= count as f32;
+            total.curr /= count as i32;
+        }
+        total
+    }
+
+    /// minio-go `QStats()` (the transfer part used by `replicate status`).
+    pub fn qstats(&self) -> ReplQStats {
+        let mut summary = ReplQStats {
+            workers: self.workers(),
+            ..Default::default()
+        };
+        let merge = |st: &mut XferStats, v: &XferStats| {
+            st.avg_rate += v.avg_rate;
+            st.curr_rate += v.curr_rate;
+            st.peak_rate = st.peak_rate.max(v.peak_rate);
+        };
+        for node in self.nodes() {
+            for (arn, xmap) in node.tgt_xfer_stats.iter().flatten() {
+                for (metric, value) in xmap {
+                    // minio-go starts from the cluster totals so far (without updating them).
+                    let mut st = summary.xfer_stats.get(metric).cloned().unwrap_or_default();
+                    merge(&mut st, value);
+                    summary
+                        .tgt_xfer_stats
+                        .entry(arn.clone())
+                        .or_default()
+                        .insert(metric.clone(), st);
+                }
+            }
+            for (metric, value) in node.xfer_stats.iter().flatten() {
+                merge(summary.xfer_stats.entry(metric.clone()).or_default(), value);
+            }
+        }
+        summary
+    }
 }
 
 /// Go `time.Duration.String()` for whole seconds (`1440h0m0s`, `1m30s`, `5s`).
@@ -1056,15 +1505,50 @@ mod tests {
     }
 
     #[test]
-    fn bucket_target_json_round_trips_unknown_fields() {
-        let json = r#"{"sourcebucket":"src","endpoint":"h:9000","credentials":{"accessKey":"ak"},"targetbucket":"dst","secure":false,"path":"auto","api":"s3v4","arn":"arn:minio:replication::x:dst","type":"replication","replicationSync":false,"healthCheckDuration":60000000000,"disableProxy":false,"isOnline":true,"totalDowntime":0}"#;
-        let target: BucketTarget = serde_json::from_str(json).unwrap();
+    fn bucket_target_json_matches_madmin() {
+        let server = r#"{"sourcebucket":"src","endpoint":"h:9000","credentials":{"accessKey":"ak"},"targetbucket":"dst","secure":false,"path":"auto","api":"s3v4","arn":"arn:minio:replication::x:dst","type":"replication","replicationSync":false,"healthCheckDuration":60000000000,"disableProxy":false,"isOnline":true,"totalDowntime":0,"lastOnline":"2026-09-26T16:31:48.449423944Z","latency":{"curr":1,"avg":2,"max":3},"unknown":1}"#;
+        let target: BucketTarget = serde_json::from_str(server).unwrap();
+        assert!(target.online);
         assert_eq!(target.health_check_duration, 60_000_000_000);
-        assert_eq!(target.extra["isOnline"], serde_json::json!(true));
-        let back: serde_json::Value = serde_json::to_value(&target).unwrap();
         assert_eq!(
-            back,
-            serde_json::from_str::<serde_json::Value>(json).unwrap()
+            serde_json::to_string(&target).unwrap(),
+            r#"{"sourcebucket":"src","endpoint":"h:9000","credentials":{"accessKey":"ak","expiration":"0001-01-01T00:00:00Z"},"targetbucket":"dst","secure":false,"path":"auto","api":"s3v4","arn":"arn:minio:replication::x:dst","type":"replication","replicationSync":false,"healthCheckDuration":60000000000,"disableProxy":false,"resetBeforeDate":"0001-01-01T00:00:00Z","totalDowntime":0,"lastOnline":"2026-09-26T16:31:48.449423944Z","isOnline":true,"latency":{"curr":1,"avg":2,"max":3},"edge":false,"edgeSyncBeforeExpiry":false,"offlineCount":0}"#
+        );
+    }
+
+    /// Server metrics re-marshaled through minio-go's types, like mc does (`queued.max` is
+    /// dropped because minio-go names it `peak`, unknown fields vanish, zero counters are
+    /// omitted, integral floats print without a fraction).
+    #[test]
+    fn metrics_json_matches_minio_go() {
+        let server = r#"{"currStats":{"Stats":{"arn1":{"completedReplicationSize":3,"currentBandwidth":0,"failed":{"lastHour":{"bytes":0,"count":0},"lastMinute":{"bytes":0,"count":0},"totals":{"bytes":0,"count":0}},"replicationCount":1,"replicationLatency":{}}},"completedReplicationSize":3,"queued":{"avg":{"bytes":0,"count":0},"curr":{"bytes":0,"count":0},"max":{"bytes":5,"count":1}},"replicationCount":1},"proxyStats":{},"queueStats":{"nodes":[{"activeWorkers":{"avg":0,"curr":0,"max":0},"nodeName":"n1","tgtTransferStats":{"arn1":{"Small":{"avgRate":0,"currRate":1.5,"n":0,"peakRate":2}}},"transferSummary":{"Total":{"avgRate":0,"currRate":1.5,"n":0,"peakRate":0}},"uptime":165}],"uptime":165},"uptime":165}"#;
+        let metrics: MetricsV2 = serde_json::from_str(server).unwrap();
+        assert_eq!(
+            serde_json::to_string(&metrics).unwrap(),
+            r#"{"uptime":165,"currStats":{"Stats":{"arn1":{"replicationCount":1,"completedReplicationSize":3,"failed":{"lastMinute":{"count":0,"bytes":0},"lastHour":{"count":0,"bytes":0},"totals":{"count":0,"bytes":0}}}},"completedReplicationSize":3,"replicationCount":1,"failed":{"lastMinute":{"count":0,"bytes":0},"lastHour":{"count":0,"bytes":0},"totals":{"count":0,"bytes":0}},"queued":{"curr":{"count":0,"bytes":0},"avg":{"count":0,"bytes":0},"peak":{"count":0,"bytes":0}}},"queueStats":{"nodes":[{"nodeName":"n1","uptime":165,"activeWorkers":{"curr":0,"avg":0,"max":0},"transferSummary":{"Total":{"avgRate":0,"peakRate":0,"currRate":1.5}},"tgtTransferStats":{"arn1":{"Small":{"avgRate":0,"peakRate":2,"currRate":1.5}}},"queueStats":{"curr":{"count":0,"bytes":0},"avg":{"count":0,"bytes":0},"peak":{"count":0,"bytes":0}},"mrfStats":{"failedCount_last5min":0,"droppedCount_since_uptime":0,"droppedBytes_since_uptime":0},"retries":{"last1hr":0,"last1m":0,"total":0},"errors":{"last1hr":0,"last1m":0,"total":0}}]},"downtimeInfo":null}"#
+        );
+        let qs = metrics.queue_stats.qstats();
+        assert_eq!(qs.xfer_stats["Total"].curr_rate, 1.5);
+        // Target stats start from the cluster totals seen so far (none yet).
+        assert_eq!(qs.tgt_xfer_stats["arn1"]["Small"].peak_rate, 2.0);
+    }
+
+    #[test]
+    fn empty_rules_marshal_as_null() {
+        let config = ReplicationConfig::default();
+        assert_eq!(
+            serde_json::to_string(&config).unwrap(),
+            r#"{"Rules":null,"Role":""}"#
+        );
+        let back: ReplicationConfig = serde_json::from_str(r#"{"Rules":null,"Role":""}"#).unwrap();
+        assert!(back.rules.is_empty());
+        let diff = DiffInfo {
+            object: "o".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&diff).unwrap(),
+            r#"{"object":"o","versionId":"","replTimestamp":"0001-01-01T00:00:00Z","lastModified":"0001-01-01T00:00:00Z","deletemarker":false}"#
         );
     }
 

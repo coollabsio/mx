@@ -34,14 +34,14 @@ server support that varies between S3-compatible servers.
 | `anonymous set`, `get`, `set-json`, `get-json`, `list`, `links` | Supported | `private` is a synonym for `none`. Supports prefix policies. |
 | `ilm rule add`, `edit`, `ls`, `rm`, `export`, `import` | Supported | Supports every mc rule flag. `ls` tables use go-pretty alignment (numbers right, text left); `ls`/`export` JSON carry `updatedAt`. A bucket without lifecycle fails with the server error like mc. |
 | `ilm restore` | Supported | `--days`, `-r`, `--version-id`, `--versions`. |
-| `ilm tier add`, `edit`, `ls`, `info`, `rm`, `check` | Partial | MinIO admin API. Only the `minio` and `s3` tier types are supported. |
+| `ilm tier add`, `edit`, `update`, `ls`, `info`, `rm`, `check`, `verify` | Supported | MinIO admin API. All tier types (`minio`, `s3`, `azure` incl. service principal, `gcs`) with madmin's request JSON; mc's messages, errors and lipgloss tables (no terminal). Like mc, `rm`/`update` print an empty line. |
 | `retention set`, `clear`, `info` | Supported | Object and bucket default retention (`--default`). `-r`, `--versions`, `--version-id`, `--rewind`, `--bypass`. Object JSON has mc's `validity:""` and `error` (`null`, or the Go-marshaled server error). |
 | `legalhold set`, `clear`, `info` | Supported | Object legal hold. Works recursively and on versions. Single-object errors follow mc (`info` fatal, `set`/`clear` reported with exit 0). Intentional difference: `info -r --json` prints one document per object (mc prints nothing, a bug). |
 | `event add`, `rm`, `ls` | Supported | Bucket notifications. `--event`, `--prefix`, `--suffix`, `-p`. `rm --force` removes all notifications. |
 | `undo` | Supported | `-r --force`, `--last`, `--action`, `--dry-run`. mc output and errors. |
 | `od` | Supported | Single-stream upload and download measurement. mc output and errors (local sources shown as absolute paths). |
-| `quota set`, `info`, `clear` | Supported | MinIO admin API. |
-| `replicate add`, `update`, `ls`, `status`, `resync`, `export`, `import`, `rm`, `backlog` | Partial | MinIO admin API. The text output of `status` and `backlog` is simplified. |
+| `quota set`, `info`, `clear` | Supported | MinIO admin API. Sizes parsed like go-humanize (`1GB` = 10^9, `1GiB` = 2^30). |
+| `replicate add`, `update`, `ls`, `status`, `resync`, `export`, `import`, `rm`, `backlog` | Supported | MinIO admin API. `status` (incl. `--nodes`), `ls`, `export` text and JSON match mc (JSON re-marshaled through minio-go/madmin types). `backlog` text in mc is an interactive bubbletea view: without a terminal mx fails like mc (`could not open a new TTY`); on a terminal mx prints a static table. `backlog --json` matches mc. |
 | `ping` | Supported | Uses the health endpoint. `-c`, `-e`, `-x/--exit`, `-i`, `-a/--distributed` and `--node` (node list from the admin ServerInfo API). Runs until interrupted when `-c` is not given. Text, summary table and JSON (Go `url.URL` endpoint) match mc; `dns` is always `0s`, and a failing ServerInfo call errors at once (mc retries forever). |
 | `ready` | Supported | `--cluster-read`, `--maintenance`. Retries until the server is ready. |
 | `cors set`, `get`, `remove` | Preview | `set` accepts XML or JSON. Depends on server CORS support. |
