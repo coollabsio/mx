@@ -1,9 +1,13 @@
 use crate::commands::util::{key_depth, object_infos};
 use crate::config::ConfigStore;
-use anyhow::Result;
+use crate::flags::RewindFlag;
+use crate::location::{Location, parse_location};
+use crate::s3::{ListOptions, ObjectInfo};
+use anyhow::{Result, bail};
 use clap::Args;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::time::SystemTime;
 
 #[derive(Debug, Args)]
 pub struct DuArgs {
@@ -11,12 +15,52 @@ pub struct DuArgs {
     pub recursive: bool,
     #[arg(short = 'd', long)]
     pub depth: Option<usize>,
+    #[command(flatten)]
+    pub rewind: RewindFlag,
+    /// include all object versions
+    #[arg(long)]
+    pub versions: bool,
     pub target: String,
+}
+
+/// Recursive listing for du/tree. With `--versions` / `--rewind` (S3 only) the result holds
+/// every version (at or before the rewind time) or the objects as of the rewind time; delete
+/// markers are never included.
+pub(crate) fn listing(
+    store: &ConfigStore,
+    input: &str,
+    versions: bool,
+    rewind: &RewindFlag,
+) -> Result<Vec<ObjectInfo>> {
+    let rewind = rewind.at(SystemTime::now())?;
+    if !versions && rewind.is_none() {
+        return Ok(object_infos(store, input)?.1);
+    }
+    let Location::S3(target) = parse_location(input, store.config()) else {
+        bail!("--versions and --rewind are only supported for S3 targets, not `{input}`.");
+    };
+    let alias = super::alias_config(store, &target.alias)?;
+    let bucket = target.require_bucket()?.to_string();
+    let prefix = target.key_with_trailing_slash();
+    let options = ListOptions {
+        recursive: true,
+        versions,
+        rewind,
+        ..Default::default()
+    };
+    let items = super::runtime()?.block_on(async {
+        let client = crate::s3::build_client(&alias).await?;
+        crate::s3::list_objects_with(&client, &bucket, prefix.as_deref(), &options).await
+    })?;
+    Ok(items
+        .into_iter()
+        .filter(|item| !item.is_delete_marker && !item.is_prefix)
+        .collect())
 }
 
 pub fn run(args: DuArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
-    let (_, items) = object_infos(&store, &args.target)?;
+    let items = listing(&store, &args.target, args.versions, &args.rewind)?;
     let depth = args
         .depth
         .unwrap_or(if args.recursive { usize::MAX } else { 1 });
@@ -42,11 +86,13 @@ pub fn run(args: DuArgs, json: bool) -> Result<()> {
                     prefix: &name,
                     size,
                     objects: count,
+                    is_versions: args.versions,
                 })?
             );
         } else {
             let label = if name.is_empty() { "." } else { name.as_str() };
-            println!("{size}  {count} objects  {label}");
+            let unit = if args.versions { "versions" } else { "objects" };
+            println!("{size}  {count} {unit}  {label}");
         }
     }
     Ok(())
@@ -76,4 +122,6 @@ struct DuMessage<'a> {
     prefix: &'a str,
     size: i64,
     objects: u64,
+    #[serde(rename = "isVersions")]
+    is_versions: bool,
 }

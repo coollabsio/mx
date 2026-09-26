@@ -33,7 +33,7 @@ fn live_workflow_covers_core_s3_commands() {
         .args(["stat", &bucket_target])
         .assert()
         .success()
-        .stdout(predicate::str::contains("bucket"));
+        .stdout(predicate::str::contains(format!("Name      : {bucket}")));
 
     let source = live::local_file(home.path(), "hello.txt", "hello from mx\n");
     let source_str = source.to_string_lossy().to_string();
