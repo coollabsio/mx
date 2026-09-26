@@ -78,50 +78,6 @@ fn assert_stubs(rows: &[&[&str]]) {
 }
 
 // ---------------------------------------------------------------------------
-// IDP
-// ---------------------------------------------------------------------------
-
-const IDP: &[&[&str]] = &[
-    &["idp", "openid", "add", "a"],
-    &["idp", "openid", "update", "a"],
-    &["idp", "openid", "remove", "a"],
-    &["idp", "openid", "list", "a"],
-    &["idp", "openid", "info", "a"],
-    &["idp", "openid", "enable", "a"],
-    &["idp", "openid", "disable", "a"],
-    &["idp", "openid", "accesskey", "list", "a"],
-    &["idp", "openid", "accesskey", "remove", "a", "a"],
-    &["idp", "openid", "accesskey", "info", "a", "a"],
-    &["idp", "openid", "accesskey", "edit"],
-    &["idp", "openid", "accesskey", "enable"],
-    &["idp", "openid", "accesskey", "disable"],
-    &["idp", "ldap", "add", "a"],
-    &["idp", "ldap", "update", "a"],
-    &["idp", "ldap", "remove", "a"],
-    &["idp", "ldap", "list", "a"],
-    &["idp", "ldap", "info", "a"],
-    &["idp", "ldap", "enable", "a"],
-    &["idp", "ldap", "disable", "a"],
-    &["idp", "ldap", "policy", "attach", "a", "a"],
-    &["idp", "ldap", "policy", "detach", "a", "a"],
-    &["idp", "ldap", "policy", "entities", "a"],
-    &["idp", "ldap", "accesskey", "list", "a"],
-    &["idp", "ldap", "accesskey", "remove", "a", "a"],
-    &["idp", "ldap", "accesskey", "info", "a", "a"],
-    &["idp", "ldap", "accesskey", "create"],
-    &["idp", "ldap", "accesskey", "create-with-login", "a"],
-    &["idp", "ldap", "accesskey", "edit"],
-    &["idp", "ldap", "accesskey", "enable"],
-    &["idp", "ldap", "accesskey", "disable"],
-    &["idp", "ldap", "accesskey", "sts-revoke", "a"],
-];
-
-#[test]
-fn idp_stubs() {
-    assert_stubs(IDP);
-}
-
-// ---------------------------------------------------------------------------
 // SERVER
 // ---------------------------------------------------------------------------
 

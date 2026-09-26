@@ -480,6 +480,32 @@ impl Parity {
         finish(args, &report);
     }
 
+    /// Runs one templated command for one side only (for server-global state that must be
+    /// reset between the mc and mx runs); compare with [`Parity::assert_outcomes`].
+    pub fn run_side(&self, tool: Tool, args: &[&str], stdin: Option<&[u8]>) -> Outcome {
+        let side = self.side(tool);
+        let args: Vec<String> = args.iter().map(|arg| side.expand(arg)).collect();
+        self.exec(side, &args, stdin, &self.env)
+    }
+
+    /// [`Parity::assert_parity`] (`json: false`) or [`Parity::assert_json_parity`] for
+    /// outcomes collected with [`Parity::run_side`].
+    pub fn assert_outcomes(&self, args: &[&str], mc: &Outcome, mx: &Outcome, json: bool) {
+        let mut report = String::new();
+        if json {
+            self.compare_json("stdout", &mc.stdout, &mx.stdout, &mut report);
+        } else {
+            self.compare_text("stdout", &mc.stdout, &mx.stdout, &mut report);
+        }
+        if json && (looks_json(&mc.stderr) || looks_json(&mx.stderr)) {
+            self.compare_json("stderr", &mc.stderr, &mx.stderr, &mut report);
+        } else {
+            self.compare_text("stderr", &mc.stderr, &mx.stderr, &mut report);
+        }
+        compare_code(mc, mx, &mut report);
+        finish(args, &report);
+    }
+
     /// Normalized text, with lines sorted when [`Parity::unordered`] is set.
     fn canonical(&self, tool: Tool, text: &str) -> String {
         let text = self.normalize(tool, text);

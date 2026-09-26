@@ -1,10 +1,16 @@
-//! `mx idp ldap` (mc `idp ldap`).
+//! `mx idp ldap` (mc `idp ldap`): LDAP IDP configuration, policy mappings and access keys.
 //!
-//! Owner: IDP. Stubs return "not implemented yet" until implemented.
+//! Owner: IDP. Positional arguments are collected loosely and counted like mc (wrong counts
+//! print the command help and exit with status 1).
 
-use crate::commands::not_implemented;
-use anyhow::Result;
+use super::accesskey::{self, CreateFlags, EditFlags, ListFlags, StsRevokeFlags};
+use super::{admin_client, print_msg, show_help_and_exit};
+use crate::commands::runtime;
+use crate::error::McError;
+use crate::s3::admin_idp::{self, PolicyAssociationReq, PolicyEntitiesResult};
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
+use serde::Serialize;
 
 #[derive(Debug, Args)]
 pub struct LdapArgs {
@@ -15,77 +21,66 @@ pub struct LdapArgs {
 #[derive(Debug, Subcommand)]
 pub enum LdapCommand {
     #[command(name = "add", about = "Create an LDAP IDP server configuration")]
-    Add(LdapAddArgs),
+    Add(CfgParamsArgs),
     #[command(name = "update", about = "Update an LDAP IDP configuration")]
-    Update(LdapUpdateArgs),
+    Update(CfgParamsArgs),
     #[command(
         name = "remove",
         visible_alias = "rm",
         about = "remove LDAP IDP server configuration"
     )]
-    Remove(LdapRemoveArgs),
+    Remove(TargetArgs),
     #[command(
         name = "list",
         visible_alias = "ls",
         about = "list LDAP IDP server configuration(s)"
     )]
-    List(LdapListArgs),
+    List(TargetArgs),
     #[command(name = "info", about = "get LDAP IDP server configuration info")]
-    Info(LdapInfoArgs),
+    Info(TargetArgs),
     #[command(name = "enable", about = "manage LDAP IDP server configuration")]
-    Enable(LdapEnableArgs),
+    Enable(TargetArgs),
     #[command(name = "disable", about = "Disable an LDAP IDP server configuration")]
-    Disable(LdapDisableArgs),
+    Disable(TargetArgs),
     #[command(name = "policy", about = "manage policy assignments for LDAP")]
     Policy(LdapPolicyArgs),
     #[command(name = "accesskey", about = "manage LDAP access key pairs")]
     Accesskey(LdapAccesskeyArgs),
 }
 
+/// `TARGET [CFG_PARAMS...]`.
 #[derive(Debug, Args)]
-pub struct LdapAddArgs {
+pub struct CfgParamsArgs {
     #[arg(value_name = "TARGET")]
-    pub target: String,
-    #[arg(value_name = "CFG-PARAMS")]
+    pub target: Option<String>,
+    #[arg(value_name = "CFG_PARAMS")]
     pub cfg_params: Vec<String>,
 }
 
-#[derive(Debug, Args)]
-pub struct LdapUpdateArgs {
-    #[arg(value_name = "TARGET")]
-    pub target: String,
-    #[arg(value_name = "CFG-PARAMS")]
-    pub cfg_params: Vec<String>,
+impl CfgParamsArgs {
+    fn args(&self) -> Vec<String> {
+        self.target
+            .iter()
+            .chain(&self.cfg_params)
+            .cloned()
+            .collect()
+    }
 }
 
+/// `TARGET` (exactly one).
 #[derive(Debug, Args)]
-pub struct LdapRemoveArgs {
+pub struct TargetArgs {
     #[arg(value_name = "TARGET")]
-    pub target: String,
+    pub args: Vec<String>,
 }
 
-#[derive(Debug, Args)]
-pub struct LdapListArgs {
-    #[arg(value_name = "TARGET")]
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct LdapInfoArgs {
-    #[arg(value_name = "TARGET")]
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct LdapEnableArgs {
-    #[arg(value_name = "TARGET")]
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct LdapDisableArgs {
-    #[arg(value_name = "TARGET")]
-    pub target: String,
+impl TargetArgs {
+    fn target(&self, path: &[&str]) -> &str {
+        match self.args.as_slice() {
+            [target] => target,
+            _ => show_help_and_exit(path),
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -99,7 +94,7 @@ pub enum LdapPolicyCommand {
     #[command(name = "attach", about = "attach a policy to an entity")]
     Attach(LdapPolicyAttachArgs),
     #[command(name = "detach", about = "detach a policy from an entity")]
-    Detach(LdapPolicyDetachArgs),
+    Detach(LdapPolicyAttachArgs),
     #[command(name = "entities", about = "list policy association entities")]
     Entities(LdapPolicyEntitiesArgs),
 }
@@ -107,30 +102,8 @@ pub enum LdapPolicyCommand {
 #[derive(Debug, Args)]
 pub struct LdapPolicyAttachArgs {
     #[arg(value_name = "TARGET")]
-    pub target: String,
-    #[arg(value_name = "POLICIES", required = true)]
-    pub policies: Vec<String>,
-    #[arg(
-        long = "user",
-        short = 'u',
-        value_name = "VALUE",
-        help = "attach policy to user by DN or by login name"
-    )]
-    pub user: Option<String>,
-    #[arg(
-        long = "group",
-        short = 'g',
-        value_name = "VALUE",
-        help = "attach policy to LDAP Group DN"
-    )]
-    pub group: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct LdapPolicyDetachArgs {
-    #[arg(value_name = "TARGET")]
-    pub target: String,
-    #[arg(value_name = "POLICIES", required = true)]
+    pub target: Option<String>,
+    #[arg(value_name = "POLICY")]
     pub policies: Vec<String>,
     #[arg(
         long = "user",
@@ -151,7 +124,7 @@ pub struct LdapPolicyDetachArgs {
 #[derive(Debug, Args)]
 pub struct LdapPolicyEntitiesArgs {
     #[arg(value_name = "TARGET")]
-    pub target: String,
+    pub args: Vec<String>,
     #[arg(
         long = "user",
         short = 'u',
@@ -194,9 +167,9 @@ pub enum LdapAccesskeyCommand {
         visible_alias = "rm",
         about = "delete access key pairs for LDAP"
     )]
-    Remove(LdapAccesskeyRemoveArgs),
+    Remove(AccesskeyArgs),
     #[command(name = "info", about = "info about given access key pairs for LDAP")]
-    Info(LdapAccesskeyInfoArgs),
+    Info(AccesskeyArgs),
     #[command(name = "create", about = "create access key pairs for LDAP")]
     Create(LdapAccesskeyCreateArgs),
     #[command(
@@ -205,22 +178,22 @@ pub enum LdapAccesskeyCommand {
     )]
     CreateWithLogin(LdapAccesskeyCreateWithLoginArgs),
     #[command(name = "edit", about = "edit existing access keys for LDAP")]
-    Edit(LdapAccesskeyEditArgs),
+    Edit(AccesskeyEditArgs),
     #[command(name = "enable", about = "enable an access key")]
-    Enable(LdapAccesskeyEnableArgs),
+    Enable(AccesskeyArgs),
     #[command(name = "disable", about = "disable an access key")]
-    Disable(LdapAccesskeyDisableArgs),
+    Disable(AccesskeyArgs),
     #[command(
         name = "sts-revoke",
         about = "revokes all STS accounts or specified types for the specified user"
     )]
-    StsRevoke(LdapAccesskeyStsRevokeArgs),
+    StsRevoke(StsRevokeArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct LdapAccesskeyListArgs {
     #[arg(value_name = "TARGET")]
-    pub target: String,
+    pub target: Option<String>,
     #[arg(value_name = "DN")]
     pub dn: Vec<String>,
     #[arg(long = "users-only", help = "only list user DNs")]
@@ -235,20 +208,29 @@ pub struct LdapAccesskeyListArgs {
     pub all: bool,
 }
 
+/// `TARGET ACCESSKEY...` (counts checked per command).
 #[derive(Debug, Args)]
-pub struct LdapAccesskeyRemoveArgs {
+pub struct AccesskeyArgs {
     #[arg(value_name = "TARGET")]
-    pub target: String,
+    pub target: Option<String>,
     #[arg(value_name = "ACCESSKEY")]
-    pub accesskey: String,
+    pub accesskey: Vec<String>,
+}
+
+impl AccesskeyArgs {
+    pub(crate) fn args(&self) -> Vec<String> {
+        self.target.iter().chain(&self.accesskey).cloned().collect()
+    }
 }
 
 #[derive(Debug, Args)]
-pub struct LdapAccesskeyInfoArgs {
+pub struct AccesskeyEditArgs {
     #[arg(value_name = "TARGET")]
-    pub target: String,
-    #[arg(value_name = "ACCESSKEY", required = true)]
+    pub target: Option<String>,
+    #[arg(value_name = "ACCESSKEY")]
     pub accesskey: Vec<String>,
+    #[command(flatten)]
+    pub flags: EditFlags,
 }
 
 #[derive(Debug, Args)]
@@ -256,313 +238,444 @@ pub struct LdapAccesskeyCreateArgs {
     #[arg(value_name = "TARGET")]
     pub target: Option<String>,
     #[arg(value_name = "DN")]
-    pub dn: Option<String>,
-    #[arg(
-        long = "access-key",
-        value_name = "VALUE",
-        help = "set an access key for the account"
-    )]
-    pub access_key: Option<String>,
-    #[arg(
-        long = "secret-key",
-        value_name = "VALUE",
-        help = "set a secret key for the  account"
-    )]
-    pub secret_key: Option<String>,
-    #[arg(
-        long = "policy",
-        value_name = "VALUE",
-        help = "path to a JSON policy file"
-    )]
-    pub policy: Option<String>,
-    #[arg(
-        long = "name",
-        value_name = "VALUE",
-        help = "friendly name for the account"
-    )]
-    pub name: Option<String>,
-    #[arg(
-        long = "description",
-        value_name = "VALUE",
-        help = "description for the account"
-    )]
-    pub description: Option<String>,
-    #[arg(
-        long = "expiry-duration",
-        value_name = "VALUE",
-        help = "duration before the access key expires"
-    )]
-    pub expiry_duration: Option<String>,
-    #[arg(
-        long = "expiry",
-        value_name = "VALUE",
-        help = "expiry date for the access key"
-    )]
-    pub expiry: Option<String>,
-    #[arg(
-        long = "login",
-        hide = true,
-        help = "log in using ldap credentials to generate access key pair for future use"
-    )]
-    pub login: bool,
+    pub dn: Vec<String>,
+    #[command(flatten)]
+    pub flags: CreateFlags,
 }
 
 #[derive(Debug, Args)]
 pub struct LdapAccesskeyCreateWithLoginArgs {
     #[arg(value_name = "URL")]
-    pub url: String,
-    #[arg(
-        long = "access-key",
-        value_name = "VALUE",
-        help = "set an access key for the account"
-    )]
-    pub access_key: Option<String>,
-    #[arg(
-        long = "secret-key",
-        value_name = "VALUE",
-        help = "set a secret key for the  account"
-    )]
-    pub secret_key: Option<String>,
-    #[arg(
-        long = "policy",
-        value_name = "VALUE",
-        help = "path to a JSON policy file"
-    )]
-    pub policy: Option<String>,
-    #[arg(
-        long = "name",
-        value_name = "VALUE",
-        help = "friendly name for the account"
-    )]
-    pub name: Option<String>,
-    #[arg(
-        long = "description",
-        value_name = "VALUE",
-        help = "description for the account"
-    )]
-    pub description: Option<String>,
-    #[arg(
-        long = "expiry-duration",
-        value_name = "VALUE",
-        help = "duration before the access key expires"
-    )]
-    pub expiry_duration: Option<String>,
-    #[arg(
-        long = "expiry",
-        value_name = "VALUE",
-        help = "expiry date for the access key"
-    )]
-    pub expiry: Option<String>,
+    pub url: Option<String>,
+    #[arg(value_name = "ARGS", hide = true)]
+    pub rest: Vec<String>,
+    #[command(flatten)]
+    pub flags: CreateFlags,
 }
 
 #[derive(Debug, Args)]
-pub struct LdapAccesskeyEditArgs {
-    #[arg(value_name = "TARGET")]
-    pub target: Option<String>,
-    #[arg(value_name = "ACCESSKEY")]
-    pub accesskey: Option<String>,
-    #[arg(
-        long = "secret-key",
-        value_name = "VALUE",
-        help = "set a secret key for the  account"
-    )]
-    pub secret_key: Option<String>,
-    #[arg(
-        long = "policy",
-        value_name = "VALUE",
-        help = "path to a JSON policy file"
-    )]
-    pub policy: Option<String>,
-    #[arg(
-        long = "name",
-        value_name = "VALUE",
-        help = "friendly name for the account"
-    )]
-    pub name: Option<String>,
-    #[arg(
-        long = "description",
-        value_name = "VALUE",
-        help = "description for the account"
-    )]
-    pub description: Option<String>,
-    #[arg(
-        long = "expiry-duration",
-        value_name = "VALUE",
-        help = "duration before the access key expires"
-    )]
-    pub expiry_duration: Option<String>,
-    #[arg(
-        long = "expiry",
-        value_name = "VALUE",
-        help = "expiry date for the access key"
-    )]
-    pub expiry: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct LdapAccesskeyEnableArgs {
-    #[arg(value_name = "TARGET")]
-    pub target: Option<String>,
-    #[arg(value_name = "ACCESSKEY")]
-    pub accesskey: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct LdapAccesskeyDisableArgs {
-    #[arg(value_name = "TARGET")]
-    pub target: Option<String>,
-    #[arg(value_name = "ACCESSKEY")]
-    pub accesskey: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct LdapAccesskeyStsRevokeArgs {
+pub struct StsRevokeArgs {
     #[arg(value_name = "ALIAS")]
-    pub alias: String,
+    pub alias: Option<String>,
     #[arg(value_name = "USER")]
-    pub user: Option<String>,
-    #[arg(long = "all", help = "revoke all STS accounts for the specified user")]
-    pub all: bool,
-    #[arg(
-        long = "self",
-        help = "revoke all STS accounts for the authenticated user"
-    )]
-    pub self_: bool,
-    #[arg(
-        long = "token-type",
-        value_name = "VALUE",
-        help = "specify the token type to revoke"
-    )]
-    pub token_type: Option<String>,
+    pub user: Vec<String>,
+    #[command(flatten)]
+    pub flags: StsRevokeFlags,
+}
+
+const LDAP: &[&str] = &["idp", "ldap"];
+
+fn path(names: &[&'static str]) -> Vec<&'static str> {
+    LDAP.iter().chain(names).copied().collect()
 }
 
 pub fn run(args: LdapArgs, json: bool) -> Result<()> {
     match args.command {
-        LdapCommand::Add(args) => add(args, json),
-        LdapCommand::Update(args) => update(args, json),
-        LdapCommand::Remove(args) => remove(args, json),
-        LdapCommand::List(args) => list(args, json),
-        LdapCommand::Info(args) => info(args, json),
-        LdapCommand::Enable(args) => enable(args, json),
-        LdapCommand::Disable(args) => disable(args, json),
-        LdapCommand::Policy(args) => policy(args, json),
-        LdapCommand::Accesskey(args) => accesskey(args, json),
+        LdapCommand::Add(args) => add_or_update(&args, false, json),
+        LdapCommand::Update(args) => add_or_update(&args, true, json),
+        LdapCommand::Remove(args) => {
+            let target = args.target(&path(&["remove"]));
+            super::remove(target, false, admin_idp::DEFAULT_NAME, json)
+        }
+        LdapCommand::List(args) => super::list(args.target(&path(&["list"])), false, json),
+        LdapCommand::Info(args) => super::info(
+            args.target(&path(&["info"])),
+            false,
+            admin_idp::DEFAULT_NAME,
+            json,
+        ),
+        LdapCommand::Enable(args) => super::enable_disable(
+            args.target(&path(&["enable"])),
+            false,
+            admin_idp::DEFAULT_NAME,
+            true,
+            json,
+        ),
+        LdapCommand::Disable(args) => super::enable_disable(
+            args.target(&path(&["disable"])),
+            false,
+            admin_idp::DEFAULT_NAME,
+            false,
+            json,
+        ),
+        LdapCommand::Policy(args) => match args.command {
+            LdapPolicyCommand::Attach(args) => policy_attach_detach(&args, true, json),
+            LdapPolicyCommand::Detach(args) => policy_attach_detach(&args, false, json),
+            LdapPolicyCommand::Entities(args) => policy_entities(&args, json),
+        },
+        LdapCommand::Accesskey(args) => accesskey_run(args, json),
     }
 }
 
-fn add(args: LdapAddArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap add")
-}
-
-fn update(args: LdapUpdateArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap update")
-}
-
-fn remove(args: LdapRemoveArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap remove")
-}
-
-fn list(args: LdapListArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap list")
-}
-
-fn info(args: LdapInfoArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap info")
-}
-
-fn enable(args: LdapEnableArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap enable")
-}
-
-fn disable(args: LdapDisableArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap disable")
-}
-
-fn policy(args: LdapPolicyArgs, json: bool) -> Result<()> {
+fn accesskey_run(args: LdapAccesskeyArgs, json: bool) -> Result<()> {
     match args.command {
-        LdapPolicyCommand::Attach(args) => policy_attach(args, json),
-        LdapPolicyCommand::Detach(args) => policy_detach(args, json),
-        LdapPolicyCommand::Entities(args) => policy_entities(args, json),
+        LdapAccesskeyCommand::List(args) => {
+            let list: Vec<String> = args.target.iter().chain(&args.dn).cloned().collect();
+            let flags = ListFlags {
+                users_only: args.users_only,
+                temp_only: args.temp_only,
+                svcacc_only: args.svcacc_only,
+                self_: args.self_,
+                all: args.all,
+                all_configs: false,
+            };
+            accesskey::ldap_list(&path(&["accesskey", "list"]), &list, &flags, json)
+        }
+        LdapAccesskeyCommand::Remove(args) => {
+            accesskey::remove(&path(&["accesskey", "remove"]), &args.args(), json)
+        }
+        LdapAccesskeyCommand::Info(args) => {
+            accesskey::info(&path(&["accesskey", "info"]), &args.args(), json)
+        }
+        LdapAccesskeyCommand::Create(args) => {
+            let list: Vec<String> = args.target.iter().chain(&args.dn).cloned().collect();
+            accesskey::ldap_create(&path(&["accesskey", "create"]), &list, &args.flags, json)
+        }
+        LdapAccesskeyCommand::CreateWithLogin(args) => accesskey::create_with_login(
+            &path(&["accesskey", "create-with-login"]),
+            args.url.as_deref(),
+            &args.flags,
+            json,
+        ),
+        LdapAccesskeyCommand::Edit(args) => {
+            let list: Vec<String> = args.target.iter().chain(&args.accesskey).cloned().collect();
+            accesskey::edit(&path(&["accesskey", "edit"]), &list, &args.flags, json)
+        }
+        LdapAccesskeyCommand::Enable(args) => {
+            accesskey::enable_disable(&path(&["accesskey", "enable"]), &args.args(), true, json)
+        }
+        LdapAccesskeyCommand::Disable(args) => {
+            accesskey::enable_disable(&path(&["accesskey", "disable"]), &args.args(), false, json)
+        }
+        LdapAccesskeyCommand::StsRevoke(args) => {
+            let list: Vec<String> = args.alias.iter().chain(&args.user).cloned().collect();
+            accesskey::sts_revoke(
+                &path(&["accesskey", "sts-revoke"]),
+                &list,
+                &args.flags,
+                json,
+            )
+        }
     }
 }
 
-fn policy_attach(args: LdapPolicyAttachArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap policy attach")
+/// mc `mainIDPLDAPAdd` / `mainIDPLDAPUpdate`.
+fn add_or_update(args: &CfgParamsArgs, update: bool, json: bool) -> Result<()> {
+    let list = args.args();
+    if list.len() < 2 {
+        show_help_and_exit(&path(&[if update { "update" } else { "add" }]))
+    }
+    let target = &list[0];
+    // Only the admin client is created before the config check, like mc.
+    super::admin_client(target)?;
+    let (name, params) = super::split_cfg_args(&list);
+    if name != admin_idp::DEFAULT_NAME {
+        return Err(anyhow::Error::new(McError::new(
+            "all config parameters must be of the form \"key=value\"",
+        ))
+        .context("Bad LDAP IDP configuration"));
+    }
+    let context = if update {
+        "Unable to update LDAP IDP configuration"
+    } else {
+        "Unable to add LDAP IDP config to server"
+    };
+    super::add_or_update(target, false, &name, &params, update, context, json)
 }
 
-fn policy_detach(args: LdapPolicyDetachArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap policy detach")
+/// mc `policyAssociationMessage`.
+#[derive(Debug, Serialize)]
+struct PolicyAssociationMessage<'a> {
+    #[serde(skip)]
+    attach: bool,
+    status: &'static str,
+    #[serde(
+        rename = "policiesAttached",
+        skip_serializing_if = "<[String]>::is_empty"
+    )]
+    policies_attached: &'a [String],
+    #[serde(
+        rename = "policiesDetached",
+        skip_serializing_if = "<[String]>::is_empty"
+    )]
+    policies_detached: &'a [String],
+    #[serde(skip_serializing_if = "str::is_empty")]
+    user: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    group: &'a str,
 }
 
-fn policy_entities(args: LdapPolicyEntitiesArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap policy entities")
-}
-
-fn accesskey(args: LdapAccesskeyArgs, json: bool) -> Result<()> {
-    match args.command {
-        LdapAccesskeyCommand::List(args) => accesskey_list(args, json),
-        LdapAccesskeyCommand::Remove(args) => accesskey_remove(args, json),
-        LdapAccesskeyCommand::Info(args) => accesskey_info(args, json),
-        LdapAccesskeyCommand::Create(args) => accesskey_create(args, json),
-        LdapAccesskeyCommand::CreateWithLogin(args) => accesskey_create_with_login(args, json),
-        LdapAccesskeyCommand::Edit(args) => accesskey_edit(args, json),
-        LdapAccesskeyCommand::Enable(args) => accesskey_enable(args, json),
-        LdapAccesskeyCommand::Disable(args) => accesskey_disable(args, json),
-        LdapAccesskeyCommand::StsRevoke(args) => accesskey_sts_revoke(args, json),
+impl PolicyAssociationMessage<'_> {
+    fn text(&self) -> String {
+        let (mut label, mut policies) = ("Attached Policies:", self.policies_attached);
+        let (mut entity_label, mut entity) = ("To User:", self.user);
+        if !self.user.is_empty() && !self.attach {
+            (label, policies) = ("Detached Policies:", self.policies_detached);
+            entity_label = "From User:";
+        } else if self.user.is_empty() && !self.group.is_empty() {
+            entity = self.group;
+            if self.attach {
+                entity_label = "To Group:";
+            } else {
+                (label, policies) = ("Detached Policies:", self.policies_detached);
+                entity_label = "From Group:";
+            }
+        }
+        format!(
+            "{label} [{}]\n{entity_label} {entity}\n",
+            policies.join(" ")
+        )
     }
 }
 
-fn accesskey_list(args: LdapAccesskeyListArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap accesskey list")
+/// mc `mainIDPLdapPolicyAttach` / `mainIDPLdapPolicyDetach`.
+fn policy_attach_detach(args: &LdapPolicyAttachArgs, attach: bool, json: bool) -> Result<()> {
+    let list: Vec<String> = args.target.iter().chain(&args.policies).cloned().collect();
+    if list.len() < 2 {
+        show_help_and_exit(&path(&["policy", if attach { "attach" } else { "detach" }]))
+    }
+    let user = args.user.clone().unwrap_or_default();
+    let group = args.group.clone().unwrap_or_default();
+    let req = PolicyAssociationReq {
+        policies: list[1..].to_vec(),
+        user: user.clone(),
+        group: group.clone(),
+    };
+    if attach {
+        req.validate().context("Invalid policy attach arguments.")?;
+    } else if user.is_empty() && group.is_empty() {
+        return Err(anyhow::Error::new(McError::new(
+            "at least one of --user or --group is required.",
+        ))
+        .context("Missing flag in command"));
+    }
+    let client = admin_client(&list[0])?;
+    let res = runtime()?
+        .block_on(admin_idp::ldap_policy_association(&client, attach, &req))
+        .context("Unable to make LDAP policy association")?;
+    let attached = res.policies_attached.unwrap_or_default();
+    let detached = res.policies_detached.unwrap_or_default();
+    let message = PolicyAssociationMessage {
+        attach,
+        status: "success",
+        policies_attached: if attach { &attached } else { &[] },
+        policies_detached: if attach { &[] } else { &detached },
+        user: &user,
+        group: &group,
+    };
+    print_msg(json, &message, &message.text(), 1)
 }
 
-fn accesskey_remove(args: LdapAccesskeyRemoveArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap accesskey remove")
+/// mc `mainIDPLdapPolicyEntities`.
+fn policy_entities(args: &LdapPolicyEntitiesArgs, json: bool) -> Result<()> {
+    let [target] = args.args.as_slice() else {
+        show_help_and_exit(&path(&["policy", "entities"]))
+    };
+    let client = admin_client(target)?;
+    let result = runtime()?
+        .block_on(admin_idp::ldap_policy_entities(
+            &client,
+            &args.user,
+            &args.group,
+            &args.policy,
+        ))
+        .context("Unable to fetch LDAP policy entities")?;
+
+    #[derive(Serialize)]
+    struct PolicyEntitiesMessage<'a> {
+        status: &'static str,
+        result: &'a PolicyEntitiesResult,
+    }
+    let message = PolicyEntitiesMessage {
+        status: "success",
+        result: &result,
+    };
+    print_msg(json, &message, &entities_text(&result), 2)
 }
 
-fn accesskey_info(args: LdapAccesskeyInfoArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap accesskey info")
+/// mc `builderWrapper`: comma-separated items wrapped at `max_len`, quoted when they contain
+/// a comma.
+fn wrap_list(items: &[String], out: &mut String, indent: usize, max_len: usize) {
+    let mut len = 0;
+    for item in items {
+        if len + item.len() > max_len && len > 0 {
+            out.push('\n');
+            len = 0;
+        }
+        if len == 0 {
+            out.push_str(&" ".repeat(indent));
+            len = indent;
+        } else {
+            out.push_str(", ");
+            len += 2;
+        }
+        let item = if item.contains(',') {
+            format!("\"{item}\"")
+        } else {
+            item.clone()
+        };
+        out.push_str(&item);
+        len += item.len();
+    }
+    out.push('\n');
 }
 
-fn accesskey_create(args: LdapAccesskeyCreateArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap accesskey create")
+/// Go `time.Format(time.RFC3339)` of a marshaled time: fractional seconds dropped.
+fn rfc3339_seconds(time: &str) -> String {
+    match time.find('.') {
+        Some(dot) => {
+            let end = time[dot + 1..]
+                .find(|c: char| !c.is_ascii_digit())
+                .map_or(time.len(), |i| dot + 1 + i);
+            format!("{}{}", &time[..dot], &time[end..])
+        }
+        None => time.to_string(),
+    }
 }
 
-fn accesskey_create_with_login(args: LdapAccesskeyCreateWithLoginArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap accesskey create-with-login")
+/// mc `policyEntities.String()`.
+fn entities_text(result: &PolicyEntitiesResult) -> String {
+    let mut out = format!("Query time: {}\n", rfc3339_seconds(&result.timestamp));
+    let users = result.user_mappings.as_deref().unwrap_or_default();
+    if !users.is_empty() {
+        out.push_str("User -> Policy Mappings:\n");
+        for user in users {
+            out.push_str(&format!("  User: {}\n", user.user));
+            out.push_str("    Policies:\n");
+            let policies = user.policies.as_deref().unwrap_or_default();
+            wrap_list(policies, &mut out, 6, 80);
+            let groups = user.member_of_mappings.as_deref().unwrap_or_default();
+            if !groups.is_empty() {
+                let mut effective: std::collections::BTreeSet<String> =
+                    policies.iter().cloned().collect();
+                out.push_str("    Group Memberships:\n");
+                let names: Vec<String> = groups.iter().map(|g| g.group.clone()).collect();
+                for group in groups {
+                    effective.extend(group.policies.iter().flatten().cloned());
+                }
+                wrap_list(&names, &mut out, 6, 80);
+                out.push_str("    Effective Policies:\n");
+                let effective: Vec<String> = effective.into_iter().collect();
+                wrap_list(&effective, &mut out, 6, 80);
+            }
+        }
+    }
+    let groups = result.group_mappings.as_deref().unwrap_or_default();
+    if !groups.is_empty() {
+        out.push_str("Group -> Policy Mappings:\n");
+        for group in groups {
+            out.push_str(&format!("  Group: {}\n", group.group));
+            out.push_str("    Policies:\n");
+            for policy in group.policies.iter().flatten() {
+                out.push_str(&format!("      {policy}\n"));
+            }
+        }
+    }
+    let policies = result.policy_mappings.as_deref().unwrap_or_default();
+    if !policies.is_empty() {
+        out.push_str("Policy -> Entity Mappings:\n");
+        for policy in policies {
+            out.push_str(&format!("  Policy: {}\n", policy.policy));
+            let users = policy.users.as_deref().unwrap_or_default();
+            if !users.is_empty() {
+                out.push_str("    User Mappings:\n");
+                for user in users {
+                    out.push_str(&format!("      {user}\n"));
+                }
+            }
+            let groups = policy.groups.as_deref().unwrap_or_default();
+            if !groups.is_empty() {
+                out.push_str("    Group Mappings:\n");
+                for group in groups {
+                    out.push_str(&format!("      {group}\n"));
+                }
+            }
+        }
+    }
+    out
 }
 
-fn accesskey_edit(args: LdapAccesskeyEditArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap accesskey edit")
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn accesskey_enable(args: LdapAccesskeyEnableArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap accesskey enable")
-}
+    #[test]
+    fn entities_text_matches_mc() {
+        let result: PolicyEntitiesResult = serde_json::from_str(
+            r#"{"timestamp":"2026-09-26T19:27:02.910404621Z",
+            "userMappings":[{"user":"uid=dillon,dc=io","policies":["readwrite"],
+              "memberOfMappings":[{"group":"cn=a,dc=io","policies":["readonly","diagnostics"]}]}],
+            "groupMappings":[{"group":"cn=a,dc=io","policies":["diagnostics","readonly"]}],
+            "policyMappings":[{"policy":"readwrite","users":["uid=dillon,dc=io"],"groups":null}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            entities_text(&result),
+            "Query time: 2026-09-26T19:27:02Z\n\
+             User -> Policy Mappings:\n  User: uid=dillon,dc=io\n    Policies:\n      readwrite\n\
+             \x20   Group Memberships:\n      \"cn=a,dc=io\"\n    Effective Policies:\n\
+             \x20     diagnostics, readonly, readwrite\n\
+             Group -> Policy Mappings:\n  Group: cn=a,dc=io\n    Policies:\n      diagnostics\n      readonly\n\
+             Policy -> Entity Mappings:\n  Policy: readwrite\n    User Mappings:\n      uid=dillon,dc=io\n"
+        );
+    }
 
-fn accesskey_disable(args: LdapAccesskeyDisableArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap accesskey disable")
-}
+    #[test]
+    fn wrap_list_breaks_at_max_len() {
+        let items: Vec<String> = (0..6).map(|i| format!("policy-number-{i}")).collect();
+        let mut out = String::new();
+        wrap_list(&items, &mut out, 6, 40);
+        assert_eq!(
+            out,
+            "      policy-number-0, policy-number-1\n      policy-number-2, policy-number-3\n      policy-number-4, policy-number-5\n"
+        );
+        let mut out = String::new();
+        wrap_list(&[], &mut out, 6, 80);
+        assert_eq!(out, "\n");
+    }
 
-fn accesskey_sts_revoke(args: LdapAccesskeyStsRevokeArgs, json: bool) -> Result<()> {
-    let _ = (args, json);
-    not_implemented("idp ldap accesskey sts-revoke")
+    #[test]
+    fn association_text_matches_mc() {
+        let policies = vec!["readwrite".to_string()];
+        let message = PolicyAssociationMessage {
+            attach: true,
+            status: "success",
+            policies_attached: &policies,
+            policies_detached: &[],
+            user: "uid=x",
+            group: "",
+        };
+        assert_eq!(
+            message.text(),
+            "Attached Policies: [readwrite]\nTo User: uid=x\n"
+        );
+        let message = PolicyAssociationMessage {
+            attach: false,
+            policies_attached: &[],
+            policies_detached: &policies,
+            user: "",
+            group: "cn=g",
+            ..message
+        };
+        assert_eq!(
+            message.text(),
+            "Detached Policies: [readwrite]\nFrom Group: cn=g\n"
+        );
+        assert_eq!(
+            serde_json::to_string(&message).unwrap(),
+            r#"{"status":"success","policiesDetached":["readwrite"],"group":"cn=g"}"#
+        );
+    }
+
+    #[test]
+    fn rfc3339_drops_fraction() {
+        assert_eq!(
+            rfc3339_seconds("2026-09-26T19:27:02.910404621Z"),
+            "2026-09-26T19:27:02Z"
+        );
+        assert_eq!(
+            rfc3339_seconds("2026-09-26T19:27:02+02:00"),
+            "2026-09-26T19:27:02+02:00"
+        );
+    }
 }
