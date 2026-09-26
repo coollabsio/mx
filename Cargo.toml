@@ -10,6 +10,7 @@ aws-config = "1.8"
 aws-credential-types = "1.2"
 aws-sdk-s3 = "1.79"
 aws-smithy-http-client = { version = "1.1", features = ["rustls-aws-lc"] }
+aws-sigv4 = { version = "1.4", default-features = false }
 aws-smithy-runtime-api = "1.11"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }

@@ -273,7 +273,7 @@ fn live_parity_commands_work_against_s3() {
         .args(["ping", "-c", "1", &alias])
         .assert()
         .success()
-        .stdout(predicate::str::contains("pong"));
+        .stdout(predicate::str::contains("status=ok"));
     live::mx()
         .env("HOME", home.path())
         .args(["share", "download", "--expire", "1h", &nested])
@@ -290,7 +290,7 @@ fn live_parity_commands_work_against_s3() {
         .args(["tag", "list", &nested])
         .assert()
         .success()
-        .stdout(predicate::str::contains("env=test"));
+        .stdout(predicate::str::is_match(r"env\s+: test").expect("regex"));
     live::mx()
         .env("HOME", home.path())
         .args(["version", "enable", &bucket_target])
@@ -301,7 +301,7 @@ fn live_parity_commands_work_against_s3() {
         .args(["version", "info", &bucket_target])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Enabled"));
+        .stdout(predicate::str::contains("versioning is enabled"));
     live::mx()
         .env("HOME", home.path())
         .args(["ls", "-r", &bucket_target])
