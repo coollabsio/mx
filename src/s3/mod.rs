@@ -15,11 +15,13 @@
 //! | `notify`        | bucket notifications                                   | G     |
 //! | `admin`         | MinIO admin API (quota, tiers, ...)                    | H     |
 //! | `replication`   | bucket replication                                     | H     |
+//! | `io_ext`        | if-none-match client, rewind lookup, find metadata/tags | E     |
 
 pub mod admin;
 pub mod bucket;
 pub mod client;
 pub mod delete;
+pub mod io_ext;
 pub mod lifecycle;
 pub mod list;
 pub mod lock;
@@ -32,6 +34,7 @@ pub mod stat;
 pub use bucket::*;
 pub use client::{build_client, force_path_style};
 pub use delete::*;
+pub use io_ext::*;
 pub use lifecycle::*;
 pub use list::*;
 pub use multipart::*;

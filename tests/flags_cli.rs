@@ -73,7 +73,7 @@ fn multichar_short_flags_are_rewritten() {
         .stderr(predicate::str::contains("not implemented yet"));
     // A command without the flag reports the rewritten long form.
     mx().env("HOME", home.path())
-        .args(["cat", "-vid", "v1", "local/b/o"])
+        .args(["ping", "-vid", "v1", "local"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("--version-id"));
