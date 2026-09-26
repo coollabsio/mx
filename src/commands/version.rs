@@ -102,7 +102,8 @@ fn set(target_arg: &str, op: &str, info: VersioningInfo, json: bool) -> Result<(
             .with_context(|| format!("Unable to {op} versioning"))?;
     }
     if json {
-        print_json(op, target_arg, &info)
+        // mc leaves the `versioning` object of enable/suspend messages empty.
+        print_json(op, target_arg, &VersioningInfo::default())
     } else {
         output::print_plain(&format!(
             "{target_arg} versioning is {}",

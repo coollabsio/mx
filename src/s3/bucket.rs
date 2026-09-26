@@ -554,6 +554,25 @@ pub async fn presign_get(
     presign_get_version(alias, bucket, key, None, expire).await
 }
 
+/// Drops the SDK's `x-id=<Operation>` query parameter before signing, so presigned URLs
+/// match minio-go (mc) exactly.
+fn strip_x_id(request: &mut aws_smithy_runtime_api::client::orchestrator::HttpRequest) {
+    let uri = request.uri().to_string();
+    let Some((base, query)) = uri.split_once('?') else {
+        return;
+    };
+    let query: Vec<&str> = query
+        .split('&')
+        .filter(|param| !param.starts_with("x-id="))
+        .collect();
+    let uri = if query.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", query.join("&"))
+    };
+    let _ = request.set_uri(uri);
+}
+
 pub async fn presign_get_version(
     alias: &AliasConfig,
     bucket: &str,
@@ -567,6 +586,8 @@ pub async fn presign_get_version(
         .bucket(bucket)
         .key(key)
         .set_version_id(version_id.map(str::to_string))
+        .customize()
+        .mutate_request(strip_x_id)
         .presigned(PresigningConfig::expires_in(expire)?)
         .await?;
     Ok(request.uri().to_string())
@@ -583,6 +604,8 @@ pub async fn presign_put(
         .put_object()
         .bucket(bucket)
         .key(key)
+        .customize()
+        .mutate_request(strip_x_id)
         .presigned(PresigningConfig::expires_in(expire)?)
         .await?;
     Ok(request.uri().to_string())
@@ -844,6 +867,15 @@ pub async fn get_object_tags(
 
 /// Reads object (or bucket, when `key` is None) tags, optionally of a specific version.
 /// Returns None when the server reports `NoSuchTagSet`.
+/// minio-go looks up the bucket location before bucket requests, so mc reports `NoSuchBucket`
+/// where MinIO itself would answer "config not found" or succeed for a missing bucket.
+pub async fn require_bucket(client: &Client, bucket: &str) -> Result<()> {
+    match client.get_bucket_location().bucket(bucket).send().await {
+        Ok(_) => Ok(()),
+        Err(error) => Err(super::error::s3_error(&error, bucket, "")),
+    }
+}
+
 pub async fn get_tags(
     client: &Client,
     bucket: &str,
@@ -863,7 +895,10 @@ pub async fn get_tags(
     } else {
         match client.get_bucket_tagging().bucket(bucket).send().await {
             Ok(response) => response.tag_set,
-            Err(error) if has_error_code(&error, &["NoSuchTagSet"]) => return Ok(None),
+            Err(error) if has_error_code(&error, &["NoSuchTagSet"]) => {
+                require_bucket(client, bucket).await?;
+                return Ok(None);
+            }
             Err(error) => return Err(super::error::s3_error(&error, bucket, "")),
         }
     };
@@ -897,6 +932,7 @@ pub async fn delete_tags(
             .await
             .s3(bucket, "")?;
     } else {
+        require_bucket(client, bucket).await?;
         client
             .delete_bucket_tagging()
             .bucket(bucket)
@@ -913,6 +949,7 @@ pub async fn delete_tags(
 
 pub async fn set_versioning(alias: &AliasConfig, bucket: &str, enabled: bool) -> Result<()> {
     let client = build_client(alias).await?;
+    require_bucket(&client, bucket).await?;
     set_versioning_client(&client, bucket, enabled).await
 }
 
@@ -1007,6 +1044,7 @@ pub async fn put_versioning_info(
     info: &VersioningInfo,
 ) -> Result<()> {
     let client = build_client(alias).await?;
+    require_bucket(&client, bucket).await?;
     client
         .put_bucket_versioning()
         .bucket(bucket)
@@ -1273,11 +1311,31 @@ pub async fn get_encryption_config(
     alias: &AliasConfig,
     bucket: &str,
 ) -> Result<Option<(String, Option<String>)>> {
+    fetch_encryption(alias, bucket, true).await
+}
+
+/// Like [`get_encryption_config`], but a missing configuration is the server's error (mc
+/// `encrypt info`).
+pub async fn get_encryption_required(
+    alias: &AliasConfig,
+    bucket: &str,
+) -> Result<(String, Option<String>)> {
+    Ok(fetch_encryption(alias, bucket, false)
+        .await?
+        .unwrap_or_default())
+}
+
+async fn fetch_encryption(
+    alias: &AliasConfig,
+    bucket: &str,
+    missing_ok: bool,
+) -> Result<Option<(String, Option<String>)>> {
     let client = build_client(alias).await?;
     let response = match client.get_bucket_encryption().bucket(bucket).send().await {
         Ok(response) => response,
         Err(error)
-            if has_error_code(&error, &["ServerSideEncryptionConfigurationNotFoundError"]) =>
+            if missing_ok
+                && has_error_code(&error, &["ServerSideEncryptionConfigurationNotFoundError"]) =>
         {
             return Ok(None);
         }

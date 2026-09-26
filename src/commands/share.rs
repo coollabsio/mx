@@ -352,13 +352,20 @@ fn print_share(
     json: bool,
 ) -> Result<()> {
     if json {
-        crate::output::print_json(&ShareMessage {
+        let doc = crate::output::json_string(&ShareMessage {
             status: "success",
             url,
             share,
             time_left: time_left.as_nanos(),
             content_type,
         })?;
+        // mc un-escapes `&`, `<`, `>` so the share URL stays usable.
+        println!(
+            "{}",
+            doc.replace("\\u0026", "&")
+                .replace("\\u003c", "<")
+                .replace("\\u003e", ">")
+        );
         return Ok(());
     }
     println!("URL: {url}");
@@ -367,7 +374,6 @@ fn print_share(
         println!("Content-Type: {content_type}");
     }
     println!("Share: {share}");
-    println!();
     Ok(())
 }
 

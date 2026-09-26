@@ -97,7 +97,7 @@ fn version_flags_print_mc_shaped_version() {
     for flag in ["-v", "--version", "-V"] {
         mx(home.path()).arg(flag).assert().success().stdout(
             predicate::str::is_match(
-                r"^mx version \d+\.\d+\.\d+ \(commit-id=[0-9a-z]+\)\nRuntime: rustc\S* \S+/\S+\n",
+                r"^mx version RELEASE\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z \(commit-id=[0-9a-z]+\)\nRuntime: rustc\S* \S+/\S+\nCopyright \(c\) \d{4} .+\nLicense .+\n$",
             )
             .unwrap(),
         );

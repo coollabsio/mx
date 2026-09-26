@@ -14,10 +14,12 @@
 //! | `lock`          | object lock: retention, legal hold                     | G     |
 //! | `notify`        | bucket notifications                                   | G     |
 //! | `admin`         | MinIO admin API (quota, tiers, ...)                    | H     |
+//! | `admin_info`    | admin ServerInfo (ping -a/--node)                      | K     |
 //! | `replication`   | bucket replication                                     | H     |
 //! | `io_ext`        | if-none-match client, rewind lookup, find metadata/tags | E     |
 
 pub mod admin;
+pub mod admin_info;
 pub mod bucket;
 pub mod client;
 pub mod delete;

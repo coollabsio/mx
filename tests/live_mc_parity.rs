@@ -596,18 +596,29 @@ case!(
 // ---------------------------------------------------------------------------
 
 case!(
-    #[ignore = "parity: presigned URL has extra `x-id=GetObject`"]
     share_download_json,
     json,
     seeded(),
     ["share", "download", "{target}/a.txt"]
 );
 case!(
-    #[ignore = "parity: presigned URL has extra `x-id=GetObject`; trailing blank line"]
     share_download_text,
     text,
     seeded(),
     ["share", "download", "{target}/a.txt"]
+);
+
+case!(
+    share_download_expire_text,
+    text,
+    seeded(),
+    ["share", "download", "--expire", "2h", "{target}/a.txt"]
+);
+case!(
+    share_download_recursive_json,
+    json,
+    seeded(),
+    ["share", "download", "-r", "{target}/dir/"]
 );
 
 // ---------------------------------------------------------------------------
@@ -656,13 +667,48 @@ case!(
 );
 
 case!(
+    tag_list_missing_object_text,
+    text,
+    seeded(),
+    ["tag", "list", "{target}/nope.txt"]
+);
+case!(
+    tag_list_missing_object_json,
+    json,
+    seeded(),
+    ["tag", "list", "{target}/nope.txt"]
+);
+case!(
+    tag_list_bucket_text,
+    text,
+    empty(),
+    ["tag", "list", "{target}"]
+);
+case!(
+    tag_list_missing_bucket_text,
+    text,
+    bare(),
+    ["tag", "list", "{target}"]
+);
+case!(
+    tag_remove_missing_bucket_text,
+    text,
+    bare(),
+    ["tag", "remove", "{target}"]
+);
+case!(
+    version_enable_missing_bucket_text,
+    text,
+    bare(),
+    ["version", "enable", "{target}"]
+);
+case!(
     version_enable_text,
     text,
     empty(),
     ["version", "enable", "{target}"]
 );
 case!(
-    #[ignore = "parity: JSON versioning.status is empty in mc"]
     version_enable_json,
     json,
     empty(),
@@ -679,6 +725,18 @@ case!(
     json,
     versioned(),
     ["version", "info", "{target}"]
+);
+case!(
+    version_suspend_text,
+    text,
+    versioned(),
+    ["version", "suspend", "{target}"]
+);
+case!(
+    version_suspend_json,
+    json,
+    versioned(),
+    ["version", "suspend", "{target}"]
 );
 case!(
     version_info_unversioned_text,
@@ -729,6 +787,132 @@ case!(
     ["anonymous", "get", "{target}"]
 );
 
+fn public_prefix() -> Option<Parity> {
+    with_setup(empty(), &["anonymous", "set", "download", "{target}/pub/"])
+}
+
+case!(
+    anonymous_list_text,
+    text,
+    public_prefix(),
+    ["anonymous", "list", "{target}"]
+);
+case!(
+    anonymous_list_json,
+    json,
+    public_prefix(),
+    ["anonymous", "list", "{target}"]
+);
+case!(
+    anonymous_list_missing_bucket_text,
+    text,
+    bare(),
+    ["anonymous", "list", "{target}"]
+);
+case!(
+    anonymous_set_prefix_text,
+    text,
+    empty(),
+    ["anonymous", "set", "upload", "{target}/drop/"]
+);
+
+// ---------------------------------------------------------------------------
+// cors / encrypt / event
+// ---------------------------------------------------------------------------
+
+case!(
+    cors_get_missing_text,
+    text,
+    empty(),
+    ["cors", "get", "{target}"]
+);
+case!(
+    cors_get_missing_json,
+    json,
+    empty(),
+    ["cors", "get", "{target}"]
+);
+case!(
+    encrypt_info_missing_text,
+    text,
+    empty(),
+    ["encrypt", "info", "{target}"]
+);
+case!(
+    encrypt_info_missing_json,
+    json,
+    empty(),
+    ["encrypt", "info", "{target}"]
+);
+
+fn encrypted() -> Option<Parity> {
+    with_setup(empty(), &["encrypt", "set", "sse-s3", "{target}"])
+}
+
+case!(
+    encrypt_set_text,
+    text,
+    empty(),
+    ["encrypt", "set", "sse-s3", "{target}"]
+);
+case!(
+    encrypt_set_json,
+    json,
+    empty(),
+    ["encrypt", "set", "sse-s3", "{target}"]
+);
+case!(
+    encrypt_info_text,
+    text,
+    encrypted(),
+    ["encrypt", "info", "{target}"]
+);
+case!(
+    encrypt_info_json,
+    json,
+    encrypted(),
+    ["encrypt", "info", "{target}"]
+);
+case!(
+    event_ls_empty_text,
+    text,
+    empty(),
+    ["event", "ls", "{target}"]
+);
+case!(
+    event_ls_empty_json,
+    json,
+    empty(),
+    ["event", "ls", "{target}"]
+);
+
+/// Bucket with a `put` event on the webhook target of tests/minio.env (MX_TEST_NOTIFY_ARN).
+fn with_event() -> Option<Parity> {
+    let Ok(arn) = std::env::var("MX_TEST_NOTIFY_ARN") else {
+        eprintln!("skipping; set MX_TEST_NOTIFY_ARN");
+        return None;
+    };
+    with_setup(
+        empty(),
+        &[
+            "event", "add", "{target}", &arn, "--event", "put", "--suffix", ".jpg",
+        ],
+    )
+}
+
+case!(
+    event_ls_text,
+    text,
+    with_event(),
+    ["event", "ls", "{target}"]
+);
+case!(
+    event_ls_json,
+    json,
+    with_event(),
+    ["event", "ls", "{target}"]
+);
+
 fn with_rule() -> Option<Parity> {
     with_setup(
         empty(),
@@ -758,17 +942,50 @@ case!(
     ["ilm", "rule", "add", "--expire-days", "30", "{target}"]
 );
 case!(
-    #[ignore = "parity: table cell alignment (mc left-aligns ID, right-aligns days)"]
     ilm_rule_ls_text,
     text,
     with_rule(),
     ["ilm", "rule", "ls", "{target}"]
 );
 case!(
-    #[ignore = "parity: JSON missing `updatedAt`"]
     ilm_rule_ls_json,
     json,
     with_rule(),
+    ["ilm", "rule", "ls", "{target}"]
+);
+
+fn with_noncurrent_rule() -> Option<Parity> {
+    with_setup(
+        with_rule(),
+        &[
+            "ilm",
+            "rule",
+            "add",
+            "--noncurrent-expire-days",
+            "5",
+            "--noncurrent-expire-newer",
+            "3",
+            "{target}",
+        ],
+    )
+}
+
+case!(
+    ilm_rule_ls_noncurrent_text,
+    text,
+    with_noncurrent_rule(),
+    ["ilm", "rule", "ls", "{target}"]
+);
+case!(
+    ilm_rule_ls_noncurrent_json,
+    json,
+    with_noncurrent_rule(),
+    ["ilm", "rule", "ls", "{target}"]
+);
+case!(
+    ilm_rule_ls_missing_text,
+    text,
+    empty(),
     ["ilm", "rule", "ls", "{target}"]
 );
 
@@ -821,7 +1038,6 @@ case!(
     ["retention", "set", "GOVERNANCE", "1d", "{target}/a.txt"]
 );
 case!(
-    #[ignore = "parity: JSON missing `error:null`; validity empty in mc"]
     retention_set_object_json,
     json,
     locked(),
@@ -836,18 +1052,83 @@ fn retained() -> Option<Parity> {
 }
 
 case!(
-    #[ignore = "parity: extra trailing blank line"]
     retention_info_object_text,
     text,
     retained(),
     ["retention", "info", "{target}/a.txt"]
 );
 case!(
-    #[ignore = "parity: JSON missing `error:null`"]
     retention_info_object_json,
     json,
     retained(),
     ["retention", "info", "{target}/a.txt"]
+);
+case!(
+    retention_info_recursive_text,
+    text,
+    retained(),
+    ["retention", "info", "-r", "{target}"]
+);
+case!(
+    retention_info_recursive_json,
+    json,
+    retained(),
+    ["retention", "info", "-r", "{target}"]
+);
+case!(
+    retention_clear_object_text,
+    text,
+    retained(),
+    ["retention", "clear", "{target}/a.txt"]
+);
+case!(
+    retention_info_missing_text,
+    text,
+    locked(),
+    ["retention", "info", "{target}/nope.txt"]
+);
+case!(
+    retention_info_missing_json,
+    json,
+    locked(),
+    ["retention", "info", "{target}/nope.txt"]
+);
+case!(
+    retention_set_default_missing_bucket_text,
+    text,
+    bare(),
+    [
+        "retention",
+        "set",
+        "--default",
+        "GOVERNANCE",
+        "30d",
+        "{target}"
+    ]
+);
+case!(
+    legalhold_info_missing_text,
+    text,
+    locked(),
+    ["legalhold", "info", "{target}/nope.txt"]
+);
+case!(
+    legalhold_info_missing_json,
+    json,
+    locked(),
+    ["legalhold", "info", "{target}/nope.txt"]
+);
+case!(
+    legalhold_set_missing_text,
+    text,
+    locked(),
+    ["legalhold", "set", "{target}/nope.txt"]
+);
+case!(
+    legalhold_info_missing_bucket_text,
+    text,
+    bare(),
+    ["legalhold", "info", "{target}/a.txt"]
 );
 case!(
     legalhold_set_text,
@@ -862,7 +1143,6 @@ case!(
     ["legalhold", "set", "{target}/a.txt"]
 );
 case!(
-    #[ignore = "parity: status padding `[  Not set ]`"]
     legalhold_info_text,
     text,
     locked(),
@@ -879,29 +1159,15 @@ case!(
 // alias
 // ---------------------------------------------------------------------------
 
+case!(alias_list_text, text, bare(), ["alias", "list"]);
+case!(alias_list_json, json, bare(), ["alias", "list"]);
 case!(
-    #[ignore = "parity: table layout, mc prints per-alias block `name<NL>  URL       : ...`"]
-    alias_list_text,
-    text,
-    bare(),
-    ["alias", "list"]
-);
-case!(
-    #[ignore = "parity: JSON pretty-printed, mc prints compact one-line docs"]
-    alias_list_json,
-    json,
-    bare(),
-    ["alias", "list"]
-);
-case!(
-    #[ignore = "parity: table layout, mc prints per-alias block `name<NL>  URL       : ...`"]
     alias_list_one_text,
     text,
     bare(),
     ["alias", "list", "{alias}"]
 );
 case!(
-    #[ignore = "parity: JSON pretty-printed, mc prints compact one-line docs"]
     alias_list_one_json,
     json,
     bare(),
@@ -966,19 +1232,112 @@ case!(
         "sk12345678"
     ]
 );
-case!(
-    #[ignore = "parity: JSON missing empty `URL` field"]
-    alias_remove_json,
-    json,
-    bare(),
-    ["alias", "remove", "gcs"]
-);
+case!(alias_remove_json, json, bare(), ["alias", "remove", "gcs"]);
 case!(
     alias_remove_missing_text,
     text,
     bare(),
     ["alias", "remove", "nosuch"]
 );
+
+case!(
+    alias_export_text,
+    text,
+    bare(),
+    ["alias", "export", "{alias}"]
+);
+case!(
+    alias_export_json,
+    json,
+    bare(),
+    ["alias", "export", "{alias}"]
+);
+case!(
+    alias_export_missing_text,
+    text,
+    bare(),
+    ["alias", "export", "nosuch"]
+);
+case!(
+    alias_import_empty_text,
+    text,
+    bare(),
+    ["alias", "import", "extra"],
+    b""
+);
+
+/// Credentials document as `mc alias export` prints it, for `alias import` on stdin.
+fn import_doc() -> Vec<u8> {
+    format!(
+        r#"{{"url":"{}","accessKey":"{}","secretKey":"{}","api":"s3v4","path":"auto"}}"#,
+        std::env::var("MX_TEST_URL").unwrap_or_default(),
+        std::env::var("MX_TEST_ACCESS_KEY").unwrap_or_default(),
+        std::env::var("MX_TEST_SECRET_KEY").unwrap_or_default(),
+    )
+    .into_bytes()
+}
+
+#[test]
+fn alias_import_text() {
+    let Some(p) = bare() else { return };
+    p.assert_parity(&["alias", "import", "extra"], Some(&import_doc()));
+    p.assert_parity(&["alias", "list", "extra"], None);
+}
+
+#[test]
+fn alias_import_json() {
+    let Some(p) = bare() else { return };
+    p.assert_json_parity(&["--json", "alias", "import", "extra"], Some(&import_doc()));
+}
+
+// ---------------------------------------------------------------------------
+// ping / ready
+// ---------------------------------------------------------------------------
+
+/// `ping` prints response times padded to 8 columns (`0.51ms  `, `25.16ms `) and nanosecond
+/// stats; the standard rules have already turned the times into `<DURATION>`.
+fn pinged(p: Option<Parity>) -> Option<Parity> {
+    let mut p = p?;
+    p.normalizer
+        .rule(r"time=<DURATION> *", "time=<PING>")
+        .rule(r"<DURATION> +│", "<PING> │")
+        .rule(r#""time":\s*"[^"]*""#, r#""time":"<PING>""#)
+        .rule(r#"("(?:min|max|sum|avg|dns)":\s*)\d+"#, "${1}0");
+    Some(p)
+}
+
+case!(
+    ping_text,
+    text,
+    pinged(bare()),
+    ["ping", "-c", "1", "{alias}"]
+);
+case!(
+    ping_json,
+    json,
+    pinged(bare()),
+    ["ping", "-c", "1", "{alias}"]
+);
+case!(
+    ping_distributed_text,
+    text,
+    pinged(bare()),
+    ["ping", "-c", "1", "-a", "{alias}"]
+);
+case!(
+    ping_distributed_json,
+    json,
+    pinged(bare()),
+    ["ping", "-c", "1", "-a", "{alias}"]
+);
+case!(
+    ping_node_missing_text,
+    text,
+    pinged(bare()),
+    ["ping", "-c", "1", "--node", "nosuch:9000", "{alias}"]
+);
+case!(ready_text, text, bare(), ["ready", "{alias}"]);
+case!(ready_json, json, bare(), ["ready", "{alias}"]);
 
 // ---------------------------------------------------------------------------
 // mirror
@@ -1066,15 +1425,16 @@ case!(err_unknown_command_text, text, bare(), ["bogus"]);
 // --version
 // ---------------------------------------------------------------------------
 
-#[ignore = "parity: mc prints 4-line version block"]
 #[test]
 fn version_shape() {
     let Some(mut p) = bare() else { return };
-    // Compare the shape only: release tag, commit, runtime and copyright year vary.
+    // Compare the shape only: release tag, commit, runtime, copyright holder and license are
+    // mx's own (intentional difference, see COMPATIBILITY.md).
     p.normalizer
         .rule(r"RELEASE\.[0-9TZ-]+", "<RELEASE>")
         .rule(r"commit-id=[0-9a-f]+", "commit-id=<COMMIT>")
         .rule(r"Runtime: .*", "Runtime: <RUNTIME>")
-        .rule(r"2015-\d{4}", "2015-<YEAR>");
+        .rule(r"Copyright \(c\) .*", "Copyright (c) <HOLDER>")
+        .rule(r"License .*", "License <LICENSE>");
     p.assert_parity(&["--version"], None);
 }

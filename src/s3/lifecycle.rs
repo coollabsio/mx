@@ -494,11 +494,52 @@ impl Filter {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LifecycleInfo {
     pub config: LifecycleConfig,
-    pub updated_at: Option<String>,
+    /// Go `time.Time` JSON form (RFC3339Nano, zero time when the server sends none).
+    pub updated_at: String,
+}
+
+/// `20260926T163004Z` (minio-go `iso8601DateFormat` header) -> Go RFC3339 JSON form
+/// `2026-09-26T16:30:04Z`; the zero time when the server sends none.
+fn go_time(header: Option<&str>) -> String {
+    let value = header.unwrap_or_default();
+    let digits = |range: std::ops::Range<usize>| {
+        value
+            .get(range)
+            .filter(|part| part.bytes().all(|b| b.is_ascii_digit()))
+    };
+    match (
+        digits(0..4),
+        digits(4..6),
+        digits(6..8),
+        digits(9..11),
+        digits(11..13),
+        digits(13..15),
+    ) {
+        (Some(y), Some(mo), Some(d), Some(h), Some(mi), Some(s)) if value.len() == 16 => {
+            format!("{y}-{mo}-{d}T{h}:{mi}:{s}Z")
+        }
+        _ => "0001-01-01T00:00:00Z".to_string(),
+    }
 }
 
 /// Returns None when the bucket has no lifecycle configuration.
 pub async fn get_lifecycle(alias: &AliasConfig, bucket: &str) -> Result<Option<LifecycleInfo>> {
+    fetch_lifecycle(alias, bucket, true).await
+}
+
+/// Like [`get_lifecycle`], but a missing configuration is the server's error (mc `ilm rule ls`
+/// / `export`).
+pub async fn get_lifecycle_required(alias: &AliasConfig, bucket: &str) -> Result<LifecycleInfo> {
+    Ok(fetch_lifecycle(alias, bucket, false)
+        .await?
+        .unwrap_or_default())
+}
+
+async fn fetch_lifecycle(
+    alias: &AliasConfig,
+    bucket: &str,
+    missing_ok: bool,
+) -> Result<Option<LifecycleInfo>> {
     let client = build_client(alias).await?;
     let capture = Capture::default();
     match client
@@ -506,6 +547,11 @@ pub async fn get_lifecycle(alias: &AliasConfig, bucket: &str) -> Result<Option<L
         .bucket(bucket)
         .customize()
         .config_override(capture.config())
+        // minio-go asks MinIO for the `X-Minio-LifecycleConfig-UpdatedAt` header.
+        .mutate_request(|request| {
+            let uri = format!("{}&withUpdatedAt=true", request.uri());
+            let _ = request.set_uri(uri);
+        })
         .send()
         .await
     {
@@ -515,12 +561,12 @@ pub async fn get_lifecycle(alias: &AliasConfig, bucket: &str) -> Result<Option<L
                 .ok_or_else(|| anyhow!("empty lifecycle response"))?;
             Ok(Some(LifecycleInfo {
                 config: LifecycleConfig::from_xml(&raw.body_text())?,
-                updated_at: raw
-                    .header("x-minio-lifecycleconfig-updatedat")
-                    .map(str::to_string),
+                updated_at: go_time(raw.header("x-minio-lifecycleconfig-updatedat")),
             }))
         }
-        Err(error) if has_error_code(&error, &["NoSuchLifecycleConfiguration"]) => Ok(None),
+        Err(error) if missing_ok && has_error_code(&error, &["NoSuchLifecycleConfiguration"]) => {
+            Ok(None)
+        }
         Err(error) => Err(super::error::s3_error(&error, bucket, "")),
     }
 }
@@ -560,6 +606,13 @@ pub async fn put_lifecycle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updated_at_header_becomes_go_time() {
+        assert_eq!(go_time(Some("20260926T163542Z")), "2026-09-26T16:35:42Z");
+        assert_eq!(go_time(None), "0001-01-01T00:00:00Z");
+        assert_eq!(go_time(Some("garbage")), "0001-01-01T00:00:00Z");
+    }
 
     fn sample() -> LifecycleConfig {
         LifecycleConfig {

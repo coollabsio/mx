@@ -424,7 +424,8 @@ fn live_version_excluded_prefixes() {
             .success(),
     );
     assert_eq!(lines[0]["Op"], "enable");
-    assert_eq!(lines[0]["versioning"]["status"], "Enabled");
+    // mc leaves the `versioning` object of enable/suspend messages empty.
+    assert_eq!(lines[0]["versioning"]["status"], "");
 }
 
 #[test]
@@ -597,7 +598,9 @@ fn live_ilm_rules() {
         .args(["ilm", "rule", "ls", &target])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("lifecycle configuration not set"));
+        .stderr(predicate::str::contains(
+            "Unable to get lifecycle. The lifecycle configuration does not exist.",
+        ));
     live.cmd()
         .args([
             "ilm",
@@ -835,11 +838,14 @@ fn live_ping_and_ready() {
 fn live_encrypt_sse_s3_and_kms() {
     let Some(live) = Live::new() else { return };
     let target = live.bucket_target();
+    // mc: a bucket without auto encryption is the server's "not found" error.
     live.cmd()
         .args(["encrypt", "info", &target])
         .assert()
-        .success()
-        .stdout(format!("Auto encryption is not enabled for {target} \n"));
+        .failure()
+        .stderr(predicate::str::contains(
+            "Unable to get encryption info. The server side encryption configuration was not found.",
+        ));
     live.cmd()
         .args(["encrypt", "set", "sse-s3", &target])
         .assert()
@@ -889,8 +895,8 @@ fn live_encrypt_sse_s3_and_kms() {
     live.cmd()
         .args(["encrypt", "info", &target])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("not enabled"));
+        .failure()
+        .stderr(predicate::str::contains("configuration was not found"));
 }
 
 #[test]

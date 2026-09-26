@@ -5,6 +5,7 @@ use crate::commands::runtime;
 use crate::commands::util::require_s3;
 use crate::commands::{ilm_restore, ilm_tier};
 use crate::config::ConfigStore;
+use crate::error::McError;
 use crate::flags::TargetArg;
 use crate::output;
 use crate::s3::lifecycle::{And, Filter, LifecycleConfig, LifecycleRule, Tag};
@@ -616,15 +617,24 @@ fn edit(args: IlmRuleEditArgs, json: bool) -> Result<()> {
     )
 }
 
-fn fetch_existing(target_arg: &str, action: &str) -> Result<crate::s3::lifecycle::LifecycleInfo> {
+/// mc: server errors (including a missing configuration) are fatal with `get_context`; an
+/// empty rule list is "lifecycle configuration not set".
+fn fetch_existing(
+    target_arg: &str,
+    action: &str,
+    get_context: &'static str,
+) -> Result<crate::s3::lifecycle::LifecycleInfo> {
     let target = bucket_target(target_arg)?;
     let info = runtime()?
-        .block_on(crate::s3::get_lifecycle(&target.alias, &target.bucket))
-        .context("Unable to get lifecycle")?
-        .filter(|info| !info.config.rules.is_empty())
-        .ok_or_else(|| {
-            anyhow!("Unable to {action} lifecycle configuration: lifecycle configuration not set")
-        })?;
+        .block_on(crate::s3::get_lifecycle_required(
+            &target.alias,
+            &target.bucket,
+        ))
+        .context(get_context)?;
+    if info.config.rules.is_empty() {
+        return Err(McError::new("lifecycle configuration not set"))
+            .context(format!("Unable to {action} lifecycle configuration"));
+    }
     Ok(info)
 }
 
@@ -633,12 +643,12 @@ struct ConfigMessage<'a> {
     status: &'a str,
     target: &'a str,
     config: &'a LifecycleConfig,
-    #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
-    updated_at: Option<&'a str>,
+    #[serde(rename = "updatedAt")]
+    updated_at: &'a str,
 }
 
 fn list(args: IlmRuleListArgs, json: bool) -> Result<()> {
-    let mut info = fetch_existing(&args.target, "ls")?;
+    let mut info = fetch_existing(&args.target, "ls", "Unable to get lifecycle")?;
     info.config.rules.retain(|rule| {
         if args.expiry {
             !rule.expiration.is_null()
@@ -655,7 +665,7 @@ fn list(args: IlmRuleListArgs, json: bool) -> Result<()> {
             status: "success",
             target: &args.target,
             config: &info.config,
-            updated_at: info.updated_at.as_deref(),
+            updated_at: &info.updated_at,
         })?;
         return Ok(());
     }
@@ -768,19 +778,26 @@ pub fn rule_tables(config: &LifecycleConfig) -> Vec<String> {
     ]
     .into_iter()
     .filter(|(_, _, rows)| !rows.is_empty())
-    .map(|(title, headers, rows)| render_table(Some(title), &headers, &rows))
+    .map(|(title, headers, rows)| {
+        // Integer cells (days, keep versions) are Go ints: go-pretty right-aligns them.
+        let numeric = if headers[5] == "Keep Versions" {
+            &[4, 5][..]
+        } else {
+            &[4][..]
+        };
+        render_table(Some(title), &headers, &rows, numeric)
+    })
     .collect()
 }
 
-fn center(text: &str, width: usize) -> String {
-    let len = text.chars().count();
-    let left = (width.saturating_sub(len)) / 2;
-    let right = width.saturating_sub(len) - left;
-    format!("{}{text}{}", " ".repeat(left), " ".repeat(right))
-}
-
-/// Box table in go-pretty `StyleLight` (upper-case headers, centered cells).
-pub fn render_table(title: Option<&str>, headers: &[&str], rows: &[Vec<String>]) -> String {
+/// Box table in go-pretty `StyleLight` (upper-case headers, left-aligned cells; columns in
+/// `numeric` hold numbers, which go-pretty right-aligns).
+pub fn render_table(
+    title: Option<&str>,
+    headers: &[&str],
+    rows: &[Vec<String>],
+    numeric: &[usize],
+) -> String {
     let headers = headers
         .iter()
         .map(|header| header.to_ascii_uppercase())
@@ -811,11 +828,18 @@ pub fn render_table(title: Option<&str>, headers: &[&str], rows: &[Vec<String>])
             .collect::<Vec<_>>();
         format!("{left}{}{right}\n", parts.join(mid))
     };
-    let row_text = |cells: &[String]| {
+    let row_text = |cells: &[String], header: bool| {
         let parts = cells
             .iter()
             .zip(&widths)
-            .map(|(cell, width)| format!(" {} ", center(cell, *width)))
+            .enumerate()
+            .map(|(index, (cell, width))| {
+                if !header && numeric.contains(&index) {
+                    format!(" {cell:>width$} ")
+                } else {
+                    format!(" {cell:<width$} ")
+                }
+            })
             .collect::<Vec<_>>();
         format!("│{}│\n", parts.join("│"))
     };
@@ -827,10 +851,10 @@ pub fn render_table(title: Option<&str>, headers: &[&str], rows: &[Vec<String>])
     } else {
         out.push_str(&line("┌", "┬", "┐"));
     }
-    out.push_str(&row_text(&headers));
+    out.push_str(&row_text(&headers, true));
     out.push_str(&line("├", "┼", "┤"));
     for row in rows {
-        out.push_str(&row_text(row));
+        out.push_str(&row_text(row, false));
     }
     out.push_str(&line("└", "┴", "┘"));
     out
@@ -894,13 +918,17 @@ fn remove(args: IlmRuleRemoveArgs, json: bool) -> Result<()> {
 }
 
 fn export(target_arg: &str, json: bool) -> Result<()> {
-    let info = fetch_existing(target_arg, "export")?;
+    let info = fetch_existing(
+        target_arg,
+        "export",
+        "Unable to get lifecycle configuration",
+    )?;
     if json {
         crate::output::print_json(&ConfigMessage {
             status: "success",
             target: target_arg,
             config: &info.config,
-            updated_at: info.updated_at.as_deref(),
+            updated_at: &info.updated_at,
         })?;
     } else {
         println!("{}", crate::output::json_indent(&info.config)?);
