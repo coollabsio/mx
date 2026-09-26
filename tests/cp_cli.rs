@@ -268,7 +268,8 @@ fn cp_json_prints_mc_copy_messages() {
     assert_eq!(copies[0]["status"], "success");
     assert_eq!(copies[0]["size"], 2);
     assert_eq!(copies[0]["totalCount"], 2);
-    assert_eq!(copies[0]["totalSize"], 5);
+    // mc never fills in totalSize (shadowed running total in cp-main.go).
+    assert_eq!(copies[0]["totalSize"], 0);
     assert_eq!(copies[0]["target"], s(&out.join("src/a.txt")));
     assert_eq!(copies[1]["target"], s(&out.join("src/sub/b.txt")));
     let summary = &lines[2];

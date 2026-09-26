@@ -17,11 +17,11 @@ server support that varies between S3-compatible servers.
 | `rb` | Supported | Takes multiple targets. `--force` deletes objects and versions first. `--force --dangerous ALIAS` removes all buckets. |
 | `stat` | Supported | mc layout. `-r`, `--versions`, `--version-id`, `--rewind`, `-v`, `--no-list`. JSON keeps `size`. `type` is `file` or `folder`. |
 | `cat` | Supported | Takes multiple targets. `--rewind`, `--version-id`, `--zip`, `--offset`, `--tail`, `--part-number`, `--enc-c`. |
-| `head` | Supported | `-n`, `--rewind`, `--version-id`, `--zip`, `--enc-c`. Also works on local files. |
-| `get` | Supported | `--version-id`, `--enc-c`. |
-| `put` / `out` | Supported | Takes multiple sources and stdin (`-`). `-P`, `-s`, `--storage-class`, `--disable-multipart`, `--checksum`, `--enc-c/--enc-s3/--enc-kms`, `--if-not-exists`. |
-| `pipe` | Supported | Bounded-memory multipart upload. `--storage-class`, `--attr`, `--tags`, `--concurrent`, `--part-size`, `--checksum`, SSE flags. Global `-q`. |
-| `cp`, `mv` | Supported | Follow mc rules for multiple sources and `-r` in every direction: local↔S3, S3→S3 (also across servers), and local→local. Flags: `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--tags`, `--checksum`, `--disable-multipart`, `-a/--preserve` (mc-attrs), `--enc-c/--enc-s3/--enc-kms`, `--rewind`, `--version-id`, `--legal-hold`, `--retention-mode/--retention-duration`, `--zip`, `--max-workers` (`--rewind`, `--version-id`, `--legal-hold`, `--retention-*`, `--zip`, and `--max-workers` are `cp` only). Objects larger than 5 GiB use server-side multipart copy. They show a progress bar on a TTY. Otherwise they print mc's `` `SRC` -> `TGT` `` lines and a summary. |
+| `head` | Supported | `-n`, `--rewind`, `--version-id`, `--zip`, `--enc-c`. Also works on local files. Like mc, it decompresses objects whose Content-Type mentions `gzip` or `bzip` (local files: by extension). |
+| `get` | Supported | `--version-id`, `--enc-c`. mc `cp`-style output: `` `SRC` -> `TGT` `` and the summary (JSON: copy message with `size` 0 and summary; mc never stats the source, so `total` is 0). Setup errors (`Source is not s3.` ...) exit 0 like mc. The target may be omitted (current folder). |
+| `put` / `out` | Supported | `-P`, `-s`, `--storage-class`, `--disable-multipart`, `--checksum`, `--enc-c/--enc-s3/--enc-kms`, `--if-not-exists`. mc `cp`-style output (absolute source path, summary table; JSON `totalCount`/`totalSize` are 0 like mc). Content-Type is guessed from the file extension. Setup errors (missing file, folder source) are reported and exit 0 like mc. Multiple sources and stdin (`-`) are mx extensions. |
+| `pipe` | Supported | Bounded-memory multipart upload. `--storage-class`, `--attr`, `--tags`, `--concurrent`, `--part-size`, `--checksum`, SSE flags. Like mc it writes the progress residue `\r 0 B / ? ` to stdout (refreshed on a TTY) before the `N bytes -> TARGET` line unless `-q`/`--json`; the result line is printed with `-q` too. Content-Type is guessed from the target name. |
+| `cp`, `mv` | Supported | Follow mc rules for multiple sources and `-r` in every direction: local↔S3, S3→S3 (also across servers), and local→local. Flags: `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--tags`, `--checksum`, `--disable-multipart`, `-a/--preserve` (mc-attrs, xattrs uploaded as user metadata, source tags kept on a streamed copy between servers), `--enc-c/--enc-s3/--enc-kms`, `--rewind`, `--version-id`, `--legal-hold`, `--retention-mode/--retention-duration`, `--zip`, `--max-workers` (`--rewind`, `--version-id`, `--legal-hold`, `--retention-*`, `--zip`, and `--max-workers` are `cp` only). Objects larger than 5 GiB use server-side multipart copy. They show a progress bar on a TTY. Otherwise they print mc's `` `SRC` -> `TGT` `` lines (local sources as absolute paths) and a summary; JSON `totalSize` is always 0 like mc. Uploads from local files send the Content-Type guessed from the extension. |
 | `rm` | Supported | Takes multiple targets. `-r --force`, `--versions`, `--version-id`, `--non-current`, `--rewind`, `--dangerous`, `-I`, `--dry-run`, `--stdin`, `--older-than`, `--newer-than`, `--bypass`, `--purge`. Output lines and JSON match mc. |
 | `mirror` | Supported | Works in every direction, including from or to an alias root. Uses mc's change detection. `--overwrite`, `--remove`, `--dry-run`, `-w/--watch` (polling rescan), `--region`, `-a`, `--active-active`, `--disable-multipart`, `--exclude`, `--exclude-bucket`, `--exclude-storageclass`, `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--retry`, `--summary`, `--skip-errors`, `--max-workers`, `--checksum`, SSE flags. `--monitoring-address` is not supported. |
 | `du` | Supported | `-r`, `-d`, `--versions`, `--rewind`. S3 aliases and local paths. |
@@ -104,12 +104,15 @@ server support that varies between S3-compatible servers.
 - `mirror -w` and `find --watch` rescan by polling. They do not use event
   notifications.
 - `find` prints relative paths by default.
+- `pipe`: mc reads `--json`/`--quiet` for its progress residue only when they follow the
+  command name, so `mc --json pipe` prints ` 0 B / ? ` before the JSON document. mx drops the
+  residue whenever `--json`/`-q` is set.
+- `cp`/`mv --json` `totalCount` is the number of planned copies. mc reads its URL counter
+  while the listing is still running, so its value varies between runs.
 - `stat`, `ls --versions`, and similar output show dates in UTC.
 
 ## Remaining gaps
 
-- `cp`/`mv`: no content-type guessing and no xattrs. `--tags` is not applied
-  on a streamed copy between two servers.
 - Output is close to mc but not byte-for-byte identical. Missing: mc's `ls`
   line format and some per-command JSON field sets. Some errors differ where mc
   depends on minio-go internals (bucket location lookups).

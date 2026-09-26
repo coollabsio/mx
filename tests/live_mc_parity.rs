@@ -79,6 +79,14 @@ fn transfer(p: Option<Parity>) -> Option<Parity> {
     Some(p)
 }
 
+/// `pipe` draws a progress counter that mc refreshes on a timer (` 6 B / ?  <SPEED>` frames
+/// after the initial ` 0 B / ? `); drop the timing-dependent refresh frames.
+fn piping(p: Option<Parity>) -> Option<Parity> {
+    let mut p = p?;
+    p.normalizer.rule(r"\r [^\r]* / \?  <SPEED>", "");
+    Some(p)
+}
+
 /// Parallel transfers (`cp -r`, `mirror`): mc output order is not deterministic.
 fn parallel(p: Option<Parity>) -> Option<Parity> {
     let mut p = p?;
@@ -303,13 +311,7 @@ case!(rb_not_empty_json, json, seeded(), ["rb", "{target}"]);
 // ---------------------------------------------------------------------------
 
 case!(rm_single_text, text, seeded(), ["rm", "{target}/a.txt"]);
-case!(
-    #[ignore = "parity: JSON pretty-printed / key order"]
-    rm_single_json,
-    json,
-    seeded(),
-    ["rm", "{target}/a.txt"]
-);
+case!(rm_single_json, json, seeded(), ["rm", "{target}/a.txt"]);
 case!(
     rm_recursive_text,
     text,
@@ -317,7 +319,6 @@ case!(
     ["rm", "-r", "--force", "{target}/dir/"]
 );
 case!(
-    #[ignore = "parity: JSON pretty-printed / key order"]
     rm_recursive_json,
     json,
     seeded(),
@@ -330,7 +331,6 @@ case!(
     ["rm", "-r", "--force", "--versions", "{target}"]
 );
 case!(
-    #[ignore = "parity: JSON pretty-printed / key order"]
     rm_versions_json,
     json,
     versioned(),
@@ -342,21 +342,18 @@ case!(
 // ---------------------------------------------------------------------------
 
 case!(
-    #[ignore = "parity: local source printed as absolute path"]
     cp_upload_text,
     text,
     transfer(seeded()),
     ["cp", "src/one.txt", "{target}/up/one.txt"]
 );
 case!(
-    #[ignore = "parity: local source is absolute path; totalSize 0"]
     cp_upload_json,
     json,
     seeded(),
     ["cp", "src/one.txt", "{target}/up/one.txt"]
 );
 case!(
-    #[ignore = "parity: local source printed as absolute path"]
     cp_upload_quiet,
     text,
     transfer(seeded()),
@@ -369,21 +366,18 @@ case!(
     ["cp", "{target}/a.txt", "out.txt"]
 );
 case!(
-    #[ignore = "parity: JSON totalSize is 0 in mc"]
     cp_download_json,
     json,
     seeded(),
     ["cp", "{target}/a.txt", "out.txt"]
 );
 case!(
-    #[ignore = "parity: local source printed as absolute path"]
     cp_recursive_upload_text,
     text,
     parallel(transfer(seeded())),
     ["cp", "-r", "src/", "{target}/up/"]
 );
 case!(
-    #[ignore = "parity: local source is absolute path; totalSize 0"]
     cp_recursive_upload_json,
     json,
     parallel(seeded()),
@@ -396,7 +390,6 @@ case!(
     ["cp", "-r", "{target}/dir/", "down/"]
 );
 case!(
-    #[ignore = "parity: JSON totalSize is 0 in mc"]
     cp_recursive_download_json,
     json,
     parallel(seeded()),
@@ -409,21 +402,18 @@ case!(
     ["cp", "{target}/a.txt", "{target}/copy.txt"]
 );
 case!(
-    #[ignore = "parity: JSON totalSize is 0 in mc"]
     cp_server_side_json,
     json,
     seeded(),
     ["cp", "{target}/a.txt", "{target}/copy.txt"]
 );
 case!(
-    #[ignore = "parity: local source printed as absolute path"]
     mv_upload_text,
     text,
     transfer(seeded()),
     ["mv", "src/one.txt", "{target}/moved.txt"]
 );
 case!(
-    #[ignore = "parity: local source is absolute path; totalSize 0"]
     mv_upload_json,
     json,
     seeded(),
@@ -436,41 +426,125 @@ case!(
     ["mv", "{target}/a.txt", "{target}/moved.txt"]
 );
 case!(
-    #[ignore = "parity: JSON totalSize is 0 in mc"]
     mv_server_side_json,
     json,
     seeded(),
     ["mv", "{target}/a.txt", "{target}/moved.txt"]
 );
 case!(
-    #[ignore = "parity: mc cp-style output (`SRC -> TGT` + summary table)"]
     put_text,
     text,
     transfer(seeded()),
     ["put", "src/one.txt", "{target}/put.txt"]
 );
 case!(
-    #[ignore = "parity: mc cp-style JSON (size/totalCount/totalSize) + summary doc"]
     put_json,
     json,
     seeded(),
     ["put", "src/one.txt", "{target}/put.txt"]
 );
 case!(
-    #[ignore = "parity: mc emits progress residue ` 0 B / ? ` before result"]
     pipe_text,
     text,
-    transfer(seeded()),
+    piping(seeded()),
     ["pipe", "{target}/piped.txt"],
     b"piped\n"
 );
 case!(
-    #[ignore = "parity: key order; mc emits progress residue ` 0 B / ? `"]
+    pipe_quiet,
+    text,
+    piping(seeded()),
+    ["pipe", "-q", "{target}/piped.txt"],
+    b"piped\n"
+);
+// `mc --json pipe` also draws the progress residue before the JSON document (the command reads
+// its own `--json` flag); mx never corrupts JSON output, so compare the `pipe --json` form.
+case!(
     pipe_json,
+    text,
+    seeded(),
+    ["pipe", "--json", "{target}/piped.txt"],
+    b"piped\n"
+);
+case!(
+    put_quiet,
+    text,
+    transfer(seeded()),
+    ["put", "-q", "src/one.txt", "{target}/put.txt"]
+);
+case!(
+    put_into_folder_json,
     json,
     seeded(),
-    ["pipe", "{target}/piped.txt"],
-    b"piped\n"
+    ["put", "src/nested/two.txt", "{target}/up/"]
+);
+case!(
+    put_missing_text,
+    text,
+    seeded(),
+    ["put", "nope.txt", "{target}/put.txt"]
+);
+case!(
+    put_missing_json,
+    json,
+    seeded(),
+    ["put", "nope.txt", "{target}/put.txt"]
+);
+case!(put_folder_text, text, seeded(), ["put", "src", "{target}/"]);
+case!(
+    put_missing_bucket_text,
+    text,
+    seeded(),
+    ["put", "src/one.txt", "{target}-none/put.txt"]
+);
+case!(
+    get_text,
+    text,
+    transfer(seeded()),
+    ["get", "{target}/a.txt", "got.txt"]
+);
+case!(
+    get_json,
+    json,
+    seeded(),
+    ["get", "{target}/dir/b.txt", "./"]
+);
+case!(
+    get_missing_text,
+    text,
+    seeded(),
+    ["get", "{target}/nope.txt", "got.txt"]
+);
+case!(
+    get_missing_json,
+    json,
+    seeded(),
+    ["get", "{target}/nope.txt", "got.txt"]
+);
+case!(
+    get_not_s3_text,
+    text,
+    seeded(),
+    ["get", "src/one.txt", "got.txt"]
+);
+// mc reads `totalCount` while its URL producer is still counting (racy); zero the totals.
+case!(
+    cp_multi_json,
+    json,
+    mirrored(seeded()),
+    ["cp", "{target}/a.txt", "{target}/dir/b.txt", "multi/"]
+);
+case!(
+    cp_parent_relative_text,
+    text,
+    transfer(seeded()),
+    ["cp", "src/../src/./one.txt", "{target}/rel.txt"]
+);
+case!(
+    rm_dry_run_json,
+    json,
+    seeded(),
+    ["rm", "-r", "--force", "--dry-run", "{target}/dir/"]
 );
 
 // ---------------------------------------------------------------------------

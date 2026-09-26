@@ -538,15 +538,29 @@ impl RemoveMessage {
     }
 
     fn json(&self) -> String {
-        let value = serde_json::json!({
-            "status": "success",
-            "key": self.key,
-            "deleteMarker": self.delete_marker,
-            "versionID": self.version_id.clone().unwrap_or_default(),
-            "modTime": self.mod_time.map(rfc3339),
-            "dryRun": self.dry_run,
-        });
-        crate::output::json_string(&value).unwrap_or_default()
+        /// mc `rmMessage` (field order matters for byte parity).
+        #[derive(serde::Serialize)]
+        struct Json<'a> {
+            status: &'static str,
+            key: &'a str,
+            #[serde(rename = "deleteMarker")]
+            delete_marker: bool,
+            #[serde(rename = "versionID")]
+            version_id: &'a str,
+            #[serde(rename = "modTime")]
+            mod_time: Option<String>,
+            #[serde(rename = "dryRun")]
+            dry_run: bool,
+        }
+        crate::output::json_string(&Json {
+            status: "success",
+            key: &self.key,
+            delete_marker: self.delete_marker,
+            version_id: self.version_id.as_deref().unwrap_or_default(),
+            mod_time: self.mod_time.map(rfc3339),
+            dry_run: self.dry_run,
+        })
+        .unwrap_or_default()
     }
 }
 

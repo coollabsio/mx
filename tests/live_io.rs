@@ -521,6 +521,8 @@ fn live_pipe_flags() {
         );
     }
 
+    // mc: --quiet only drops the progress residue; the result line is still printed.
+    let quiet_line = format!("5 bytes -> `{}`\n", live.url("quiet.txt"));
     for quiet in [["pipe", "-q"], ["pipe", "--quiet"], ["-q", "pipe"]] {
         live.cmd()
             .args(quiet)
@@ -528,8 +530,14 @@ fn live_pipe_flags() {
             .write_stdin("quiet")
             .assert()
             .success()
-            .stdout("");
+            .stdout(quiet_line.clone());
     }
+    live.cmd()
+        .args(["pipe", &live.url("quiet.txt")])
+        .write_stdin("quiet")
+        .assert()
+        .success()
+        .stdout(format!("\r 0 B / ? {quiet_line}"));
     let output = live
         .cmd()
         .args(["--json", "pipe", &live.url("json.txt")])
@@ -655,4 +663,96 @@ fn live_find_filters_print_exec_and_watch() {
     child.kill().unwrap();
     child.wait().unwrap();
     assert_eq!(seen.as_deref(), Some("later/x.new"));
+}
+
+#[test]
+fn live_upload_content_type_guessing() {
+    let Some(live) = Live::new() else { return };
+    let sdk = Sdk::new(&live);
+    let html = live.local_file("page.html", "<p>hi</p>\n");
+    let json = live.local_file("data.JSON", "{}\n");
+    let raw = live.local_file("noext", "raw\n");
+    live.cmd()
+        .args(["put", html.to_str().unwrap(), &live.url("page.html")])
+        .assert()
+        .success();
+    live.cmd()
+        .args(["cp", json.to_str().unwrap(), &live.url("data")])
+        .assert()
+        .success();
+    live.cmd()
+        .args(["cp", raw.to_str().unwrap(), &live.url("noext")])
+        .assert()
+        .success();
+    // `--attr Content-Type` wins over the guess.
+    live.cmd()
+        .args([
+            "cp",
+            "--attr",
+            "Content-Type=text/x-custom",
+            html.to_str().unwrap(),
+            &live.url("custom.html"),
+        ])
+        .assert()
+        .success();
+    // `pipe` guesses from the target name.
+    pipe(&live, &[], &live.url("piped.csv"), "a,b\n");
+    for (key, expected) in [
+        ("page.html", "text/html"),
+        ("data", "application/json"),
+        ("noext", "application/octet-stream"),
+        ("custom.html", "text/x-custom"),
+        ("piped.csv", "text/csv"),
+    ] {
+        assert_eq!(
+            sdk.head(&live.bucket, key).content_type(),
+            Some(expected),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn live_head_decompresses_gzip_and_bzip2() {
+    use std::io::Write;
+    let Some(live) = Live::new() else { return };
+    let text: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(text.as_bytes()).unwrap();
+    let gz_path = live.home.path().join("log.txt.gz");
+    std::fs::write(&gz_path, gz.finish().unwrap()).unwrap();
+    let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+    bz.write_all(text.as_bytes()).unwrap();
+    let bz_path = live.home.path().join("log.txt.bz2");
+    std::fs::write(&bz_path, bz.finish().unwrap()).unwrap();
+    for path in [&gz_path, &bz_path] {
+        let name = path.file_name().unwrap().to_str().unwrap();
+        live.cmd()
+            .args(["cp", path.to_str().unwrap(), &live.url(name)])
+            .assert()
+            .success();
+        let expected = "line 1\nline 2\nline 3\n".as_bytes();
+        assert_eq!(
+            stdout(&live, &["head", "-n", "3", &live.url(name)]),
+            expected
+        );
+        // Local files are recognized by extension.
+        assert_eq!(
+            stdout(&live, &["head", "-n", "3", path.to_str().unwrap()]),
+            expected
+        );
+    }
+    // A gzip body stored with another content type is printed as is.
+    live.cmd()
+        .args([
+            "cp",
+            "--attr",
+            "Content-Type=application/octet-stream",
+            gz_path.to_str().unwrap(),
+            &live.url("opaque"),
+        ])
+        .assert()
+        .success();
+    let raw = stdout(&live, &["head", &live.url("opaque")]);
+    assert_eq!(&raw[..2], &[0x1f, 0x8b]);
 }

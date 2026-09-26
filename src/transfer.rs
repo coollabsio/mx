@@ -90,6 +90,34 @@ pub fn file_attrs(_path: &Path) -> Result<String> {
     anyhow::bail!("`--preserve` is not supported on this platform.")
 }
 
+/// Extended attributes mc uploads with `--preserve` (`getAllXattrs`): every attribute except
+/// `system.*`, sent as user metadata named after the attribute (`user.a` -> `X-Amz-Meta-User.a`).
+/// Best effort like mc: unsupported filesystems or read errors yield none. mc never restores
+/// xattrs on download.
+#[cfg(unix)]
+pub fn file_xattrs(path: &Path) -> Vec<(String, String)> {
+    let Ok(names) = xattr::list(path) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, String)> = names
+        .filter_map(|name| {
+            let name = name.to_str()?.to_string();
+            if name.starts_with("system.") {
+                return None;
+            }
+            let value = xattr::get(path, &name).ok().flatten().unwrap_or_default();
+            Some((name, String::from_utf8_lossy(&value).into_owned()))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[cfg(not(unix))]
+pub fn file_xattrs(_path: &Path) -> Vec<(String, String)> {
+    Vec::new()
+}
+
 /// Name for a numeric id from an `/etc/passwd`-style file (`name:x:id:...`).
 fn lookup_id_name(file: &str, id: u32) -> Option<String> {
     let text = std::fs::read_to_string(file).ok()?;

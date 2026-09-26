@@ -17,14 +17,17 @@ aws-smithy-types = { version = "1.4", features = ["http-body-1-x"] }
 aws-smithy-xml = "0.60"
 base64 = "0.22"
 bytes = "1"
+bzip2 = "0.6"
 clap = { version = "4.5", features = ["derive", "env"] }
 dirs = "6.0"
+flate2 = "1.1"
 http = "1"
 http-body = "1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "tls12"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 md-5 = "0.10"
+mime_guess = "2.0"
 regex = "1"
 rpassword = "7.3"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
@@ -42,3 +45,6 @@ url = "2.5"
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 assert_cmd = "2.0"
 predicates = "3.1"
+
+[target."cfg(unix)".dependencies]
+xattr = "1.6"
