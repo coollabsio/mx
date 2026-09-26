@@ -2,8 +2,10 @@
 //! stream upload (local/S3 -> S3 or local) or download (S3 -> local), like `mc od`.
 
 use crate::commands::retention::print_json;
+use crate::commands::util::TargetKind;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::error::McError;
 use crate::location::{Location, parse_location};
 use crate::s3::{GetOptions, MAX_PART_SIZE, MIN_PART_SIZE, PutOptions};
 use anyhow::{Context, Result, anyhow, bail};
@@ -48,9 +50,6 @@ fn parse_operands(operands: &[String]) -> Result<Operands> {
             "skip" => parsed.skip = Some(number(value)?),
             _ => bail!("unknown operand `{key}`: supported operands are if, of, size, parts, skip"),
         }
-    }
-    if parsed.input.is_empty() || parsed.output.is_empty() {
-        bail!("both if= and of= operands are required");
     }
     if parsed.parts.is_some_and(|parts| parts < 0) || parsed.skip.is_some_and(|skip| skip < 0) {
         bail!("parts and skip must not be negative");
@@ -203,6 +202,14 @@ impl Endpoint {
         }
     }
 
+    /// mc prints a local source as an absolute path.
+    fn source_display(&self) -> String {
+        match self {
+            Endpoint::Local(path) => crate::error::abs_path(&path.to_string_lossy()),
+            _ => self.display(),
+        }
+    }
+
     fn is_s3(&self) -> bool {
         matches!(self, Endpoint::S3 { .. })
     }
@@ -211,29 +218,40 @@ impl Endpoint {
 pub fn run(args: OdArgs, json: bool) -> Result<()> {
     let ops = parse_operands(&args.operands)?;
     let store = ConfigStore::load_or_create()?;
-    let source = Endpoint::resolve(&store, &ops.input)?;
-    let target = Endpoint::resolve(&store, &ops.output)?;
-    if let Endpoint::Local(path) = &source
-        && path.is_dir()
-    {
-        bail!(
+    let empty_path = || McError::new("Invalid path, path cannot be empty.");
+    if ops.input.is_empty() {
+        return Err(empty_path()).context("Unable to guess copy URL type.");
+    }
+    // mc `guessCopyURLType` stats the source first.
+    let kind = crate::commands::util::stat_target(&store, &ops.input)
+        .context("Unable to guess copy URL type.")?;
+    let urls_error = "Unable to get source and target URLs";
+    if kind == TargetKind::Folder {
+        return Err(anyhow!(
             "invalid source path {}, source cannot be a directory",
             ops.input
-        );
+        ))
+        .context(urls_error);
     }
+    if ops.output.is_empty() {
+        return Err(empty_path()).context("Unable to initialize target client.");
+    }
+    let source = Endpoint::resolve(&store, &ops.input)?;
+    let target = Endpoint::resolve(&store, &ops.output)?;
     if let Endpoint::Local(path) = &target
         && (path.is_dir() || ops.output.ends_with('/'))
     {
-        bail!(
+        return Err(anyhow!(
             "invalid source path {}, destination cannot be a directory",
             ops.output
-        );
+        ))
+        .context(urls_error);
     }
     let rt = runtime()?;
     let message = match (&source, &target) {
-        (Endpoint::S3 { .. }, Endpoint::Local(path)) => {
-            rt.block_on(download(&ops, &source, path))?
-        }
+        (Endpoint::S3 { .. }, Endpoint::Local(path)) => rt
+            .block_on(download(&ops, &source, path))
+            .context("Unable to transfer object")?,
         _ => rt.block_on(copy(&ops, &source, &target))?,
     };
     if json {
@@ -313,7 +331,8 @@ async fn copy(ops: &Operands, source: &Endpoint, target: &Endpoint) -> Result<Od
             };
             let size_hint = (combined > 0).then_some(combined as u64);
             crate::s3::upload_stream(&client, bucket, key, reader, size_hint, &options)
-                .await?
+                .await
+                .context("Unable to upload")?
                 .size
                 .unwrap_or(0)
         }
@@ -322,7 +341,7 @@ async fn copy(ops: &Operands, source: &Endpoint, target: &Endpoint) -> Result<Od
     Ok(OdMessage {
         status: "success",
         kind,
-        source: source.display(),
+        source: source.source_display(),
         target: target.display(),
         part_size,
         total_size: total,
@@ -433,7 +452,7 @@ mod tests {
                 skip: Some(1),
             }
         );
-        assert!(parse_operands(&["if=a".into()]).is_err());
+        assert_eq!(parse_operands(&["if=a".into()]).unwrap().output, "");
         assert!(parse_operands(&["if=a".into(), "of=b".into(), "bs=1".into()]).is_err());
         assert!(parse_operands(&["if=a".into(), "of".into()]).is_err());
         assert!(parse_operands(&["if=a".into(), "of=b".into(), "parts=x".into()]).is_err());

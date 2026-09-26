@@ -1,9 +1,11 @@
-use crate::commands::{alias_config, runtime};
+use crate::commands::runtime;
+use crate::commands::util::TargetKind;
 use crate::config::ConfigStore;
+use crate::error::McError;
 use crate::flags::{ChecksumFlag, EncFlags, TimeFilterFlags, parse_attr, parse_duration};
 use crate::location::{Location, parse_location};
+use crate::mirror::Options;
 use crate::mirror::diff::PlanOptions;
-use crate::mirror::{Endpoint, Options};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
@@ -67,10 +69,11 @@ pub struct MirrorArgs {
     /// add custom metadata for all objects
     #[arg(long, value_name = "KEY=VALUE;...")]
     pub attr: Option<String>,
-    /// if specified, a new prometheus endpoint will be created to report mirroring activity. (eg: localhost:8081)
-    ///
-    /// not supported by mx
-    #[arg(long, value_name = "ADDRESS")]
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        help = "if specified, a new prometheus endpoint will be created to report mirroring activity. (eg: localhost:8081)"
+    )]
     pub monitoring_address: Option<String>,
     /// if specified, will enable retrying on a per object basis if errors occur
     #[arg(long)]
@@ -94,13 +97,13 @@ pub struct MirrorArgs {
 
 impl MirrorArgs {
     fn options(&self, json: bool) -> Result<Options> {
-        if self.monitoring_address.is_some() {
-            bail!("`--monitoring-address` (Prometheus endpoint) is not supported by `mx mirror`.");
-        }
         if self.force {
-            eprintln!(
-                "{}: <ERROR> `--force` is deprecated, please use `--overwrite` instead for the same functionality.",
-                crate::output::prog_name()
+            let with = if self.remove { " with `--remove`" } else { "" };
+            crate::output::error_if(
+                &format!(
+                    "`--force` is deprecated, please use `--overwrite` instead{with} for the same functionality."
+                ),
+                &McError::invalid_argument().to_string(),
             );
         }
         self.time.parsed()?;
@@ -147,44 +150,28 @@ pub fn run(args: MirrorArgs, json: bool) -> Result<()> {
     let options = args.options(json)?;
     let store = ConfigStore::load_or_create()?;
     let source = parse_location(&args.source, store.config());
-    let target = parse_location(&args.target, store.config());
     if !options.keep_running() && !matches!(&source, Location::S3(t) if t.bucket.is_none()) {
-        crate::commands::util::stat_target(&store, &args.source)
+        let kind = crate::commands::util::stat_target(&store, &args.source)
             .with_context(|| format!("Unable to stat source `{}`.", args.source))?;
+        if kind != TargetKind::Folder {
+            return Err(McError::invalid_argument()).with_context(|| {
+                format!(
+                    "Source `{}` is not a folder. Only folders are supported by mirror command.",
+                    args.source
+                )
+            });
+        }
     }
 
     runtime()?.block_on(async {
-        let source = match source {
-            Location::Local(path) => Endpoint::Local(std::path::absolute(&path)?),
-            Location::S3(target) => {
-                let alias = alias_config(&store, &target.alias)?;
-                Endpoint::S3(Box::new(
-                    crate::mirror::s3_endpoint(
-                        &target.alias,
-                        alias,
-                        target.bucket.clone(),
-                        target.key.as_deref(),
-                    )
-                    .await?,
-                ))
-            }
-        };
-        let target = match target {
-            Location::Local(path) => Endpoint::Local(path),
-            Location::S3(target) => {
-                let alias = alias_config(&store, &target.alias)?;
-                Endpoint::S3(Box::new(
-                    crate::mirror::s3_endpoint(
-                        &target.alias,
-                        alias,
-                        target.bucket.clone(),
-                        target.key.as_deref(),
-                    )
-                    .await?,
-                ))
-            }
-        };
-        crate::mirror::validate(&source, &target, &options).await?;
+        let source = crate::mirror::endpoint(&store, &args.source, true).await?;
+        let target = crate::mirror::endpoint(&store, &args.target, false).await?;
+        crate::mirror::validate(&source, &target)?;
+        if let Some(address) = &args.monitoring_address {
+            crate::mirror::metrics::serve(address)
+                .await
+                .context("Unable to setup monitoring endpoint.")?;
+        }
         crate::mirror::run(source, target, options).await
     })
 }
@@ -260,12 +247,11 @@ mod tests {
 
     #[test]
     fn rejects_invalid_values() {
-        assert!(
+        assert_eq!(
             parse(&["--monitoring-address", "localhost:8081"])
-                .options(false)
-                .unwrap_err()
-                .to_string()
-                .contains("not supported")
+                .monitoring_address
+                .as_deref(),
+            Some("localhost:8081")
         );
         assert!(parse(&["--newer-than", "abc"]).options(false).is_err());
         assert!(parse(&["--attr", "novalue"]).options(false).is_err());

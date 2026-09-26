@@ -551,6 +551,18 @@ fn live_od_upload_download() {
         .success()
         .stdout(predicate::str::contains("Full file"));
     assert_eq!(std::fs::read(&full).unwrap(), data);
+    live.cmd()
+        .args([
+            "od",
+            &format!("if={}", live.url("full.bin")),
+            &format!("of={}", full.display()),
+            "size=1MiB",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Unable to transfer object: size cannot be specified getting from server.",
+        ));
     let parts = live.home.path().join("parts.out");
     let download = run_json(
         &live,

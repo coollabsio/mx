@@ -3,6 +3,7 @@
 //! periodically (mc uses server notifications; a rescan loop gives the same end result).
 
 pub mod diff;
+pub mod metrics;
 
 use crate::config::model::AliasConfig;
 use crate::flags::{ChecksumAlgo, Sse, resolve_sse};
@@ -64,6 +65,15 @@ impl S3Endpoint {
             None => format!("{}/{rel}", self.alias_name),
         }
     }
+
+    /// Full endpoint URL (`http://host:port/bucket/key`), as mc prints in errors.
+    fn url(&self, rel: &str) -> String {
+        let base = self.alias.url.trim_end_matches('/');
+        match &self.bucket {
+            Some(bucket) => format!("{base}/{bucket}/{}{rel}", self.prefix),
+            None => format!("{base}/{rel}"),
+        }
+    }
 }
 
 impl Endpoint {
@@ -74,9 +84,46 @@ impl Endpoint {
         }
     }
 
+    /// mc client URL: the endpoint URL for S3, the path for local files.
+    pub fn url(&self, rel: &str) -> String {
+        match self {
+            Endpoint::Local(_) => self.display(rel),
+            Endpoint::S3(s3) => s3.url(rel),
+        }
+    }
+
     fn is_alias_root(&self) -> bool {
         matches!(self, Endpoint::S3(s3) if s3.bucket.is_none())
     }
+}
+
+/// Endpoint for a command argument: a local folder (made absolute like mc when `absolute`) or
+/// `ALIAS[/BUCKET[/PREFIX]]`.
+pub async fn endpoint(
+    store: &crate::config::ConfigStore,
+    input: &str,
+    absolute: bool,
+) -> Result<Endpoint> {
+    Ok(
+        match crate::location::parse_location(input, store.config()) {
+            crate::location::Location::Local(path) if absolute => Endpoint::Local(PathBuf::from(
+                crate::error::abs_path(&path.to_string_lossy()),
+            )),
+            crate::location::Location::Local(path) => Endpoint::Local(path),
+            crate::location::Location::S3(target) => {
+                let alias = crate::commands::alias_config(store, &target.alias)?;
+                Endpoint::S3(Box::new(
+                    s3_endpoint(
+                        &target.alias,
+                        alias,
+                        target.bucket.clone(),
+                        target.key.as_deref(),
+                    )
+                    .await?,
+                ))
+            }
+        },
+    )
 }
 
 /// Builds an endpoint for `alias/bucket/prefix`.
@@ -132,80 +179,34 @@ impl Options {
     }
 }
 
-/// Checks that the source is an existing folder/bucket/prefix (mc `checkMirrorSyntax`) and the
-/// target is usable.
-pub async fn validate(source: &Endpoint, target: &Endpoint, options: &Options) -> Result<()> {
+/// Checks that a local target is usable. The source is checked by the caller (mc
+/// `checkMirrorSyntax`); a missing target bucket is reported while mirroring, like mc.
+pub fn validate(source: &Endpoint, target: &Endpoint) -> Result<()> {
     if target.is_alias_root() && !matches!(source, Endpoint::Local(_)) && !source.is_alias_root() {
         bail!("Target must include a bucket unless the source is an alias or a local folder.");
     }
-    if !options.keep_running() {
-        match source {
-            Endpoint::Local(path) => {
-                let meta = std::fs::metadata(path)
-                    .with_context(|| format!("Unable to stat source `{}`.", path.display()))?;
-                if !meta.is_dir() {
-                    bail!(
-                        "Source `{}` is not a folder. Only folders are supported by mirror command.",
-                        path.display()
-                    );
-                }
-            }
-            Endpoint::S3(s3) => {
-                if let Some(bucket) = &s3.bucket {
-                    let display = s3.display("");
-                    s3.client
-                        .head_bucket()
-                        .bucket(bucket)
-                        .send()
-                        .await
-                        .s3(bucket, "")
-                        .with_context(|| format!("Unable to stat source `{display}`."))?;
-                    let key = s3.prefix.trim_end_matches('/');
-                    if !key.is_empty()
-                        && s3
-                            .client
-                            .head_object()
-                            .bucket(bucket)
-                            .key(key)
-                            .send()
-                            .await
-                            .is_ok()
-                    {
-                        bail!(
-                            "Source `{}/{bucket}/{key}` is not a folder. Only folders are supported by mirror command.",
-                            s3.alias_name
-                        );
-                    }
-                }
-            }
-        }
-    }
-    match target {
-        Endpoint::Local(path) => {
-            if path.exists() && !path.is_dir() {
-                bail!("Target `{}` is not a folder.", path.display());
-            }
-        }
-        Endpoint::S3(s3) => {
-            if let Some(bucket) = &s3.bucket
-                && s3.client.head_bucket().bucket(bucket).send().await.is_err()
-            {
-                bail!(
-                    "Target bucket `{}/{bucket}` does not exist or is not accessible.",
-                    s3.alias_name
-                );
-            }
-        }
+    if let Endpoint::Local(path) = target
+        && path.exists()
+        && !path.is_dir()
+    {
+        bail!("Target `{}` is not a folder.", path.display());
     }
     Ok(())
 }
 
+/// mc accounting: every queued copy/removal counts (`totalCount`); `total` sums the sizes of
+/// queued copies (mc `totalSize` and the summary `total`).
 #[derive(Default)]
 struct Stats {
     count: AtomicI64,
     total: AtomicI64,
-    transferred: AtomicI64,
 }
+
+/// mc notification event type for removals.
+const REMOVED_EVENT: &str = "s3:ObjectRemoved:Delete";
+
+/// Outcome of one copy/remove task: bytes copied, or mc's (message, cause) error.
+type TaskResult = std::result::Result<i64, (String, String)>;
 
 struct Job {
     source: Endpoint,
@@ -248,6 +249,30 @@ struct MirrorMessage<'a> {
     event_type: &'a str,
 }
 
+impl MirrorMessage<'_> {
+    /// mc `mirrorMessage.String()`. Removals of the initial pass have no event type, so mc
+    /// prints them as ``` `` -> `TARGET` ```.
+    fn text(&self) -> String {
+        let time = if self.event_time.is_empty() {
+            String::new()
+        } else {
+            format!("[{}] ", self.event_time)
+        };
+        if self.event_type == REMOVED_EVENT {
+            return format!("{time}Removed `{}`", self.target);
+        }
+        if self.event_time.is_empty() {
+            return format!("`{}` -> `{}`", self.source, self.target);
+        }
+        format!(
+            "{time}{:>6} `{}` -> `{}`",
+            diff::humanize_ibytes(self.size.max(0) as u64),
+            self.source,
+            self.target
+        )
+    }
+}
+
 /// Runs the mirror; returns an error when any copy/remove failed.
 pub async fn run(source: Endpoint, target: Endpoint, options: Options) -> Result<()> {
     let job = Arc::new(Job {
@@ -268,8 +293,14 @@ pub async fn run(source: Endpoint, target: Endpoint, options: Options) -> Result
                 previous = Some(keys);
             }
             Err(error) => {
-                job.report_error("Failed to perform mirroring", &format!("{error:#}"));
+                metrics::METRICS.op(false);
+                crate::output::print_error(
+                    &error.context(crate::error::nonfatal("Failed to perform mirroring")),
+                );
                 failed = true;
+                if job.options.keep_running() {
+                    metrics::METRICS.restart();
+                }
             }
         }
         if !job.options.keep_running() {
@@ -277,11 +308,10 @@ pub async fn run(source: Endpoint, target: Endpoint, options: Options) -> Result
         }
         tokio::time::sleep(job.options.watch_interval).await;
     }
-    if job.options.summary {
-        job.print_summary(started.elapsed())?;
-    }
+    // mc prints the accounting summary when the session ends (quiet/JSON/--summary status).
+    job.print_summary(started.elapsed())?;
     if failed {
-        bail!("mirror finished with errors");
+        return Err(crate::output::Exit(1).into());
     }
     Ok(())
 }
@@ -370,7 +400,7 @@ impl Job {
             0 => std::thread::available_parallelism().map_or(4, |n| n.get()),
             n => n,
         };
-        let mut tasks: JoinSet<std::result::Result<(), (String, String)>> = JoinSet::new();
+        let mut tasks: JoinSet<TaskResult> = JoinSet::new();
         let mut stop = false;
         for action in actions {
             if stop {
@@ -379,14 +409,16 @@ impl Job {
             let event = if initial {
                 Event::default()
             } else if matches!(action, Action::Remove { .. }) {
-                Event::now("s3:ObjectRemoved:Delete")
+                Event::now(REMOVED_EVENT)
             } else {
                 Event::now("s3:ObjectCreated:Put")
             };
             match action {
                 Action::OverwriteNotAllowed { rel, cond } => {
-                    let target = self.target.display(&rel);
+                    let target = self.target.url(&rel);
                     if self.reported.lock().unwrap().insert(rel) {
+                        // mc counts the operation but ignores the error for the exit status.
+                        metrics::METRICS.op(true);
                         self.report_error(
                             &format!(
                                 "Failed to perform mirroring, with error condition ({})",
@@ -409,8 +441,10 @@ impl Job {
                     });
                 }
                 Action::Remove { rel } => {
+                    let count = self.stats.count.fetch_add(1, Ordering::Relaxed) + 1;
+                    let total = self.stats.total.load(Ordering::Relaxed);
                     let job = self.clone();
-                    tasks.spawn(async move { job.remove_task(&rel, &event).await });
+                    tasks.spawn(async move { job.remove_task(&rel, (count, total), &event).await });
                 }
             }
             while tasks.len() >= workers {
@@ -433,17 +467,19 @@ impl Job {
     /// Records a task result; returns true when mirroring should stop.
     fn handle_result(
         &self,
-        result: std::result::Result<
-            std::result::Result<(), (String, String)>,
-            tokio::task::JoinError,
-        >,
+        result: std::result::Result<TaskResult, tokio::task::JoinError>,
         failed: &mut bool,
     ) -> bool {
         let error = match result {
-            Ok(Ok(())) => return false,
+            Ok(Ok(size)) => {
+                metrics::METRICS.op(true);
+                metrics::METRICS.uploaded(size);
+                return false;
+            }
             Ok(Err(error)) => error,
             Err(join) => ("Failed to perform mirroring".to_string(), join.to_string()),
         };
+        metrics::METRICS.op(false);
         self.report_error(&error.0, &error.1);
         *failed = true;
         !self.options.skip_errors && !self.options.keep_running()
@@ -554,35 +590,36 @@ impl Job {
         entry: &Entry,
         totals: (i64, i64),
         event: &Event,
-    ) -> std::result::Result<(), (String, String)> {
-        let source_display = self.source.display(rel);
-        let target_display = self.target.display(rel);
-        if !self.options.summary {
-            self.print_message(&source_display, &target_display, entry.size, totals, event);
-        }
+    ) -> TaskResult {
+        // mc `--dry-run` only does the accounting: no per-object messages.
         if self.options.plan.dry_run {
-            self.stats
-                .transferred
-                .fetch_add(entry.size, Ordering::Relaxed);
-            return Ok(());
+            return Ok(0);
+        }
+        if !self.options.summary {
+            self.print_message(
+                &self.source.display(rel),
+                &self.target.display(rel),
+                entry.size,
+                totals,
+                event,
+            );
         }
         let mut attempt = 0;
         loop {
+            let started = Instant::now();
             match self.copy_one(rel, entry).await {
                 Ok(()) => {
-                    self.stats
-                        .transferred
-                        .fetch_add(entry.size, Ordering::Relaxed);
-                    return Ok(());
+                    metrics::METRICS.replicated(entry.size, started.elapsed());
+                    return Ok(entry.size);
                 }
                 Err(_) if self.options.retry && attempt < 3 => {
                     attempt += 1;
                     tokio::time::sleep(Duration::from_secs(attempt)).await;
-                    self.print_retry(&source_display, &target_display, attempt);
+                    self.print_retry(&self.source.url(rel), &self.target.url(rel), attempt);
                 }
                 Err(error) => {
                     return Err((
-                        format!("Failed to copy `{source_display}`."),
+                        format!("Failed to copy `{}`.", self.source.url(rel)),
                         format!("{error:#}"),
                     ));
                 }
@@ -590,41 +627,36 @@ impl Job {
         }
     }
 
-    async fn remove_task(
-        &self,
-        rel: &str,
-        event: &Event,
-    ) -> std::result::Result<(), (String, String)> {
+    async fn remove_task(&self, rel: &str, totals: (i64, i64), event: &Event) -> TaskResult {
+        if self.options.plan.dry_run {
+            return Ok(0);
+        }
         let display = self.target.display(rel);
-        let result = if self.options.plan.dry_run {
-            Ok(())
-        } else {
-            match &self.target {
-                Endpoint::Local(root) => safe_join(root, rel).and_then(|path| {
-                    std::fs::remove_file(&path)
-                        .with_context(|| format!("Unable to remove `{}`.", path.display()))
-                }),
-                Endpoint::S3(s3) => match s3.locate(rel) {
-                    Ok((bucket, key)) => s3
-                        .client
-                        .delete_object()
-                        .bucket(&bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                        .map(|_| ())
-                        .s3(&bucket, &key),
-                    Err(error) => Err(error),
-                },
-            }
+        let result = match &self.target {
+            Endpoint::Local(root) => safe_join(root, rel).and_then(|path| {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("Unable to remove `{}`.", path.display()))
+            }),
+            Endpoint::S3(s3) => match s3.locate(rel) {
+                Ok((bucket, key)) => s3
+                    .client
+                    .delete_object()
+                    .bucket(&bucket)
+                    .key(&key)
+                    .send()
+                    .await
+                    .map(|_| ())
+                    .s3(&bucket, &key),
+                Err(error) => Err(error),
+            },
         };
         match result {
             Ok(()) => {
-                self.print_removed(&display, event);
-                Ok(())
+                self.print_message("", &display, 0, totals, event);
+                Ok(0)
             }
             Err(error) => Err((
-                format!("Failed to remove `{display}`."),
+                format!("Failed to remove `{}`.", self.target.url(rel)),
                 format!("{error:#}"),
             )),
         }
@@ -677,6 +709,7 @@ impl Job {
                 let path = root.join(rel);
                 let (bucket, key) = target.locate(rel)?;
                 let mut put = self.put_options(&bucket, &target_display);
+                put.content_type = Some(crate::s3::guess_content_type(&path));
                 put.metadata = self.extra_metadata(entry, None);
                 if self.options.preserve {
                     let meta = std::fs::metadata(&path)
@@ -819,46 +852,21 @@ impl Job {
         totals: (i64, i64),
         event: &Event,
     ) {
+        let message = MirrorMessage {
+            status: "success",
+            source,
+            target,
+            size,
+            total_count: totals.0,
+            total_size: totals.1,
+            event_time: &event.time,
+            event_type: event.kind,
+        };
+        // mc prints mirror messages even with `--quiet` (quiet only hides the progress bar).
         if self.options.json {
-            let message = MirrorMessage {
-                status: "success",
-                source,
-                target,
-                size,
-                total_count: totals.0,
-                total_size: totals.1,
-                event_time: &event.time,
-                event_type: event.kind,
-            };
             let _ = crate::output::print_json(&message);
-        } else if event.time.is_empty() {
-            crate::output::print_plain(&format!("`{source}` -> `{target}`"));
         } else {
-            crate::output::print_plain(&format!(
-                "[{}] {:>6} `{source}` -> `{target}`",
-                event.time,
-                diff::humanize_ibytes(size.max(0) as u64)
-            ));
-        }
-    }
-
-    fn print_removed(&self, target: &str, event: &Event) {
-        if self.options.json {
-            let message = MirrorMessage {
-                status: "success",
-                source: "",
-                target,
-                size: 0,
-                total_count: self.stats.count.load(Ordering::Relaxed),
-                total_size: self.stats.total.load(Ordering::Relaxed),
-                event_time: &event.time,
-                event_type: "s3:ObjectRemoved:Delete",
-            };
-            let _ = crate::output::print_json(&message);
-        } else if event.time.is_empty() {
-            crate::output::print_plain(&format!("Removed `{target}`"));
-        } else {
-            crate::output::print_plain(&format!("[{}] Removed `{target}`", event.time));
+            println!("{}", message.text());
         }
     }
 
@@ -882,38 +890,33 @@ impl Job {
         crate::output::error_if(message, cause);
     }
 
+    /// mc accounting summary (`accountStat`). Like mc, `transferred` equals the queued total
+    /// (the accounting reader is capped at the total), doubled by `--dry-run` (mc adds the
+    /// sizes a second time for fake copies).
     fn print_summary(&self, elapsed: Duration) -> Result<()> {
-        let total = self.stats.total.load(Ordering::Relaxed);
-        let transferred = self.stats.transferred.load(Ordering::Relaxed);
-        let speed = if elapsed.as_secs_f64() > 0.0 && transferred > 0 {
-            transferred as f64 / elapsed.as_secs_f64()
+        let total = self.stats.total.load(Ordering::Relaxed).max(0) as u64;
+        let transferred = if self.options.plan.dry_run {
+            total * 2
         } else {
-            0.0
+            total
+        };
+        let (speed, duration) = if transferred > 0 && !elapsed.is_zero() {
+            (transferred as f64 / elapsed.as_secs_f64(), elapsed)
+        } else {
+            (0.0, Duration::ZERO)
+        };
+        let stat = crate::progress::AccountStat {
+            status: "success",
+            total,
+            transferred,
+            duration: duration.as_nanos() as u64,
+            speed,
         };
         if self.options.json {
-            let summary = serde_json::json!({
-                "status": "success",
-                "total": total,
-                "transferred": transferred,
-                "duration": elapsed.as_nanos() as u64,
-                "speed": speed,
-            });
-            crate::output::print_json(&summary)?;
-            return Ok(());
+            crate::output::print_json(&stat)?;
+        } else {
+            println!("{}", stat.table());
         }
-        use std::io::Write;
-        let mut table = tabwriter::TabWriter::new(Vec::new()).padding(2);
-        writeln!(table, "Total\tTransferred\tDuration\tSpeed")?;
-        writeln!(
-            table,
-            "{}\t{}\t{:.3}s\t{}/s",
-            format_bytes(total),
-            format_bytes(transferred),
-            elapsed.as_secs_f64(),
-            format_bytes(speed as i64)
-        )?;
-        table.flush()?;
-        print!("{}", String::from_utf8(table.into_inner()?)?);
         Ok(())
     }
 }
@@ -921,6 +924,11 @@ impl Job {
 // ----------------------------------------------------------------------------------------
 // listing
 // ----------------------------------------------------------------------------------------
+
+/// Lists all files/objects of an endpoint (mc `difference` input for `diff`).
+pub async fn list_all(endpoint: &Endpoint) -> Result<(Listing, Vec<String>)> {
+    list(endpoint, &Options::default()).await
+}
 
 /// Lists an endpoint. The second value holds per-entry errors (local walks only): the listing is
 /// then incomplete and must not be used to propagate deletions.
@@ -930,21 +938,15 @@ async fn list(endpoint: &Endpoint, options: &Options) -> Result<(Listing, Vec<St
         Endpoint::S3(s3) => match &s3.bucket {
             Some(bucket) => list_bucket(&s3.client, bucket, &s3.prefix, "")
                 .await
-                .map(|listing| (listing, Vec::new()))
-                .with_context(|| format!("Unable to list `{}`.", s3.display(""))),
+                .map(|listing| (listing, Vec::new())),
             None => {
                 let mut listing = Listing::new();
                 for bucket in list_buckets(&s3.client).await? {
                     if diff::match_exclude_bucket(&options.plan.exclude_bucket, &bucket) {
                         continue;
                     }
-                    listing.extend(
-                        list_bucket(&s3.client, &bucket, "", &format!("{bucket}/"))
-                            .await
-                            .with_context(|| {
-                                format!("Unable to list `{}`.", s3.display(&bucket))
-                            })?,
-                    );
+                    listing
+                        .extend(list_bucket(&s3.client, &bucket, "", &format!("{bucket}/")).await?);
                 }
                 Ok((listing, Vec::new()))
             }
@@ -1130,23 +1132,6 @@ fn format_time(time: SystemTime) -> String {
         .unwrap_or_default()
 }
 
-/// cheggaaa/pb byte formatting used by mc's accounting summary.
-fn format_bytes(size: i64) -> String {
-    const KIB: f64 = 1024.0;
-    let value = size as f64;
-    for (unit, scale) in [
-        ("TiB", KIB.powi(4)),
-        ("GiB", KIB.powi(3)),
-        ("MiB", KIB.powi(2)),
-        ("KiB", KIB),
-    ] {
-        if value >= scale {
-            return format!("{:.2} {unit}", value / scale);
-        }
-    }
-    format!("{size} B")
-}
-
 /// Joins a relative object path under a local root, rejecting `..`/absolute components.
 fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
     let rel_path = Path::new(rel);
@@ -1279,13 +1264,6 @@ mod tests {
         assert_eq!(listing.len(), 1);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("loop"), "{errors:?}");
-    }
-
-    #[test]
-    fn formats_summary_bytes() {
-        assert_eq!(format_bytes(12), "12 B");
-        assert_eq!(format_bytes(2048), "2.00 KiB");
-        assert_eq!(format_bytes(3 * 1024 * 1024 + 512 * 1024), "3.50 MiB");
     }
 
     #[test]

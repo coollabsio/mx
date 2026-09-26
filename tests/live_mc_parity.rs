@@ -566,25 +566,59 @@ case!(
 case!(tree_local_text, text, seeded(), ["tree", "-f", "src"]);
 case!(tree_missing_text, text, bare(), ["tree", "{target}"]);
 case!(
-    #[ignore = "parity: mc prints `alias/bucket/key`, mx relative keys"]
     find_name_text,
     text,
     seeded(),
     ["find", "{target}", "--name", "*.txt"]
 );
 case!(
-    #[ignore = "parity: key is `alias/bucket/key`; missing etag/type"]
     find_name_json,
     json,
     seeded(),
     ["find", "{target}", "--name", "*.txt"]
 );
 case!(
-    #[ignore = "parity: mc prints full paths (`<WORK>/src/one.txt`)"]
     find_local_text,
     text,
     seeded(),
     ["find", "src", "--name", "*.txt"]
+);
+case!(find_local_all_text, text, seeded(), ["find", "src"]);
+case!(
+    find_local_json,
+    json,
+    seeded(),
+    ["find", "src", "--name", "*.txt"]
+);
+case!(
+    find_path_text,
+    text,
+    seeded(),
+    ["find", "{target}", "--path", "dir/*"]
+);
+case!(
+    find_maxdepth_text,
+    text,
+    seeded(),
+    ["find", "{target}", "--maxdepth", "2"]
+);
+case!(
+    find_print_text,
+    text,
+    seeded(),
+    ["find", "{target}/dir", "--print", "{base} {dir} {size}"]
+);
+case!(
+    find_versions_text,
+    text,
+    versioned(),
+    ["find", "{target}", "--versions"]
+);
+case!(
+    find_versions_json,
+    json,
+    versioned(),
+    ["find", "{target}", "--versions"]
 );
 
 fn diffed() -> Option<Parity> {
@@ -599,18 +633,34 @@ fn diffed() -> Option<Parity> {
 }
 
 case!(
-    #[ignore = "parity: mc format `! URL` / `< URL` / `> URL` with full URLs"]
     diff_text,
     text,
     diffed(),
     ["diff", "{target}/left", "{target}/right"]
 );
 case!(
-    #[ignore = "parity: --json not supported (text output)"]
     diff_json,
     json,
     diffed(),
     ["diff", "{target}/left", "{target}/right"]
+);
+case!(
+    diff_local_s3_text,
+    text,
+    seeded(),
+    ["diff", "src", "{target}/dir"]
+);
+case!(
+    diff_local_s3_json,
+    json,
+    seeded(),
+    ["diff", "src", "{target}/dir"]
+);
+case!(
+    diff_not_folder_text,
+    text,
+    seeded(),
+    ["diff", "src/one.txt", "{target}"]
 );
 
 // ---------------------------------------------------------------------------
@@ -1007,25 +1057,181 @@ case!(
 // ---------------------------------------------------------------------------
 
 case!(
-    #[ignore = "parity: missing mc summary table"]
     mirror_upload_text,
     text,
     mirrored(transfer(seeded())),
     ["mirror", "src", "{target}/mirror"]
 );
 case!(
-    #[ignore = "parity: missing summary doc {total,transferred,duration,speed}"]
     mirror_upload_json,
     json,
     mirrored(seeded()),
     ["mirror", "src", "{target}/mirror"]
 );
 case!(
-    #[ignore = "parity: missing summary doc {total,transferred,duration,speed}"]
     mirror_download_json,
     json,
     mirrored(seeded()),
     ["mirror", "{target}/dir", "mirrored"]
+);
+
+case!(
+    mirror_dry_run_text,
+    text,
+    transfer(seeded()),
+    ["mirror", "--dry-run", "src", "{target}/mirror"]
+);
+case!(
+    mirror_dry_run_json,
+    json,
+    seeded(),
+    ["mirror", "--dry-run", "src", "{target}/mirror"]
+);
+case!(
+    mirror_summary_text,
+    text,
+    transfer(seeded()),
+    ["mirror", "--summary", "src", "{target}/mirror"]
+);
+
+/// `src/` mirrored to `{target}/mirror`, then `src/one.txt` removed and `src/nested/two.txt`
+/// changed locally.
+fn mirrored_then_changed() -> Option<Parity> {
+    let p = with_setup(seeded(), &["mirror", "src", "{target}/mirror"])?;
+    for side in [&p.mc, &p.mx] {
+        std::fs::remove_file(side.path("src/one.txt")).expect("rm");
+    }
+    p.file("src/nested/two.txt", "two two two\n");
+    Some(p)
+}
+
+case!(
+    mirror_remove_text,
+    text,
+    transfer(mirrored_then_changed()),
+    [
+        "mirror",
+        "--remove",
+        "--overwrite",
+        "src",
+        "{target}/mirror"
+    ]
+);
+case!(
+    mirror_remove_json,
+    json,
+    mirrored(mirrored_then_changed()),
+    [
+        "mirror",
+        "--remove",
+        "--overwrite",
+        "src",
+        "{target}/mirror"
+    ]
+);
+case!(
+    mirror_overwrite_conflict_text,
+    text,
+    transfer(mirrored_then_changed()),
+    ["mirror", "src", "{target}/mirror"]
+);
+case!(
+    mirror_missing_bucket_text,
+    text,
+    transfer(seeded()),
+    ["mirror", "src", "{target}-nope/mirror"]
+);
+case!(
+    mirror_not_folder_text,
+    text,
+    seeded(),
+    ["mirror", "{target}/a.txt", "out"]
+);
+
+// ---------------------------------------------------------------------------
+// od / undo
+// ---------------------------------------------------------------------------
+
+/// `od` reports the elapsed time (text `Time:`/`Speed:` use the standard rules).
+fn timed(p: Option<Parity>) -> Option<Parity> {
+    let mut p = p?;
+    p.normalizer.rule(r#"("elapsed":\s*)\d+"#, "${1}0");
+    Some(p)
+}
+
+case!(
+    od_upload_text,
+    text,
+    timed(seeded()),
+    ["od", "if=src/one.txt", "of={target}/od.txt"]
+);
+case!(
+    od_upload_json,
+    json,
+    timed(seeded()),
+    ["od", "if=src/one.txt", "of={target}/od.txt"]
+);
+case!(
+    od_download_text,
+    text,
+    timed(seeded()),
+    ["od", "if={target}/dir/b.txt", "of=od.txt"]
+);
+case!(
+    od_download_json,
+    json,
+    timed(seeded()),
+    ["od", "if={target}/dir/b.txt", "of=od.txt"]
+);
+case!(
+    od_missing_source_text,
+    text,
+    seeded(),
+    ["od", "if=nope.txt", "of={target}/od.txt"]
+);
+case!(
+    undo_upload_text,
+    text,
+    versioned(),
+    ["undo", "{target}/a.txt"]
+);
+case!(
+    undo_upload_json,
+    json,
+    versioned(),
+    ["undo", "{target}/a.txt"]
+);
+case!(
+    undo_delete_text,
+    text,
+    versioned(),
+    ["undo", "{target}/dir/b.txt"]
+);
+case!(
+    undo_recursive_json,
+    json,
+    versioned(),
+    [
+        "undo",
+        "-r",
+        "--force",
+        "--dry-run",
+        "--last",
+        "5",
+        "{target}"
+    ]
+);
+case!(
+    undo_missing_text,
+    text,
+    versioned(),
+    ["undo", "{target}/nope.txt"]
+);
+case!(
+    undo_usage_error_json,
+    json,
+    versioned(),
+    ["undo", "-r", "{target}"]
 );
 
 // ---------------------------------------------------------------------------

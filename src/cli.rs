@@ -79,6 +79,14 @@ pub struct Cli {
     )]
     pub custom_header: Vec<(String, String)>,
 
+    /// custom connection READ deadline
+    #[arg(long, global = true, hide = true, value_name = "DURATION", value_parser = parse_go_duration)]
+    pub conn_read_deadline: Option<std::time::Duration>,
+
+    /// custom connection WRITE deadline
+    #[arg(long, global = true, hide = true, value_name = "DURATION", value_parser = parse_go_duration)]
+    pub conn_write_deadline: Option<std::time::Duration>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -94,6 +102,41 @@ pub fn parse_env_bool(value: &str) -> Result<bool, String> {
 
 fn parse_rate(value: &str) -> anyhow::Result<u64> {
     crate::flags::parse_size(value)
+}
+
+/// Go `time.ParseDuration` (urfave/cli `DurationFlag`): `10m`, `1h30m`, `1.5s`, `500ms`, `0`.
+pub fn parse_go_duration(value: &str) -> anyhow::Result<std::time::Duration> {
+    let invalid = || anyhow::anyhow!("time: invalid duration \"{value}\"");
+    if value == "0" {
+        return Ok(std::time::Duration::ZERO);
+    }
+    let mut rest = value;
+    let mut total = 0f64;
+    if rest.is_empty() {
+        return Err(invalid());
+    }
+    while !rest.is_empty() {
+        let number_len = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .ok_or_else(invalid)?;
+        let number: f64 = rest[..number_len].parse().map_err(|_| invalid())?;
+        rest = &rest[number_len..];
+        let unit_len = rest
+            .find(|c: char| c.is_ascii_digit() || c == '.')
+            .unwrap_or(rest.len());
+        let scale = match &rest[..unit_len] {
+            "ns" => 1e-9,
+            "us" | "µs" | "μs" => 1e-6,
+            "ms" => 1e-3,
+            "s" => 1.0,
+            "m" => 60.0,
+            "h" => 3600.0,
+            _ => return Err(invalid()),
+        };
+        total += number * scale;
+        rest = &rest[unit_len..];
+    }
+    std::time::Duration::try_from_secs_f64(total).map_err(|_| invalid())
 }
 
 fn parse_custom_header(value: &str) -> anyhow::Result<(String, String)> {
@@ -170,4 +213,47 @@ pub enum Commands {
     Replicate(replicate::ReplicateArgs),
     #[command(about = "manage bucket quota")]
     Quota(quota::QuotaArgs),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn parses_go_durations() {
+        assert_eq!(parse_go_duration("10m").unwrap(), Duration::from_secs(600));
+        assert_eq!(
+            parse_go_duration("1h30m").unwrap(),
+            Duration::from_secs(5400)
+        );
+        assert_eq!(
+            parse_go_duration("1.5s").unwrap(),
+            Duration::from_millis(1500)
+        );
+        assert_eq!(
+            parse_go_duration("500ms").unwrap(),
+            Duration::from_millis(500)
+        );
+        assert_eq!(parse_go_duration("0").unwrap(), Duration::ZERO);
+        for bad in ["", "10", "5d", "abc", "1m-"] {
+            assert!(parse_go_duration(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn deadline_flags_are_hidden_globals() {
+        let cli = Cli::try_parse_from([
+            "mx",
+            "ls",
+            "--conn-read-deadline",
+            "30s",
+            "--conn-write-deadline",
+            "1m",
+            "play/",
+        ])
+        .unwrap();
+        assert_eq!(cli.conn_read_deadline, Some(Duration::from_secs(30)));
+        assert_eq!(cli.conn_write_deadline, Some(Duration::from_secs(60)));
+    }
 }

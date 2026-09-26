@@ -63,6 +63,7 @@ where
         limit_download: cli.limit_download.filter(|rate| *rate > 0),
         config_dir: cli.config_dir.clone(),
     });
+    s3::client::set_conn_deadlines(cli.conn_read_deadline, cli.conn_write_deadline);
     commands::run(cli)
 }
 
