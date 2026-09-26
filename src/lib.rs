@@ -5,6 +5,7 @@ pub mod flags;
 pub mod globals;
 pub mod location;
 pub mod net;
+pub mod mirror;
 pub mod output;
 pub mod progress;
 pub mod resolve;
