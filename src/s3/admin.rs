@@ -24,6 +24,7 @@ use aws_smithy_http_client::{
 };
 use aws_smithy_runtime_api::client::http::{HttpConnector, SharedHttpConnector};
 use aws_smithy_runtime_api::client::identity::Identity;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -117,6 +118,22 @@ impl AdminClient {
         headers: &[(&str, String)],
         body: Vec<u8>,
     ) -> Result<Response> {
+        let (mut response, stream) = self
+            .send_streaming(method, path, query, headers, body)
+            .await?;
+        response.body = stream.collect().await?.into_bytes().to_vec();
+        Ok(response)
+    }
+
+    /// Like [`Self::send`], but returns the body unread (status and headers filled in).
+    pub async fn send_streaming(
+        &self,
+        method: &str,
+        path: &str,
+        query: &[(&str, &str)],
+        headers: &[(&str, String)],
+        body: Vec<u8>,
+    ) -> Result<(Response, ByteStream)> {
         let uri = format!(
             "{}://{}{}{}",
             self.scheme,
@@ -158,18 +175,289 @@ impl AdminClient {
             .iter()
             .map(|(n, v)| (n.to_ascii_lowercase(), v.to_string()))
             .collect();
-        let body = ByteStream::new(response.into_body())
-            .collect()
-            .await?
-            .into_bytes()
-            .to_vec();
-        Ok(Response {
-            status,
-            body,
-            headers,
-        })
+        Ok((
+            Response {
+                status,
+                body: Vec::new(),
+                headers,
+            },
+            ByteStream::new(response.into_body()),
+        ))
     }
 
+    /// Admin API request builder for `/minio/admin/v3/<api>` (see [`AdminRequest`]).
+    pub fn request(&self, method: &str, api: &str) -> AdminRequest<'_> {
+        self.request_at(method, &format!("{ADMIN_PREFIX}/{api}"))
+    }
+
+    /// Request builder for any server path (e.g. `/minio/kms/v1/key/list`,
+    /// `/minio/v2/metrics/cluster`); `path` is percent-encoded per segment.
+    pub fn request_at(&self, method: &str, path: &str) -> AdminRequest<'_> {
+        AdminRequest {
+            client: self,
+            method: method.to_string(),
+            path: encode_path(path),
+            query: Vec::new(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            decrypt: false,
+        }
+    }
+
+    /// `GET` admin API, JSON response.
+    pub async fn get_json<T: DeserializeOwned>(
+        &self,
+        api: &str,
+        query: &[(&str, &str)],
+    ) -> Result<T> {
+        self.request("GET", api).queries(query).send_json().await
+    }
+
+    /// `PUT` admin API with a JSON body.
+    pub async fn put_json<B: Serialize + ?Sized>(
+        &self,
+        api: &str,
+        query: &[(&str, &str)],
+        body: &B,
+    ) -> Result<Response> {
+        self.request("PUT", api)
+            .queries(query)
+            .json(body)?
+            .send()
+            .await
+    }
+
+    /// `POST` admin API with a JSON body.
+    pub async fn post_json<B: Serialize + ?Sized>(
+        &self,
+        api: &str,
+        query: &[(&str, &str)],
+        body: &B,
+    ) -> Result<Response> {
+        self.request("POST", api)
+            .queries(query)
+            .json(body)?
+            .send()
+            .await
+    }
+
+    /// `DELETE` admin API.
+    pub async fn delete(&self, api: &str, query: &[(&str, &str)]) -> Result<Response> {
+        self.request("DELETE", api).queries(query).send().await
+    }
+
+    /// Decrypts a madmin `EncryptData` response body with this alias' secret key.
+    pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
+        decrypt_response(&self.secret_key, data)
+    }
+}
+
+/// One admin request: query parameters, optional (madmin-encrypted) body, optional response
+/// decryption. Non-2xx statuses become madmin errors (`send*`, `stream`).
+///
+/// ```ignore
+/// let users: HashMap<String, UserInfo> =
+///     client.request("GET", "list-users").decrypt().send_json().await?;
+/// client.request("PUT", "add-user").query("accessKey", user).encrypted_json(&req)?.send().await?;
+/// let mut trace = client.request("GET", "trace").query("all", "true").stream().await?;
+/// ```
+pub struct AdminRequest<'a> {
+    client: &'a AdminClient,
+    method: String,
+    path: String,
+    query: Vec<(String, String)>,
+    headers: Vec<(&'static str, String)>,
+    body: Vec<u8>,
+    decrypt: bool,
+}
+
+impl AdminRequest<'_> {
+    /// Adds a query parameter (repeat for multi-valued keys).
+    pub fn query(mut self, key: &str, value: impl Into<String>) -> Self {
+        self.query.push((key.to_string(), value.into()));
+        self
+    }
+
+    /// Adds query parameters.
+    pub fn queries(mut self, query: &[(&str, &str)]) -> Self {
+        self.query
+            .extend(query.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        self
+    }
+
+    /// Adds a request header.
+    pub fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+        self.headers.push((name, value.into()));
+        self
+    }
+
+    /// Raw request body.
+    pub fn body(mut self, body: Vec<u8>) -> Self {
+        self.body = body;
+        self
+    }
+
+    /// JSON request body.
+    pub fn json<B: Serialize + ?Sized>(self, body: &B) -> Result<Self> {
+        Ok(self.body(serde_json::to_vec(body)?))
+    }
+
+    /// Encrypts the current body like `madmin.EncryptData(secretKey, body)`.
+    pub fn encrypted(mut self) -> Result<Self> {
+        self.body = encrypt_data(&self.client.secret_key, &self.body)?;
+        Ok(self)
+    }
+
+    /// JSON body encrypted with `madmin.EncryptData`.
+    pub fn encrypted_json<B: Serialize + ?Sized>(self, body: &B) -> Result<Self> {
+        self.json(body)?.encrypted()
+    }
+
+    /// The response body is `madmin.EncryptData` output; `send*` return it decrypted.
+    pub fn decrypt(mut self) -> Self {
+        self.decrypt = true;
+        self
+    }
+
+    /// Sends without checking the status (body decrypted only on 2xx).
+    pub async fn send_unchecked(self) -> Result<Response> {
+        let query: Vec<(&str, &str)> = self
+            .query
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let mut response = self
+            .client
+            .send(&self.method, &self.path, &query, &self.headers, self.body)
+            .await?;
+        if self.decrypt && (200..300).contains(&response.status) {
+            response.body = self.client.decrypt(&response.body)?;
+        }
+        Ok(response)
+    }
+
+    /// Sends; non-2xx statuses become madmin `ErrorResponse` errors.
+    pub async fn send(self) -> Result<Response> {
+        check_status(self.send_unchecked().await?)
+    }
+
+    /// Sends and decodes the (decrypted) JSON response.
+    pub async fn send_json<T: DeserializeOwned>(self) -> Result<T> {
+        let response = self.send().await?;
+        Ok(serde_json::from_slice(&response.body)?)
+    }
+
+    /// Sends and returns the body as a stream of JSON documents (trace, logs, metrics, ...).
+    /// Errors (non-2xx) are read in full and mapped like [`Self::send`].
+    pub async fn stream(self) -> Result<JsonStream> {
+        let query: Vec<(&str, &str)> = self
+            .query
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let (mut response, body) = self
+            .client
+            .send_streaming(&self.method, &self.path, &query, &self.headers, self.body)
+            .await?;
+        if !(200..300).contains(&response.status) {
+            response.body = body.collect().await?.into_bytes().to_vec();
+            return Err(madmin_error(&response).into());
+        }
+        Ok(JsonStream::new(body))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming JSON documents
+// ---------------------------------------------------------------------------
+
+/// JSON documents from a long-lived (chunked) response: newline-delimited or concatenated,
+/// whitespace keep-alives (MinIO writes `" "` while idle) are skipped.
+pub struct JsonStream {
+    body: ByteStream,
+    buf: Vec<u8>,
+}
+
+impl JsonStream {
+    pub fn new(body: ByteStream) -> Self {
+        Self {
+            body,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Next document; `None` when the server closed the stream.
+    pub async fn next<T: DeserializeOwned>(&mut self) -> Result<Option<T>> {
+        loop {
+            if let Some(item) = next_document(&mut self.buf)? {
+                return Ok(Some(item));
+            }
+            match self.body.next().await {
+                Some(chunk) => self.buf.extend_from_slice(&chunk?),
+                None if self.buf.iter().all(u8::is_ascii_whitespace) => return Ok(None),
+                None => bail!("unexpected end of JSON stream"),
+            }
+        }
+    }
+
+    /// Calls `on_item` for every document until the stream ends, Ctrl-C is pressed, or stdout
+    /// is closed (an `on_item` error caused by `BrokenPipe`); those end with `Ok(())`.
+    pub async fn for_each<T, F>(mut self, mut on_item: F) -> Result<()>
+    where
+        T: DeserializeOwned,
+        F: FnMut(T) -> Result<()>,
+    {
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+        loop {
+            tokio::select! {
+                _ = &mut ctrl_c => return Ok(()),
+                item = self.next::<T>() => match item? {
+                    None => return Ok(()),
+                    Some(item) => match on_item(item) {
+                        Err(err) if is_broken_pipe(&err) => return Ok(()),
+                        other => other?,
+                    },
+                },
+            }
+        }
+    }
+}
+
+/// Parses one complete document from the front of `buf` (consuming it), skipping leading
+/// whitespace; `None` when more data is needed.
+fn next_document<T: DeserializeOwned>(buf: &mut Vec<u8>) -> Result<Option<T>> {
+    let start = buf
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(buf.len());
+    buf.drain(..start);
+    if buf.is_empty() {
+        return Ok(None);
+    }
+    let mut docs = serde_json::Deserializer::from_slice(buf).into_iter::<T>();
+    match docs.next() {
+        Some(Ok(item)) => {
+            let used = docs.byte_offset();
+            buf.drain(..used);
+            Ok(Some(item))
+        }
+        Some(Err(err)) if err.is_eof() => Ok(None),
+        Some(Err(err)) => Err(err.into()),
+        None => Ok(None),
+    }
+}
+
+/// True when `err` was caused by writing to a closed pipe (`mx admin trace | head`).
+pub fn is_broken_pipe(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
+}
+
+impl AdminClient {
     /// Sends an admin API request (`/minio/admin/v3/<api>`); non-2xx statuses become errors.
     pub async fn admin(
         &self,
@@ -487,7 +775,7 @@ fn encrypt_data_with(
     out.extend_from_slice(salt);
     out.push(PBKDF2_AES_GCM);
     out.extend_from_slice(nonce);
-    out.extend(sio_seal(&key, nonce, data)?);
+    out.extend(sio_seal(&aws_lc_rs::aead::AES_256_GCM, &key, nonce, data)?);
     Ok(out)
 }
 
@@ -503,9 +791,12 @@ fn pbkdf2_key(password: &str, salt: &[u8]) -> [u8; 32] {
     key
 }
 
-fn aes_key(key: &[u8]) -> Result<aws_lc_rs::aead::LessSafeKey> {
-    let unbound = aws_lc_rs::aead::UnboundKey::new(&aws_lc_rs::aead::AES_256_GCM, key)
-        .map_err(|_| anyhow!("invalid AES key"))?;
+fn aead_key(
+    algorithm: &'static aws_lc_rs::aead::Algorithm,
+    key: &[u8],
+) -> Result<aws_lc_rs::aead::LessSafeKey> {
+    let unbound =
+        aws_lc_rs::aead::UnboundKey::new(algorithm, key).map_err(|_| anyhow!("invalid key"))?;
     Ok(aws_lc_rs::aead::LessSafeKey::new(unbound))
 }
 
@@ -528,8 +819,13 @@ fn sio_associated_data(key: &aws_lc_rs::aead::LessSafeKey, nonce: &[u8; 8]) -> R
 
 /// `sio.AES_256_GCM.Stream(key).EncryptWriter(w, nonce, nil)`: 16 KiB fragments, sequence
 /// numbers from 1, final fragment flagged with `0x80` in the associated data.
-fn sio_seal(key_bytes: &[u8], nonce: &[u8; 8], data: &[u8]) -> Result<Vec<u8>> {
-    let key = aes_key(key_bytes)?;
+fn sio_seal(
+    algorithm: &'static aws_lc_rs::aead::Algorithm,
+    key_bytes: &[u8],
+    nonce: &[u8; 8],
+    data: &[u8],
+) -> Result<Vec<u8>> {
+    let key = aead_key(algorithm, key_bytes)?;
     let mut ad = sio_associated_data(&key, nonce)?;
     let mut out = Vec::new();
     for (index, chunk, last) in fragments(data, SIO_BUF_SIZE) {
@@ -546,9 +842,14 @@ fn sio_seal(key_bytes: &[u8], nonce: &[u8; 8], data: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Inverse of [`sio_seal`].
-fn sio_open(key_bytes: &[u8], nonce: &[u8; 8], data: &[u8]) -> Result<Vec<u8>> {
-    let key = aes_key(key_bytes)?;
+/// Inverse of [`sio_seal`] (`algorithm`: AES-256-GCM or ChaCha20-Poly1305).
+fn sio_open(
+    algorithm: &'static aws_lc_rs::aead::Algorithm,
+    key_bytes: &[u8],
+    nonce: &[u8; 8],
+    data: &[u8],
+) -> Result<Vec<u8>> {
+    let key = aead_key(algorithm, key_bytes)?;
     let mut ad = sio_associated_data(&key, nonce)?;
     let mut out = Vec::new();
     for (index, chunk, last) in fragments(data, SIO_BUF_SIZE + TAG_LEN) {
@@ -581,11 +882,22 @@ fn fragments(data: &[u8], size: usize) -> Vec<(u32, &[u8], bool)> {
     out
 }
 
-/// Key derivation for argon2id-encrypted data (ids `0x00`/`0x01`); not linked into the binary.
+/// Key derivation for argon2id-encrypted data (ids `0x00`/`0x01`).
 pub type Argon2idFn<'a> = &'a dyn Fn(&str, &[u8]) -> [u8; 32];
 
-/// Decrypts `madmin.EncryptData` output (PBKDF2 always; argon2id/AES-GCM when `argon2id`
-/// is given).
+/// madmin's argon2id key derivation (`argon2.IDKey(password, salt, 1, 64*1024, 4, 32)`).
+pub fn argon2id_key(password: &str, salt: &[u8]) -> [u8; 32] {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    let params = Params::new(64 * 1024, 1, 4, Some(32)).expect("valid argon2 params");
+    let mut key = [0u8; 32];
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .expect("argon2id key derivation");
+    key
+}
+
+/// Decrypts `madmin.EncryptData` output: PBKDF2/AES-GCM (`0x02`) always, argon2id with
+/// AES-GCM (`0x00`) or ChaCha20-Poly1305 (`0x01`) when `argon2id` is given.
 pub fn decrypt_data(password: &str, data: &[u8], argon2id: Option<Argon2idFn>) -> Result<Vec<u8>> {
     if data.len() < 41 {
         bail!("unexpected header");
@@ -593,12 +905,18 @@ pub fn decrypt_data(password: &str, data: &[u8], argon2id: Option<Argon2idFn>) -
     let (salt, rest) = data.split_at(32);
     let id = rest[0];
     let nonce: [u8; 8] = rest[1..9].try_into().expect("8 bytes");
-    let key = match (id, argon2id) {
-        (PBKDF2_AES_GCM, _) => pbkdf2_key(password, salt),
-        (0x00, Some(derive)) => derive(password, salt),
+    let (key, algorithm) = match (id, argon2id) {
+        (PBKDF2_AES_GCM, _) => (pbkdf2_key(password, salt), &aws_lc_rs::aead::AES_256_GCM),
+        (0x00, Some(derive)) => (derive(password, salt), &aws_lc_rs::aead::AES_256_GCM),
+        (0x01, Some(derive)) => (derive(password, salt), &aws_lc_rs::aead::CHACHA20_POLY1305),
         _ => bail!("unsupported encryption algorithm ID {id:#04x}"),
     };
-    sio_open(&key, &nonce, &rest[9..])
+    sio_open(algorithm, &key, &nonce, &rest[9..])
+}
+
+/// Decrypts an encrypted admin API response (MinIO servers use argon2id unless in FIPS mode).
+pub fn decrypt_response(password: &str, data: &[u8]) -> Result<Vec<u8>> {
+    decrypt_data(password, data, Some(&argon2id_key))
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,16 +1432,6 @@ pub async fn tier_stats(client: &AdminClient) -> Result<Vec<TierInfo>> {
 mod tests {
     use super::*;
 
-    fn argon2id(password: &str, salt: &[u8]) -> [u8; 32] {
-        use argon2::{Algorithm, Argon2, Params, Version};
-        let params = Params::new(64 * 1024, 1, 4, Some(32)).unwrap();
-        let mut key = [0u8; 32];
-        Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-            .hash_password_into(password.as_bytes(), salt, &mut key)
-            .unwrap();
-        key
-    }
-
     fn hex(text: &str) -> Vec<u8> {
         (0..text.len())
             .step_by(2)
@@ -1151,10 +1459,27 @@ mod tests {
             ),
         ];
         for (password, data, len) in vectors {
-            let plain = decrypt_data(password, &hex(data), Some(&argon2id)).unwrap();
+            let plain = decrypt_response(password, &hex(data)).unwrap();
             assert_eq!(plain, vec![0u8; *len]);
         }
-        assert!(decrypt_data("nope", &hex(vectors[1].1), Some(&argon2id)).is_err());
+        assert!(decrypt_response("nope", &hex(vectors[1].1)).is_err());
+        // Same key and stream construction with ChaCha20-Poly1305 (id 0x01).
+        let salt = [7u8; 32];
+        let nonce = [9u8; 8];
+        let key = argon2id_key("pw", &salt);
+        let mut sealed = salt.to_vec();
+        sealed.push(0x01);
+        sealed.extend_from_slice(&nonce);
+        sealed.extend(
+            sio_seal(
+                &aws_lc_rs::aead::CHACHA20_POLY1305,
+                &key,
+                &nonce,
+                b"{\"a\":1}",
+            )
+            .unwrap(),
+        );
+        assert_eq!(decrypt_response("pw", &sealed).unwrap(), b"{\"a\":1}");
     }
 
     #[test]
@@ -1185,7 +1510,7 @@ mod tests {
         assert_eq!(&sealed[33..41], &[2; 8]);
         // Recompute the single final fragment by hand.
         let key = pbkdf2_key("pw", &[1; 32]);
-        let aead = aes_key(&key).unwrap();
+        let aead = aead_key(&aws_lc_rs::aead::AES_256_GCM, &key).unwrap();
         let mut header_tag = Vec::new();
         let mut nonce0 = [2u8; 12];
         nonce0[8..].copy_from_slice(&0u32.to_le_bytes());
@@ -1402,5 +1727,285 @@ mod tests {
         assert_eq!(value["Stats"]["numObjects"], 0);
         assert_eq!(value["DailyStats"]["Bins"].as_array().unwrap().len(), 24);
         assert_eq!(value["DailyStats"]["UpdatedAt"], GO_ZERO_TIME);
+    }
+
+    #[test]
+    fn splits_json_documents_across_chunks() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct Doc {
+            n: u32,
+        }
+        let mut buf = Vec::new();
+        let mut got = Vec::new();
+        // Keep-alive spaces, a document split mid-number, two documents in one chunk.
+        for chunk in [" ", "  {\"n\":1", "2}\n", " {\"n\":3}{\"n\"", ":4}\n "] {
+            buf.extend_from_slice(chunk.as_bytes());
+            while let Some(doc) = next_document::<Doc>(&mut buf).unwrap() {
+                got.push(doc.n);
+            }
+        }
+        assert_eq!(got, vec![12, 3, 4]);
+        assert!(buf.iter().all(u8::is_ascii_whitespace));
+        let mut bad = b"{\"n\":\"x\"}".to_vec();
+        assert!(next_document::<Doc>(&mut bad).is_err());
+    }
+
+    #[test]
+    fn detects_broken_pipe() {
+        let err = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            .context("writing");
+        assert!(is_broken_pipe(&err));
+        assert!(!is_broken_pipe(&anyhow!("other")));
+    }
+
+    #[test]
+    fn request_builder_encrypts_and_decrypts() {
+        let secret = "minio123";
+        let reply = encrypt_data(secret, br#"{"u1":{"status":"enabled"}}"#).unwrap();
+        let server = mock::serve(vec![mock::reply(200, &reply)]);
+        let client = mock::client(&server, secret);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let users: serde_json::Value = rt
+            .block_on(
+                client
+                    .request("PUT", "add-user")
+                    .query("accessKey", "a b")
+                    .encrypted_json(&serde_json::json!({"secretKey": "s"}))
+                    .unwrap()
+                    .decrypt()
+                    .send_json(),
+            )
+            .unwrap();
+        assert_eq!(users["u1"]["status"], "enabled");
+        let request = server.requests().remove(0);
+        assert!(
+            request
+                .head
+                .starts_with("PUT /minio/admin/v3/add-user?accessKey=a%20b HTTP/1.1"),
+            "{}",
+            request.head
+        );
+        assert!(
+            request
+                .head
+                .to_ascii_lowercase()
+                .contains("authorization: aws4-hmac-sha256")
+        );
+        assert_eq!(
+            decrypt_response(secret, &request.body).unwrap(),
+            br#"{"secretKey":"s"}"#
+        );
+    }
+
+    #[test]
+    fn convenience_helpers_map_errors() {
+        let server = mock::serve(vec![
+            mock::reply(200, br#"{"a":1}"#),
+            mock::reply(
+                404,
+                br#"{"Code":"XMinioAdminNoSuchUser","Message":"The specified user does not exist."}"#,
+            ),
+            mock::reply(200, b""),
+        ]);
+        let client = mock::client(&server, "s");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let value: serde_json::Value = rt.block_on(client.get_json("info", &[("x", "1")])).unwrap();
+        assert_eq!(value["a"], 1);
+        let err = rt
+            .block_on(client.post_json("user-info", &[], &serde_json::json!({})))
+            .unwrap_err();
+        let mapped = crate::error::mc_error(&err).unwrap();
+        assert_eq!(mapped.message, "The specified user does not exist.");
+        assert_eq!(mapped.code.as_deref(), Some("XMinioAdminNoSuchUser"));
+        rt.block_on(client.delete("remove-user", &[("accessKey", "u")]))
+            .unwrap();
+        let heads: Vec<String> = server.requests().into_iter().map(|r| r.head).collect();
+        assert!(heads[0].starts_with("GET /minio/admin/v3/info?x=1 "));
+        assert!(heads[1].starts_with("POST /minio/admin/v3/user-info "));
+        assert!(heads[2].starts_with("DELETE /minio/admin/v3/remove-user?accessKey=u "));
+    }
+
+    #[test]
+    fn streams_chunked_json() {
+        #[derive(Debug, Deserialize)]
+        struct Entry {
+            path: String,
+        }
+        let server = mock::serve(vec![mock::chunked(
+            200,
+            &[" ", "{\"path\":\"/a\"}\n", " ", "{\"path\":", "\"/b\"}\n"],
+        )]);
+        let client = mock::client(&server, "s");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let paths = rt
+            .block_on(async {
+                let stream = client
+                    .request("GET", "trace")
+                    .query("all", "true")
+                    .stream()
+                    .await?;
+                let mut paths = Vec::new();
+                stream
+                    .for_each(|entry: Entry| {
+                        paths.push(entry.path);
+                        Ok(())
+                    })
+                    .await?;
+                anyhow::Ok(paths)
+            })
+            .unwrap();
+        assert_eq!(paths, vec!["/a", "/b"]);
+
+        // A closed stdout ends the stream without an error.
+        let server = mock::serve(vec![mock::chunked(200, &["{}\n{}\n"])]);
+        let client = mock::client(&server, "s");
+        let result = rt.block_on(async {
+            let stream = client.request("GET", "trace").stream().await?;
+            stream
+                .for_each(|_: serde_json::Value| {
+                    Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe).into())
+                })
+                .await
+        });
+        assert!(result.is_ok());
+
+        let server = mock::serve(vec![mock::reply(
+            403,
+            br#"{"Code":"AccessDenied","Message":"Access Denied."}"#,
+        )]);
+        let client = mock::client(&server, "s");
+        let err = rt
+            .block_on(client.request("GET", "log").stream())
+            .err()
+            .unwrap();
+        assert_eq!(
+            crate::error::mc_error(&err).unwrap().message,
+            "Access Denied."
+        );
+    }
+}
+
+/// Minimal HTTP/1.1 server for unit tests: serves canned responses in order, one request
+/// per connection, and records the requests.
+#[cfg(test)]
+pub(crate) mod mock {
+    use super::AdminClient;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    pub struct Request {
+        /// Request line and headers.
+        pub head: String,
+        pub body: Vec<u8>,
+    }
+
+    pub struct Server {
+        pub url: String,
+        requests: Arc<Mutex<Vec<Request>>>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Server {
+        /// Requests received so far (waits until every canned response was served).
+        pub fn requests(mut self) -> Vec<Request> {
+            if let Some(handle) = self.handle.take() {
+                handle.join().unwrap();
+            }
+            std::mem::take(&mut *self.requests.lock().unwrap())
+        }
+    }
+
+    /// Response: status line + headers, then body chunks (written with small pauses).
+    pub struct Reply {
+        head: String,
+        chunks: Vec<Vec<u8>>,
+        chunked: bool,
+    }
+
+    pub fn reply(status: u16, body: &[u8]) -> Reply {
+        Reply {
+            head: format!(
+                "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            ),
+            chunks: vec![body.to_vec()],
+            chunked: false,
+        }
+    }
+
+    pub fn chunked(status: u16, chunks: &[&str]) -> Reply {
+        Reply {
+            head: format!(
+                "HTTP/1.1 {status} X\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n"
+            ),
+            chunks: chunks.iter().map(|c| c.as_bytes().to_vec()).collect(),
+            chunked: true,
+        }
+    }
+
+    pub fn serve(replies: Vec<Reply>) -> Server {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let handle = std::thread::spawn(move || {
+            for reply in replies {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                    head.push_str(&line);
+                }
+                let length = head
+                    .lines()
+                    .find_map(|l| {
+                        let (name, value) = l.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                recorded.lock().unwrap().push(Request { head, body });
+                let mut stream = stream;
+                stream.write_all(reply.head.as_bytes()).unwrap();
+                for chunk in &reply.chunks {
+                    if reply.chunked {
+                        let _ = write!(stream, "{:x}\r\n", chunk.len());
+                        let _ = stream.write_all(chunk);
+                        let _ = stream.write_all(b"\r\n");
+                        let _ = stream.flush();
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    } else {
+                        let _ = stream.write_all(chunk);
+                    }
+                }
+                if reply.chunked {
+                    let _ = stream.write_all(b"0\r\n\r\n");
+                }
+            }
+        });
+        Server {
+            url,
+            requests,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn client(server: &Server, secret_key: &str) -> AdminClient {
+        AdminClient::new(&crate::config::model::AliasConfig {
+            url: server.url.clone(),
+            access_key: "minio".into(),
+            secret_key: secret_key.into(),
+            api: "S3v4".into(),
+            path: "auto".into(),
+            ..Default::default()
+        })
+        .unwrap()
     }
 }

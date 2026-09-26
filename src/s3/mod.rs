@@ -15,11 +15,24 @@
 //! | `notify`        | bucket notifications                                   | G     |
 //! | `admin`         | MinIO admin API (quota, tiers, ...)                    | H     |
 //! | `admin_info`    | admin ServerInfo (ping -a/--node)                      | K     |
+//! | `admin_iam`     | users, groups, policies, service accounts, access keys | IAM   |
+//! | `admin_idp`     | OpenID / LDAP IDP config, LDAP policies and keys       | IDP   |
+//! | `admin_server`  | service, update, info, config, prometheus, kms, cluster | SERVER |
+//! | `admin_stream`  | trace, logs, top, scanner, heal                        | STREAM |
+//! | `admin_topo`    | site replication, decommission, rebalance              | TOPO  |
+//! | `batch`         | batch jobs, S3 Select                                  | JOBS  |
+//! | `listen`        | bucket notification listening (watch)                  | STREAM |
 //! | `replication`   | bucket replication                                     | H     |
 //! | `io_ext`        | if-none-match client, rewind lookup, find metadata/tags | E     |
 
 pub mod admin;
+pub mod admin_iam;
+pub mod admin_idp;
 pub mod admin_info;
+pub mod admin_server;
+pub mod admin_stream;
+pub mod admin_topo;
+pub mod batch;
 pub mod bucket;
 pub mod client;
 pub mod delete;
@@ -27,6 +40,7 @@ pub mod error;
 pub mod io_ext;
 pub mod lifecycle;
 pub mod list;
+pub mod listen;
 pub mod lock;
 pub mod multipart;
 pub mod notify;

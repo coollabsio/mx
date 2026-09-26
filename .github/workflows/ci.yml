@@ -21,7 +21,7 @@ jobs:
       - run: sh tests/container_smoke.sh mx:test
 
   # Side-by-side output parity with the pinned upstream mc (tests/mc.version). Informational:
-  # known gaps are #[ignore]d in tests/live_mc_parity.rs; this job only guards fixed cases.
+  # known gaps are #[ignore]d in tests/live_mc_parity*.rs; this job only guards fixed cases.
   mc-parity:
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -32,4 +32,4 @@ jobs:
         with:
           path: target/mc-ref
           key: mc-ref-${{ hashFiles('tests/mc.version', 'tests/mc_ref.sh') }}
-      - run: MX_MC_PARITY=1 sh tests/live_minio.sh live_mc_parity
+      - run: MX_MC_PARITY=1 sh tests/live_minio.sh 'live_mc_parity*'

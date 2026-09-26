@@ -9,6 +9,9 @@
 //! - `{bucket}` the side's bucket name
 //! - `{target}` `{alias}/{bucket}`
 //! - `{work}`   the side's work dir (cwd of every command)
+//! - `{uniq}`   the side's unique IAM name (`mxu<10 digits>mc|mx`, 15 chars): prefix users,
+//!   groups, policies and access keys with it (`{uniq}u1`); output shows `<UNIQ>`.
+//!   [`Parity::iam_cleanup`] removes everything named `mxu<digits>*` of the fixture on drop.
 //!
 //! Setup commands ([`Parity::setup`]) always run through the reference `mc` so bugs in `mx`
 //! cannot skew the fixture. `mx` is run through a symlink named `mc` (program name appears
@@ -85,6 +88,8 @@ pub struct Side {
     pub home: tempfile::TempDir,
     pub work: PathBuf,
     pub bucket: String,
+    /// Unique IAM name prefix (`{uniq}`).
+    pub uniq: String,
     /// Program to execute (reference mc, or a `mc`-named symlink to mx).
     pub program: PathBuf,
 }
@@ -102,7 +107,8 @@ impl Side {
     /// `{endpoint2}` (server 2 URL as seen from server 1), `{remote2}` (the same with
     /// credentials, for `replicate add --remote-bucket`), `{access_key2}`, `{secret_key2}`.
     /// Names shared by both sides: `{base}` (bucket name without `-mc`/`-mx`), `{BASE}`
-    /// (upper-cased, e.g. a tier name). `{BUCKET}` is the upper-cased bucket name.
+    /// (upper-cased, e.g. a tier name). `{BUCKET}` is the upper-cased bucket name. `{uniq}` is
+    /// the side's IAM name prefix.
     pub fn expand(&self, arg: &str) -> String {
         let alias = live::alias_name();
         let base = self
@@ -116,6 +122,7 @@ impl Side {
         );
         let remote2 = endpoint2.replacen("://", &format!("://{access2}:{secret2}@"), 1);
         let arg = arg
+            .replace("{uniq}", &self.uniq)
             .replace("{alias2}", &env_or("MX_TEST_ALIAS2", "local2"))
             .replace("{endpoint2}", &endpoint2)
             .replace("{remote2}", &remote2)
@@ -158,6 +165,8 @@ pub struct Parity {
     alias2: bool,
     /// Commands (already expanded) run with the reference mc on drop, best effort.
     cleanups: Vec<Vec<String>>,
+    /// Remove the fixture's IAM entities (`{uniq}*`) on drop ([`Parity::iam_cleanup`]).
+    iam_cleanup: bool,
 }
 
 impl Parity {
@@ -192,6 +201,7 @@ impl Parity {
             .unwrap_or_default()
             .as_nanos();
         let base = format!("{}-p{nanos}", live::bucket_prefix());
+        let uniq_base = format!("mxu{:010}", nanos % 10_000_000_000);
         let side = |tool: Tool, program: PathBuf| {
             let home = tempfile::tempdir().expect("tempdir");
             let work = home.path().join("work");
@@ -201,6 +211,7 @@ impl Parity {
                 work,
                 home,
                 bucket: format!("{base}-{}", tool.label()),
+                uniq: format!("{uniq_base}{}", tool.label()),
                 program,
             }
         };
@@ -217,8 +228,10 @@ impl Parity {
             unordered: false,
             alias2: false,
             cleanups: Vec::new(),
+            iam_cleanup: false,
         };
         parity.normalizer.bucket_prefix(&live::bucket_prefix());
+        parity.normalizer.uniq();
         for tool in [Tool::Mc, Tool::Mx] {
             parity.set_alias(tool);
         }
@@ -402,6 +415,13 @@ impl Parity {
         }
     }
 
+    /// Removes every access key, user, group and policy named `{uniq}*` (either side) when the
+    /// fixture is dropped (IAM state is server-global). Use it in every test creating IAM
+    /// entities; name them with the `{uniq}` prefix.
+    pub fn iam_cleanup(&mut self) {
+        self.iam_cleanup = true;
+    }
+
     /// Writes `rel` (relative to each side's work dir) with `contents`.
     pub fn file(&self, rel: &str, contents: &str) {
         for side in [&self.mc, &self.mx] {
@@ -573,6 +593,9 @@ impl Drop for Parity {
                 &[],
             );
         }
+        if self.iam_cleanup {
+            self.remove_iam(&live::alias_name());
+        }
         let mut aliases = vec![live::alias_name()];
         if self.alias2 {
             aliases.push(env_or("MX_TEST_ALIAS2", "local2"));
@@ -584,6 +607,77 @@ impl Drop for Parity {
 }
 
 impl Parity {
+    /// Runs a reference mc command (setup home, not templated, best effort) and returns its
+    /// JSON documents, e.g. to inspect server state: `p.mc_json(&["--json", "admin", ...])`.
+    pub fn mc_json(&self, args: &[&str]) -> Vec<Value> {
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let out = run_program(
+            &self.mc_bin,
+            self.setup_home.path(),
+            self.setup_home.path(),
+            &args,
+            None,
+            &[],
+        );
+        json_docs(&out.stdout).unwrap_or_default()
+    }
+
+    /// Removes the fixture's IAM entities (`mxu<digits>*`): access keys, then users (which
+    /// drops their keys and group memberships), then groups and policies.
+    fn remove_iam(&self, alias: &str) {
+        let prefix = self.mc.uniq.trim_end_matches("mc").to_string();
+        let target = format!("{alias}/");
+        let ours = |name: &str| name.starts_with(&prefix);
+        let mut keys = Vec::new();
+        for doc in self.mc_json(&["--json", "admin", "accesskey", "list", &target, "--all"]) {
+            for list in ["svcaccs", "stsKeys"] {
+                for key in doc
+                    .get(list)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(key) = key.get("accessKey").and_then(Value::as_str) {
+                        keys.push(key.to_string());
+                    }
+                }
+            }
+        }
+        for key in keys.iter().filter(|key| ours(key)) {
+            self.mc_json(&["admin", "accesskey", "remove", &target, key]);
+        }
+        for doc in self.mc_json(&["--json", "admin", "user", "list", alias]) {
+            if let Some(user) = doc
+                .get("accessKey")
+                .and_then(Value::as_str)
+                .filter(|u| ours(u))
+            {
+                self.mc_json(&["admin", "user", "remove", alias, user]);
+            }
+        }
+        for doc in self.mc_json(&["--json", "admin", "group", "list", alias]) {
+            for group in doc
+                .get("groups")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(group) = group.as_str().filter(|g| ours(g)) {
+                    self.mc_json(&["admin", "group", "remove", alias, group]);
+                }
+            }
+        }
+        for doc in self.mc_json(&["--json", "admin", "policy", "list", alias]) {
+            if let Some(policy) = doc
+                .get("policy")
+                .and_then(Value::as_str)
+                .filter(|p| ours(p))
+            {
+                self.mc_json(&["admin", "policy", "remove", alias, policy]);
+            }
+        }
+    }
+
     /// Removes every bucket the fixture may have created on `alias` (`{base}`, `{bucket}`
     /// and `{bucket}-*`).
     fn remove_buckets(&self, alias: &str) {
@@ -856,6 +950,13 @@ impl Normalizer {
         let pattern = format!(r"{}-p\d+-m[cx]", regex::escape(prefix));
         self.rules
             .insert(0, (Regex::new(&pattern).unwrap(), "<BUCKET>".into()));
+        self
+    }
+
+    /// Canonicalizes `{uniq}` IAM names (`mxu<10 digits>mc|mx`) to `<UNIQ>`.
+    pub fn uniq(&mut self) -> &mut Self {
+        self.rules
+            .insert(0, (Regex::new(r"mxu\d{10}m[cx]").unwrap(), "<UNIQ>".into()));
         self
     }
 

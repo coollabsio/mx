@@ -1,5 +1,7 @@
+pub mod admin;
 pub mod alias;
 pub mod anonymous;
+pub mod batch;
 pub mod cat;
 pub mod cors;
 pub mod cp;
@@ -10,6 +12,7 @@ pub mod event;
 pub mod find;
 pub mod get;
 pub mod head;
+pub mod idp;
 pub mod ilm;
 pub mod ilm_restore;
 pub mod ilm_tier;
@@ -29,12 +32,15 @@ pub mod replicate;
 pub mod retention;
 pub mod rm;
 pub mod share;
+pub mod sql;
 pub mod stat;
 pub mod tag;
 pub mod tree;
 pub mod undo;
+pub mod update;
 pub mod util;
 pub mod version;
+pub mod watch;
 
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
@@ -45,6 +51,11 @@ use anyhow::Result;
 /// Resolves an alias (config file, `MC_CONFIG_ENV_FILE`, or `MC_HOST_<alias>`).
 pub fn alias_config(store: &ConfigStore, alias: &str) -> Result<AliasConfig> {
     store.alias(alias)
+}
+
+/// Placeholder result for commands that are registered but not implemented yet.
+pub fn not_implemented(command: &str) -> Result<()> {
+    anyhow::bail!("`{command}` is not implemented yet")
 }
 
 pub fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -92,5 +103,11 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Od(args) => od::run(args, json),
         Commands::Replicate(args) => replicate::run(args, json),
         Commands::Quota(args) => quota::run(args, json),
+        Commands::Admin(args) => admin::run(args, json),
+        Commands::Idp(args) => idp::run(args, json),
+        Commands::Batch(args) => batch::run(args, json),
+        Commands::Sql(args) => sql::run(args, json),
+        Commands::Watch(args) => watch::run(args, json),
+        Commands::Update(args) => update::run(args, json),
     }
 }

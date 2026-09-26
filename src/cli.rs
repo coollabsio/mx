@@ -2,9 +2,9 @@
 //! under `crate::commands`.
 
 use crate::commands::{
-    alias, anonymous, cat, cors, cp, diff, du, encrypt, event, find, get, head, ilm, legalhold, ls,
-    mb, mirror, mv, od, ping, pipe, put, quota, rb, ready, replicate, retention, rm, share, stat,
-    tag, tree, undo, version,
+    admin, alias, anonymous, batch, cat, cors, cp, diff, du, encrypt, event, find, get, head, idp,
+    ilm, legalhold, ls, mb, mirror, mv, od, ping, pipe, put, quota, rb, ready, replicate,
+    retention, rm, share, sql, stat, tag, tree, undo, update, version, watch,
 };
 use crate::resolve::ResolveMapping;
 use clap::{ArgAction, Parser, Subcommand};
@@ -213,6 +213,18 @@ pub enum Commands {
     Replicate(replicate::ReplicateArgs),
     #[command(about = "manage bucket quota")]
     Quota(quota::QuotaArgs),
+    #[command(about = "manage MinIO servers")]
+    Admin(admin::AdminArgs),
+    #[command(about = "manage MinIO IDentity Provider server configuration")]
+    Idp(idp::IdpArgs),
+    #[command(about = "manage batch jobs")]
+    Batch(batch::BatchArgs),
+    #[command(about = "run sql queries on objects")]
+    Sql(sql::SqlArgs),
+    #[command(about = "listen for object notification events")]
+    Watch(watch::WatchArgs),
+    #[command(about = "update mc to latest release")]
+    Update(update::UpdateArgs),
 }
 
 #[cfg(test)]
