@@ -4,12 +4,22 @@ on:
   pull_request:
   push:
     branches: [main]
+  # release.yml runs this workflow as its test gate for the tagged commit.
+  workflow_call:
+    inputs:
+      skip-parity:
+        description: Skip the informational mc-parity job.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
@@ -19,3 +29,62 @@ jobs:
       - run: sh tests/live_minio.sh
       - run: docker build --tag mx:test .
       - run: sh tests/container_smoke.sh mx:test
+
+  # Portability: macOS (arm64 + Intel) and Windows builds must compile, pass the unit tests
+  # and work on local files before a release builds them (release.yml uses the same setup).
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          # Last Intel macOS image (GitHub supports it until Aug 2027); afterwards
+          # cross-compile x86_64-apple-darwin on macos-latest instead.
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    env:
+      # aws-lc-sys: use its prebuilt NASM objects on Windows (no NASM on the runner).
+      AWS_LC_SYS_PREBUILT_NASM: 1
+      # Windows: link the C runtime statically (no VC++ redistributable needed).
+      RUSTFLAGS: ${{ contains(matrix.target, 'windows') && '-C target-feature=+crt-static' || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --locked --target ${{ matrix.target }}
+      # Unit tests are platform-neutral; the tests/*_cli.rs suites assume Linux (program
+      # name without `.exe`, Linux OS error texts, `sh`/`kill`).
+      - run: cargo test --locked --target ${{ matrix.target }} --lib --bins
+      - name: Smoke test
+        run: |
+          set -eu
+          bin="target/${{ matrix.target }}/debug/mx"
+          test -f "$bin" || bin="$bin.exe"
+          "$bin" --help
+          sh .github/scripts/check-version.sh "$bin" \
+            "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)" "$GITHUB_SHA"
+          sh .github/scripts/smoke-local.sh "$bin"
+
+  # Side-by-side output parity with the pinned upstream mc (tests/mc.version). Informational:
+  # known gaps are #[ignore]d in tests/live_mc_parity*.rs; this job only guards fixed cases.
+  mc-parity:
+    if: ${{ !inputs.skip-parity }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: target/mc-ref
+          key: mc-ref-${{ hashFiles('tests/mc.version', 'tests/mc_ref.sh') }}
+      - run: MX_MC_PARITY=1 sh tests/live_minio.sh 'live_mc_parity*'

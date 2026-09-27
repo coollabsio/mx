@@ -1,93 +1,51 @@
-use crate::cli::CopyArgs;
-use crate::commands::cp::{
-    resolve_destination_key, resolve_local_destination, source_name_from_key,
-    source_name_from_local,
-};
-use crate::commands::{alias_config, runtime};
-use crate::config::ConfigStore;
-use crate::location::{Location, parse_location};
-use anyhow::{Result, bail};
-use serde::Serialize;
+//! `mx mv`: a `cp` session that removes each source after it was copied successfully.
 
-pub fn run(args: CopyArgs, json: bool) -> Result<()> {
-    let store = ConfigStore::load_or_create()?;
-    let source = parse_location(&args.source, store.config());
-    let target = parse_location(&args.target, store.config());
+use crate::commands::cp::{CopyOptions, run_session};
+use crate::flags::{ChecksumFlag, EncFlags, MetadataFlags, TimeFilterFlags};
+use anyhow::Result;
+use clap::Args;
 
-    let result = match (&source, &target) {
-        (Location::S3(src), Location::S3(dst)) => {
-            let src_alias = alias_config(&store, &src.alias)?;
-            let dst_alias = alias_config(&store, &dst.alias)?;
-            let src_bucket = src.require_bucket()?.to_string();
-            let src_key = src.require_object_key()?;
-            let dst_bucket = dst.require_bucket()?.to_string();
-            let dst_key = resolve_destination_key(dst, source_name_from_key(&src_key))?;
+#[derive(Debug, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "older_than" => a.help("move objects older than value in duration string (e.g. 7d10h31s)"),
+    "newer_than" => a.help("move objects newer than value in duration string (e.g. 7d10h31s)"),
+    _ => a,
+}))]
+pub struct MoveArgs {
+    /// move recursively
+    #[arg(short = 'r', long)]
+    pub recursive: bool,
+    #[command(flatten)]
+    pub time: TimeFilterFlags,
+    #[command(flatten)]
+    pub metadata: MetadataFlags,
+    /// preserve filesystem attributes (mode, ownership, timestamps)
+    #[arg(short = 'a', long)]
+    pub preserve: bool,
+    /// disable multipart upload feature
+    #[arg(long)]
+    pub disable_multipart: bool,
+    #[command(flatten)]
+    pub checksum: ChecksumFlag,
+    #[command(flatten)]
+    pub enc: EncFlags,
+    /// SOURCE [SOURCE...] TARGET
+    #[arg(required = true, num_args = 2.., value_name = "PATH")]
+    pub paths: Vec<String>,
+}
 
-            let rt = runtime()?;
-            rt.block_on(crate::s3::copy_object(
-                &src_alias,
-                &src_bucket,
-                &src_key,
-                &dst_alias,
-                &dst_bucket,
-                &dst_key,
-            ))?;
-            rt.block_on(crate::s3::delete_object(&src_alias, &src_bucket, &src_key))?;
-            MoveResult::new(
-                args.source,
-                format!("{}/{dst_bucket}/{}", dst.alias, dst_key),
-            )
-        }
-        (Location::Local(src), Location::S3(dst)) => {
-            let alias = alias_config(&store, &dst.alias)?;
-            let bucket = dst.require_bucket()?.to_string();
-            let key = resolve_destination_key(dst, source_name_from_local(src)?)?;
-            runtime()?.block_on(crate::s3::put_local_file(&alias, &bucket, &key, src))?;
-            std::fs::remove_file(src)?;
-            MoveResult::new(args.source, format!("{}/{bucket}/{}", dst.alias, key))
-        }
-        (Location::S3(src), Location::Local(dst)) => {
-            let alias = alias_config(&store, &src.alias)?;
-            let bucket = src.require_bucket()?.to_string();
-            let key = src.require_object_key()?;
-            let path = resolve_local_destination(dst, source_name_from_key(&key))?;
-            let rt = runtime()?;
-            rt.block_on(crate::s3::download_object_to_path(
-                &alias, &bucket, &key, &path,
-            ))?;
-            rt.block_on(crate::s3::delete_object(&alias, &bucket, &key))?;
-            MoveResult::new(args.source, path.display().to_string())
-        }
-        (Location::Local(_), Location::Local(_)) => {
-            bail!("Local-to-local move is not supported by `mx mv`.")
-        }
+pub fn run(args: MoveArgs, json: bool) -> Result<()> {
+    let options = CopyOptions {
+        recursive: args.recursive,
+        time: args.time,
+        metadata: args.metadata,
+        preserve: args.preserve,
+        disable_multipart: args.disable_multipart,
+        checksum: args.checksum.checksum,
+        enc: args.enc.entries()?,
+        max_workers: 4,
+        is_move: true,
+        ..Default::default()
     };
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-    } else {
-        println!(
-            "Moved `{}` -> `{}` successfully.",
-            result.source, result.target
-        );
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, Serialize)]
-struct MoveResult {
-    status: &'static str,
-    source: String,
-    target: String,
-}
-
-impl MoveResult {
-    fn new(source: String, target: String) -> Self {
-        Self {
-            status: "success",
-            source,
-            target,
-        }
-    }
+    run_session(&args.paths, options, json)
 }

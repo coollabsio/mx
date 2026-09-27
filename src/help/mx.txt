@@ -1,0 +1,29 @@
+# mx-only commands (not in the pinned mc), written in mc's style. Same format as mc.txt.
+=== flags replicate resync cancel
+--config-dir value, -C value     path to configuration folder (default: "@CONFIG_DIR@") [$MC_CONFIG_DIR]
+--quiet, -q                      disable progress bar display [$MC_QUIET]
+--disable-pager, --dp            disable mc internal pager and print to raw stdout [$MC_DISABLE_PAGER]
+--no-color                       disable color theme [$MC_NO_COLOR]
+--json                           enable JSON lines formatted output [$MC_JSON]
+--debug                          enable debug output [$MC_DEBUG]
+--resolve value                  resolves HOST[:PORT] to an IP address. Example: minio.local:9000=10.10.75.1 [$MC_RESOLVE]
+--insecure                       disable SSL certificate verification [$MC_INSECURE]
+--limit-upload value             limits uploads to a maximum rate in KiB/s, MiB/s, GiB/s. (default: unlimited) [$MC_LIMIT_UPLOAD]
+--limit-download value           limits downloads to a maximum rate in KiB/s, MiB/s, GiB/s. (default: unlimited) [$MC_LIMIT_DOWNLOAD]
+--custom-header value, -H value  add custom HTTP header to the request. 'key:value' format.
+--remote-bucket value            remote bucket ARN
+--help, -h                       show help
+=== help replicate resync cancel
+NAME:
+   @PROG@ replicate resync cancel - cancel an ongoing replication resync
+
+USAGE:
+   @PROG@ replicate resync cancel TARGET
+
+FLAGS:
+@FLAGS:3@
+   
+EXAMPLES:
+  1. Cancel the replication resync in bucket "mybucket" under specific remote bucket target.
+   $ @PROG@ replicate resync cancel myminio/mybucket --remote-bucket "arn:minio:replication::xxx:mybucket"
+

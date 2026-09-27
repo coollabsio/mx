@@ -1,45 +1,56 @@
+pub mod admin;
 pub mod alias;
 pub mod anonymous;
+pub mod batch;
 pub mod cat;
 pub mod cors;
 pub mod cp;
 pub mod diff;
 pub mod du;
 pub mod encrypt;
+pub mod event;
 pub mod find;
 pub mod get;
 pub mod head;
+pub mod idp;
 pub mod ilm;
+pub mod ilm_restore;
+pub mod ilm_tier;
+pub mod legalhold;
 pub mod ls;
 pub mod mb;
 pub mod mirror;
 pub mod mv;
+pub mod od;
 pub mod ping;
 pub mod pipe;
 pub mod put;
+pub mod quota;
 pub mod rb;
 pub mod ready;
+pub mod replicate;
+pub mod retention;
 pub mod rm;
 pub mod share;
+pub mod sql;
 pub mod stat;
 pub mod tag;
 pub mod tree;
+pub mod undo;
+pub mod update;
 pub mod util;
 pub mod version;
+pub mod watch;
 
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
 
 use crate::cli::{Cli, Commands};
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
+/// Resolves an alias (config file, `MC_CONFIG_ENV_FILE`, or `MC_HOST_<alias>`).
 pub fn alias_config(store: &ConfigStore, alias: &str) -> Result<AliasConfig> {
-    store
-        .config()
-        .aliases
-        .get(alias)
-        .cloned()
-        .ok_or_else(|| anyhow!("No such alias `{alias}` found."))
+    store.alias(alias)
 }
 
 pub fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -48,8 +59,11 @@ pub fn runtime() -> Result<tokio::runtime::Runtime> {
 
 pub fn run(cli: Cli) -> Result<()> {
     let json = cli.json;
+    let Some(command) = cli.command else {
+        return Ok(());
+    };
 
-    match cli.command {
+    match command {
         Commands::Alias(args) => alias::run(args.command, json),
         Commands::Ls(args) => ls::run(args, json),
         Commands::Mb(args) => mb::run(args, json),
@@ -60,7 +74,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Cp(args) => cp::run(args, json),
         Commands::Mv(args) => mv::run(args, json),
         Commands::Put(args) => put::run(args, json),
-        Commands::Mirror(args) => mirror::run(args, json),
+        Commands::Mirror(args) => mirror::run(*args, json),
         Commands::Pipe(args) => pipe::run(args, json),
         Commands::Get(args) => get::run(args, json),
         Commands::Head(args) => head::run(args, json),
@@ -75,7 +89,20 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Version(args) => version::run(args.command, json),
         Commands::Cors(args) => cors::run(args.command, json),
         Commands::Encrypt(args) => encrypt::run(args.command, json),
-        Commands::Anonymous(args) => anonymous::run(args.command, json),
+        Commands::Anonymous(args) => anonymous::run(args, json),
         Commands::Ilm(args) => ilm::run(args.command, json),
+        Commands::Retention(args) => retention::run(args, json),
+        Commands::Legalhold(args) => legalhold::run(args, json),
+        Commands::Event(args) => event::run(args, json),
+        Commands::Undo(args) => undo::run(args, json),
+        Commands::Od(args) => od::run(args, json),
+        Commands::Replicate(args) => replicate::run(args, json),
+        Commands::Quota(args) => quota::run(args, json),
+        Commands::Admin(args) => admin::run(args, json),
+        Commands::Idp(args) => idp::run(args, json),
+        Commands::Batch(args) => batch::run(args, json),
+        Commands::Sql(args) => sql::run(args, json),
+        Commands::Watch(args) => watch::run(args, json),
+        Commands::Update(args) => update::run(args, json),
     }
 }

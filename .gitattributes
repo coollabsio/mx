@@ -1,0 +1,4 @@
+# LF everywhere (Windows runners default to core.autocrlf=true): help pages and test
+# fixtures are embedded with include_str!/raw strings and compared byte for byte.
+* text=auto eol=lf
+*.pem -text

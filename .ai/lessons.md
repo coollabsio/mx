@@ -2,4 +2,10 @@
 
 - Container smoke tests for an S3 client must run real bucket and object operations against an S3-compatible server. CLI-only checks are not sufficient.
 - A compatibility binary copied into other container images must be statically linked, exist at the exact source path consumers copy, and be tested on every published architecture.
-- MinIO can reject unsigned AWS SDK metadata headers (`amz-sdk-invocation-id`, `amz-sdk-request`). Strip those headers before signing.
+- MinIO can reject unsigned AWS SDK metadata headers (`amz-sdk-invocation-id`, `amz-sdk-request`). The SDK adds them in its own `modify_before_transmit` hooks (after signing), so strip them in a client interceptor's `modify_before_transmit` (client interceptors run after the SDK's); stripping in `modify_before_signing` is a no-op. Verify with `mx --debug`.
+- Official MinIO images (quay.io/minio, dl.min.io) are no longer pullable. Tests pin a community build in `tests/minio.image` (override with `MX_MINIO_IMAGE`); some features (for example bucket CORS) may answer `NotImplemented` there.
+- Object keys can end in `/` (folder markers). Never rebuild absolute keys by trimming or joining without keeping the trailing slash; a lost slash makes destructive commands hit a sibling key.
+- Upstream `mc` is archived and dl.min.io binaries return 410. The reference mc for parity tests is built from the release tag with docker (`tests/mc_ref.sh`); mc runs transfers in parallel, so compare `cp -r`/`mirror` output order-insensitively.
+- clap derive drops the trailing period of a single-line doc comment. Use an explicit `help = "..."` when the text must end with `.` (mc flag help parity).
+- mc reports the server's error message for most operations and only translates `NoSuchBucket`/`NoSuchKey` for object HEAD/GET/PUT/COPY and bucket-root stat/ls (`.s3_object()` vs `.s3()`). MinIO answers some bucket-config reads on a missing bucket with a "config not found" code; mc sees `NoSuchBucket` only because minio-go looks up the bucket location first.
+- mx prints mc's help from `src/help/mc.txt` (captured from the pinned mc), not from clap. clap `help`/doc strings no longer show up anywhere; a new mc flag or command needs `MX_HELP_REGEN=1` regeneration, and an mx-only command needs a page in `src/help/mx.txt` (the `help::tests` unit test fails otherwise).

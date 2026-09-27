@@ -31,16 +31,20 @@ fn mc_name_prefixes_runtime_errors_with_mc() {
 
     Command::new(binary)
         .env("HOME", home.path())
-        .args(["ls", "missing"])
+        .current_dir(home.path())
+        .args(["ls", "missing/bucket"])
         .assert()
         .code(1)
         .stderr(predicate::str::starts_with("mc:"));
 }
 
 #[test]
-fn invalid_command_use_returns_status_two() {
+fn invalid_command_use_returns_status_one_like_mc() {
     Command::new(assert_cmd::cargo::cargo_bin!("mx"))
         .arg("--not-supported")
         .assert()
-        .code(2);
+        .code(1)
+        .stderr(predicate::str::starts_with(
+            "mx: <ERROR> Invalid command usage,",
+        ));
 }

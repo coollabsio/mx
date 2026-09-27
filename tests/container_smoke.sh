@@ -30,7 +30,7 @@ do
     sleep 1
 done
 
-docker run --rm "$image" --help | grep 'Usage: mc'
+docker run --rm "$image" --help | grep -q '^  mc \[FLAGS\] COMMAND'
 docker run --rm --entrypoint /bin/sh "$image" -c 'test -x /usr/bin/mc && test -x /usr/bin/mx && test -f /etc/alpine-release'
 container="$(docker create "$image")"
 binary="$(mktemp)"
@@ -46,7 +46,7 @@ set +e
 docker run --rm "$image" --not-supported >/dev/null 2>&1
 status=$?
 set -e
-test "$status" = 2
+test "$status" = 1
 
 run_mc() {
     docker run --rm --network "$network" -v "$volume:/home/mx/.mx" "$image" "$@"
@@ -64,31 +64,31 @@ run_mc rb local/smoke
 server_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$server")"
 resolve="pinned.invalid:9000=$server_ip"
 run_mc alias set --resolve "$resolve" pinned http://pinned.invalid:9000 minioadmin minioadmin
-run_mc mb --resolve "$resolve" pinned/coolify
-run_mc mb --ignore-existing --resolve "$resolve" pinned/coolify
+run_mc mb --resolve "$resolve" pinned/resolve-smoke
+run_mc mb --ignore-existing --resolve "$resolve" pinned/resolve-smoke
 printf 'streamed archive\n' | docker run --rm -i --network "$network" \
-    -v "$volume:/home/mx/.mx" "$image" pipe --quiet --resolve "$resolve" pinned/coolify/archive.tar.gz
-run_mc stat --json --resolve "$resolve" pinned/coolify/archive.tar.gz | grep '"size":17'
+    -v "$volume:/home/mx/.mx" "$image" pipe --quiet --resolve "$resolve" pinned/resolve-smoke/archive.tar.gz
+run_mc stat --json --resolve "$resolve" pinned/resolve-smoke/archive.tar.gz | grep '"size":17'
 dd if=/dev/zero bs=1048576 count=9 2>/dev/null | docker run --rm -i --network "$network" \
-    -v "$volume:/home/mx/.mx" "$image" pipe --quiet --resolve "$resolve" pinned/coolify/large.bin
-run_mc stat --json --resolve "$resolve" pinned/coolify/large.bin | grep '"size":9437184'
-run_mc rm --resolve "$resolve" pinned/coolify/large.bin
-run_mc rm --resolve "$resolve" pinned/coolify/archive.tar.gz
-run_mc rb --resolve "$resolve" pinned/coolify
+    -v "$volume:/home/mx/.mx" "$image" pipe --quiet --resolve "$resolve" pinned/resolve-smoke/large.bin
+run_mc stat --json --resolve "$resolve" pinned/resolve-smoke/large.bin | grep '"size":9437184'
+run_mc rm --resolve "$resolve" pinned/resolve-smoke/large.bin
+run_mc rm --resolve "$resolve" pinned/resolve-smoke/archive.tar.gz
+run_mc rb --resolve "$resolve" pinned/resolve-smoke
 
 run_mc mb local/parity
 printf 'one\ntwo\nthree\n' | docker run --rm -i --network "$network" \
     -v "$volume:/home/mx/.mx" "$image" pipe --quiet local/parity/nested/file.txt
 run_mc head --lines 2 local/parity/nested/file.txt | grep 'one'
 run_mc find local/parity --name '*.txt' | grep 'file.txt'
-run_mc du -r local/parity | grep objects
+run_mc du -r local/parity | grep '1 object'
 run_mc tree --files local/parity | grep nested
 run_mc ready local | grep ready
-run_mc ping -c 1 local | grep pong
+run_mc ping -c 1 local | grep 'status=ok'
 run_mc tag set local/parity/nested/file.txt env=test
-run_mc tag list local/parity/nested/file.txt | grep 'env=test'
+run_mc tag list local/parity/nested/file.txt | grep -E '^env +: test$'
 run_mc version enable local/parity
-run_mc version info local/parity | grep Enabled
+run_mc version info local/parity | grep 'versioning is enabled'
 run_mc ls -r local/parity | grep 'file.txt'
 run_mc rm -r --force local/parity/nested
 run_mc rb --force local/parity

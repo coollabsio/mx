@@ -1,440 +1,276 @@
+//! Top-level CLI: global flags and the command list. Each command's Args live in its module
+//! under `crate::commands`.
+
+use crate::commands::{
+    admin, alias, anonymous, batch, cat, cors, cp, diff, du, encrypt, event, find, get, head, idp,
+    ilm, legalhold, ls, mb, mirror, mv, od, ping, pipe, put, quota, rb, ready, replicate,
+    retention, rm, share, sql, stat, tag, tree, undo, update, version, watch,
+};
 use crate::resolve::ResolveMapping;
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
+// Global flags read `MC_*` environment variables like mc (urfave/cli `EnvVar`).
 #[derive(Debug, Parser)]
-#[command(version, about = "MaxIO Client", long_about = None)]
+#[command(
+    about = "MaxIO Client",
+    long_about = None,
+    disable_version_flag = true,
+    disable_help_subcommand = true
+)]
 pub struct Cli {
-    #[arg(long, global = true)]
-    pub json: bool,
+    /// print the version
+    #[arg(short = 'v', long = "version", short_alias = 'V', action = ArgAction::SetTrue)]
+    pub version: bool,
 
-    #[arg(short = 'C', long = "config-dir", global = true, value_name = "PATH")]
+    /// path to configuration folder
+    #[arg(
+        short = 'C',
+        long = "config-dir",
+        global = true,
+        value_name = "PATH",
+        env = "MC_CONFIG_DIR"
+    )]
     pub config_dir: Option<std::path::PathBuf>,
 
-    #[arg(short = 'q', long, global = true)]
+    /// disable progress bar display
+    #[arg(short = 'q', long, global = true, env = "MC_QUIET", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
     pub quiet: bool,
 
-    #[arg(long, global = true)]
-    pub insecure: bool,
+    /// disable mc internal pager and print to raw stdout
+    #[arg(long = "disable-pager", visible_alias = "dp", global = true, env = "MC_DISABLE_PAGER", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
+    pub disable_pager: bool,
 
-    #[arg(long, global = true, value_name = "HOST:PORT=IP")]
+    /// disable color theme
+    #[arg(long, global = true, env = "MC_NO_COLOR", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
+    pub no_color: bool,
+
+    /// enable JSON lines formatted output
+    #[arg(long, global = true, env = "MC_JSON", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
+    pub json: bool,
+
+    /// enable debug output
+    #[arg(long, global = true, env = "MC_DEBUG", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
+    pub debug: bool,
+
+    /// resolves HOST[:PORT] to an IP address. Example: minio.local:9000=10.10.75.1
+    #[arg(
+        long,
+        global = true,
+        value_name = "HOST:PORT=IP",
+        env = "MC_RESOLVE",
+        value_delimiter = ','
+    )]
     pub resolve: Vec<ResolveMapping>,
 
+    /// disable SSL certificate verification
+    #[arg(long, global = true, env = "MC_INSECURE", action = ArgAction::SetTrue, value_parser = parse_env_bool)]
+    pub insecure: bool,
+
+    /// limits uploads to a maximum rate in KiB/s, MiB/s, GiB/s. (default: unlimited)
+    #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate, env = "MC_LIMIT_UPLOAD")]
+    pub limit_upload: Option<u64>,
+
+    /// limits downloads to a maximum rate in KiB/s, MiB/s, GiB/s. (default: unlimited)
+    #[arg(long, global = true, value_name = "RATE", value_parser = parse_rate, env = "MC_LIMIT_DOWNLOAD")]
+    pub limit_download: Option<u64>,
+
+    #[arg(
+        help = "add custom HTTP header to the request. 'key:value' format.",
+        short = 'H',
+        long = "custom-header",
+        global = true,
+        value_name = "KEY:VALUE",
+        value_parser = parse_custom_header
+    )]
+    pub custom_header: Vec<(String, String)>,
+
+    /// custom connection READ deadline
+    #[arg(long, global = true, hide = true, value_name = "DURATION", value_parser = parse_go_duration)]
+    pub conn_read_deadline: Option<std::time::Duration>,
+
+    /// custom connection WRITE deadline
+    #[arg(long, global = true, hide = true, value_name = "DURATION", value_parser = parse_go_duration)]
+    pub conn_write_deadline: Option<std::time::Duration>,
+
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+}
+
+/// Go `strconv.ParseBool` as used by urfave/cli for boolean `EnvVar`s; empty means false.
+pub fn parse_env_bool(value: &str) -> Result<bool, String> {
+    match value {
+        "" | "0" | "f" | "F" | "false" | "FALSE" | "False" => Ok(false),
+        "1" | "t" | "T" | "true" | "TRUE" | "True" => Ok(true),
+        _ => Err(format!("could not parse `{value}` as bool value")),
+    }
+}
+
+fn parse_rate(value: &str) -> anyhow::Result<u64> {
+    crate::flags::parse_size(value)
+}
+
+/// Go `time.ParseDuration` (urfave/cli `DurationFlag`): `10m`, `1h30m`, `1.5s`, `500ms`, `0`.
+pub fn parse_go_duration(value: &str) -> anyhow::Result<std::time::Duration> {
+    let invalid = || anyhow::anyhow!("time: invalid duration \"{value}\"");
+    if value == "0" {
+        return Ok(std::time::Duration::ZERO);
+    }
+    let mut rest = value;
+    let mut total = 0f64;
+    if rest.is_empty() {
+        return Err(invalid());
+    }
+    while !rest.is_empty() {
+        let number_len = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .ok_or_else(invalid)?;
+        let number: f64 = rest[..number_len].parse().map_err(|_| invalid())?;
+        rest = &rest[number_len..];
+        let unit_len = rest
+            .find(|c: char| c.is_ascii_digit() || c == '.')
+            .unwrap_or(rest.len());
+        let scale = match &rest[..unit_len] {
+            "ns" => 1e-9,
+            "us" | "µs" | "μs" => 1e-6,
+            "ms" => 1e-3,
+            "s" => 1.0,
+            "m" => 60.0,
+            "h" => 3600.0,
+            _ => return Err(invalid()),
+        };
+        total += number * scale;
+        rest = &rest[unit_len..];
+    }
+    std::time::Duration::try_from_secs_f64(total).map_err(|_| invalid())
+}
+
+fn parse_custom_header(value: &str) -> anyhow::Result<(String, String)> {
+    crate::net::parse_custom_header(value)
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     #[command(about = "manage server credentials in configuration file")]
-    Alias(AliasArgs),
+    Alias(alias::AliasArgs),
     #[command(about = "list buckets and objects")]
-    Ls(LsArgs),
+    Ls(ls::LsArgs),
     #[command(about = "make bucket")]
-    Mb(MakeBucketArgs),
+    Mb(mb::MakeBucketArgs),
     #[command(about = "remove bucket")]
-    Rb(RemoveBucketArgs),
+    Rb(rb::RemoveBucketArgs),
     #[command(about = "show object or bucket information")]
-    Stat(TargetArg),
+    Stat(stat::StatArgs),
     #[command(about = "print object contents to stdout")]
-    Cat(TargetArg),
+    Cat(cat::CatArgs),
     #[command(about = "remove object")]
-    Rm(RemoveArgs),
+    Rm(rm::RemoveArgs),
     #[command(about = "copy objects and files")]
-    Cp(CopyArgs),
+    Cp(cp::CopyArgs),
     #[command(about = "move object")]
-    Mv(CopyArgs),
+    Mv(mv::MoveArgs),
     #[command(visible_alias = "out", about = "upload object")]
-    Put(PutArgs),
+    Put(put::PutArgs),
     #[command(about = "mirror a directory tree")]
-    Mirror(MirrorArgs),
+    Mirror(Box<mirror::MirrorArgs>),
     #[command(about = "upload standard input to an object")]
-    Pipe(PipeArgs),
+    Pipe(pipe::PipeArgs),
     #[command(about = "download an object to the local filesystem")]
-    Get(GetArgs),
+    Get(get::GetArgs),
     #[command(about = "display the first lines of an object or file")]
-    Head(HeadArgs),
+    Head(head::HeadArgs),
     #[command(about = "summarize disk usage")]
-    Du(DuArgs),
+    Du(du::DuArgs),
     #[command(about = "search for objects and files")]
-    Find(FindArgs),
+    Find(find::FindArgs),
     #[command(about = "list prefixes and objects in a tree")]
-    Tree(TreeArgs),
+    Tree(tree::TreeArgs),
     #[command(about = "list name and size differences")]
-    Diff(DiffArgs),
+    Diff(diff::DiffArgs),
     #[command(about = "generate presigned URLs")]
-    Share(ShareArgs),
+    Share(share::ShareArgs),
     #[command(about = "check if a server is ready")]
-    Ready(HealthArgs),
+    Ready(ready::HealthArgs),
     #[command(about = "ping an S3 server")]
-    Ping(PingArgs),
+    Ping(ping::PingArgs),
     #[command(about = "manage object and bucket tags")]
-    Tag(TagArgs),
+    Tag(tag::TagArgs),
     #[command(about = "manage bucket versioning")]
-    Version(VersionArgs),
+    Version(version::VersionArgs),
     #[command(about = "manage bucket CORS")]
-    Cors(CorsArgs),
+    Cors(cors::CorsArgs),
     #[command(about = "manage bucket encryption")]
-    Encrypt(EncryptArgs),
+    Encrypt(encrypt::EncryptArgs),
     #[command(about = "manage anonymous bucket access")]
-    Anonymous(AnonymousArgs),
-    #[command(about = "manage bucket lifecycle rules")]
-    Ilm(IlmArgs),
+    Anonymous(anonymous::AnonymousArgs),
+    #[command(about = "manage bucket lifecycle")]
+    Ilm(ilm::IlmArgs),
+    #[command(about = "set retention for object(s)")]
+    Retention(retention::RetentionArgs),
+    #[command(about = "manage legal hold for object(s)")]
+    Legalhold(legalhold::LegalholdArgs),
+    #[command(about = "manage object notifications")]
+    Event(event::EventArgs),
+    #[command(about = "undo PUT/DELETE operations")]
+    Undo(undo::UndoArgs),
+    #[command(about = "measure single stream upload and download")]
+    Od(od::OdArgs),
+    #[command(about = "configure server side bucket replication")]
+    Replicate(replicate::ReplicateArgs),
+    #[command(about = "manage bucket quota")]
+    Quota(quota::QuotaArgs),
+    #[command(about = "manage MinIO servers")]
+    Admin(admin::AdminArgs),
+    #[command(about = "manage MinIO IDentity Provider server configuration")]
+    Idp(idp::IdpArgs),
+    #[command(about = "manage batch jobs")]
+    Batch(batch::BatchArgs),
+    #[command(about = "run sql queries on objects")]
+    Sql(sql::SqlArgs),
+    #[command(about = "listen for object notification events")]
+    Watch(watch::WatchArgs),
+    #[command(about = "update mc to latest release")]
+    Update(update::UpdateArgs),
 }
 
-#[derive(Debug, Args)]
-pub struct AliasArgs {
-    #[command(subcommand)]
-    pub command: AliasCommand,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
 
-#[derive(Debug, Subcommand)]
-pub enum AliasCommand {
-    #[command(visible_alias = "s", about = "set a new alias to configuration file")]
-    Set(AliasSetArgs),
-    #[command(visible_alias = "ls", about = "list aliases in configuration file")]
-    List(AliasListArgs),
-    #[command(
-        visible_alias = "rm",
-        about = "remove an alias from configuration file"
-    )]
-    Remove(AliasRemoveArgs),
-    #[command(about = "import an alias from JSON")]
-    Import(AliasImportArgs),
-    #[command(about = "export an alias as JSON")]
-    Export(AliasExportArgs),
-}
+    #[test]
+    fn parses_go_durations() {
+        assert_eq!(parse_go_duration("10m").unwrap(), Duration::from_secs(600));
+        assert_eq!(
+            parse_go_duration("1h30m").unwrap(),
+            Duration::from_secs(5400)
+        );
+        assert_eq!(
+            parse_go_duration("1.5s").unwrap(),
+            Duration::from_millis(1500)
+        );
+        assert_eq!(
+            parse_go_duration("500ms").unwrap(),
+            Duration::from_millis(500)
+        );
+        assert_eq!(parse_go_duration("0").unwrap(), Duration::ZERO);
+        for bad in ["", "10", "5d", "abc", "1m-"] {
+            assert!(parse_go_duration(bad).is_err(), "{bad}");
+        }
+    }
 
-#[derive(Debug, Args)]
-pub struct AliasSetArgs {
-    pub alias: String,
-    pub url: String,
-    pub access_key: Option<String>,
-    pub secret_key: Option<String>,
-    #[arg(long, default_value = "S3v4")]
-    pub api: String,
-    #[arg(long, default_value = "auto")]
-    pub path: String,
-}
-
-#[derive(Debug, Args)]
-pub struct AliasListArgs {
-    pub alias: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct AliasRemoveArgs {
-    pub alias: String,
-}
-
-#[derive(Debug, Args)]
-pub struct AliasImportArgs {
-    pub alias: String,
-}
-
-#[derive(Debug, Args)]
-pub struct AliasExportArgs {
-    pub alias: String,
-}
-
-#[derive(Debug, Args)]
-pub struct LsArgs {
-    #[arg(short = 'r', long)]
-    pub recursive: bool,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct BucketTargetArgs {
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct MakeBucketArgs {
-    #[arg(long)]
-    pub ignore_existing: bool,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct RemoveBucketArgs {
-    #[arg(long)]
-    pub force: bool,
-    #[arg(long)]
-    pub dangerous: bool,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct TargetArg {
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct CopyArgs {
-    #[arg(short = 'r', long)]
-    pub recursive: bool,
-    pub source: String,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct RemoveArgs {
-    #[arg(short = 'r', long)]
-    pub recursive: bool,
-    #[arg(long)]
-    pub force: bool,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct PutArgs {
-    pub source: String,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct PipeArgs {
-    #[arg(long)]
-    pub quiet: bool,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct MirrorArgs {
-    #[arg(long)]
-    pub remove: bool,
-    pub source: String,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct GetArgs {
-    pub source: String,
-    pub target: Option<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct HeadArgs {
-    #[arg(short = 'n', long, default_value_t = 10)]
-    pub lines: usize,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct DuArgs {
-    #[arg(short = 'r', long)]
-    pub recursive: bool,
-    #[arg(short = 'd', long)]
-    pub depth: Option<usize>,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct FindArgs {
-    #[arg(long)]
-    pub name: Option<String>,
-    #[arg(long)]
-    pub regex: Option<String>,
-    #[arg(long)]
-    pub maxdepth: Option<usize>,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct TreeArgs {
-    #[arg(short = 'f', long)]
-    pub files: bool,
-    #[arg(short = 'd', long)]
-    pub depth: Option<usize>,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct DiffArgs {
-    pub source: String,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct ShareArgs {
-    #[command(subcommand)]
-    pub command: ShareCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ShareCommand {
-    #[command(about = "generate a presigned download URL")]
-    Download(ShareUrlArgs),
-    #[command(about = "generate a presigned upload URL")]
-    Upload(ShareUrlArgs),
-    #[command(about = "list generated share URLs")]
-    List,
-}
-
-#[derive(Debug, Args)]
-pub struct ShareUrlArgs {
-    #[arg(short = 'E', long, default_value = "168h")]
-    pub expire: String,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct HealthArgs {
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct PingArgs {
-    #[arg(short = 'c', long, default_value_t = 4)]
-    pub count: u32,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct TagArgs {
-    #[command(subcommand)]
-    pub command: TagCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum TagCommand {
-    #[command(about = "set tags")]
-    Set(TagSetArgs),
-    #[command(about = "list tags")]
-    List(TargetArg),
-    #[command(about = "remove tags")]
-    Remove(TargetArg),
-}
-
-#[derive(Debug, Args)]
-pub struct TagSetArgs {
-    pub target: String,
-    pub tags: String,
-}
-
-#[derive(Debug, Args)]
-pub struct VersionArgs {
-    #[command(subcommand)]
-    pub command: VersionCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum VersionCommand {
-    #[command(about = "enable bucket versioning")]
-    Enable(TargetArg),
-    #[command(about = "suspend bucket versioning")]
-    Suspend(TargetArg),
-    #[command(about = "show bucket versioning")]
-    Info(TargetArg),
-}
-
-#[derive(Debug, Args)]
-pub struct CorsArgs {
-    #[command(subcommand)]
-    pub command: CorsCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum CorsCommand {
-    #[command(about = "set bucket CORS from a JSON file")]
-    Set(CorsSetArgs),
-    #[command(about = "show bucket CORS")]
-    Get(TargetArg),
-    #[command(about = "remove bucket CORS")]
-    Remove(TargetArg),
-}
-
-#[derive(Debug, Args)]
-pub struct CorsSetArgs {
-    pub target: String,
-    pub file: String,
-}
-
-#[derive(Debug, Args)]
-pub struct EncryptArgs {
-    #[command(subcommand)]
-    pub command: EncryptCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum EncryptCommand {
-    #[command(about = "set default bucket encryption")]
-    Set(EncryptSetArgs),
-    #[command(about = "show bucket encryption")]
-    Info(TargetArg),
-    #[command(about = "clear bucket encryption")]
-    Clear(TargetArg),
-}
-
-#[derive(Debug, Args)]
-pub struct EncryptSetArgs {
-    pub algorithm: String,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct AnonymousArgs {
-    #[command(subcommand)]
-    pub command: AnonymousCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum AnonymousCommand {
-    #[command(about = "set anonymous access policy")]
-    Set(AnonymousSetArgs),
-    #[command(about = "show anonymous access policy")]
-    Get(TargetArg),
-}
-
-#[derive(Debug, Args)]
-pub struct AnonymousSetArgs {
-    #[arg(help = "download, upload, public, or none")]
-    pub policy: String,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct IlmArgs {
-    #[command(subcommand)]
-    pub command: IlmCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum IlmCommand {
-    #[command(about = "manage lifecycle rules")]
-    Rule(IlmRuleArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct IlmRuleArgs {
-    #[command(subcommand)]
-    pub command: IlmRuleCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum IlmRuleCommand {
-    #[command(about = "add a lifecycle rule")]
-    Add(IlmRuleAddArgs),
-    #[command(about = "list lifecycle rules")]
-    List(TargetArg),
-    #[command(about = "remove a lifecycle rule")]
-    Remove(IlmRuleRemoveArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct IlmRuleAddArgs {
-    #[arg(long)]
-    pub expire_days: Option<i32>,
-    #[arg(long)]
-    pub prefix: Option<String>,
-    #[arg(long)]
-    pub id: Option<String>,
-    pub target: String,
-}
-
-#[derive(Debug, Args)]
-pub struct IlmRuleRemoveArgs {
-    #[arg(long)]
-    pub id: String,
-    pub target: String,
+    #[test]
+    fn deadline_flags_are_hidden_globals() {
+        let cli = Cli::try_parse_from([
+            "mx",
+            "ls",
+            "--conn-read-deadline",
+            "30s",
+            "--conn-write-deadline",
+            "1m",
+            "play/",
+        ])
+        .unwrap();
+        assert_eq!(cli.conn_read_deadline, Some(Duration::from_secs(30)));
+        assert_eq!(cli.conn_write_deadline, Some(Duration::from_secs(60)));
+    }
 }

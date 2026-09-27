@@ -1,14 +1,72 @@
-use crate::cli::{
-    AliasCommand, AliasExportArgs, AliasImportArgs, AliasListArgs, AliasRemoveArgs, AliasSetArgs,
-};
 use crate::config::ConfigStore;
 use crate::config::model::AliasConfig;
+use crate::error::McError;
 use crate::output;
-use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+use crate::target::is_valid_alias;
+use anyhow::{Context, Result, bail};
+use clap::{Args, Subcommand};
+use serde::Serialize;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
-use tabwriter::TabWriter;
 use url::Url;
+
+#[derive(Debug, Args)]
+pub struct AliasArgs {
+    #[command(subcommand)]
+    pub command: AliasCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AliasCommand {
+    #[command(visible_alias = "s", about = "set a new alias to configuration file")]
+    Set(AliasSetArgs),
+    #[command(visible_alias = "ls", about = "list aliases in configuration file")]
+    List(AliasListArgs),
+    #[command(
+        visible_alias = "rm",
+        about = "remove an alias from configuration file"
+    )]
+    Remove(AliasRemoveArgs),
+    #[command(visible_alias = "i", about = "import an alias from JSON")]
+    Import(AliasImportArgs),
+    #[command(visible_alias = "e", about = "export an alias as JSON")]
+    Export(AliasExportArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AliasSetArgs {
+    pub alias: String,
+    pub url: String,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    /// bucket path lookup supported by the server. Valid options are '[auto, on, off]'
+    #[arg(long, default_value = "auto")]
+    pub path: String,
+    /// API signature. Valid options are '[S3v4, S3v2]'
+    #[arg(long)]
+    pub api: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasListArgs {
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasRemoveArgs {
+    pub alias: String,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasImportArgs {
+    pub alias: String,
+    /// credentials JSON file (default: stdin)
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct AliasExportArgs {
+    pub alias: String,
+}
 
 pub fn run(command: AliasCommand, json: bool) -> Result<()> {
     match command {
@@ -21,18 +79,56 @@ pub fn run(command: AliasCommand, json: bool) -> Result<()> {
 }
 
 fn set(args: AliasSetArgs, json: bool) -> Result<()> {
-    let alias = normalize_alias(&args.alias)?;
-    let url = normalize_url(&args.url)?;
-    let api = normalize_api(&args.api)?;
-    let path = normalize_path(&args.path)?;
     let (access_key, secret_key) = collect_credentials(args.access_key, args.secret_key)?;
-
-    if access_key.is_empty() {
-        bail!("Invalid access key `{access_key}`.");
+    let alias = args.alias.trim_end_matches(['/', '\\']).to_string();
+    if !is_valid_alias(&alias) {
+        return Err(McError::new(format!(
+            "Alias `{alias}` should have alphanumeric characters such as [helloWorld0, hello_World0, ...] and begin with a letter"
+        )))
+        .context("Invalid alias.");
     }
-    if secret_key.is_empty() {
-        bail!("Invalid secret key `{secret_key}`.");
+    let url = normalize_url(&args.url)?;
+    // mc: empty keys make an anonymous alias; set keys have minimum lengths.
+    if !access_key.is_empty() && access_key.len() < 3 {
+        return Err(McError::invalid_argument())
+            .context(format!("Invalid access key `{access_key}`."));
     }
+    if !secret_key.is_empty() && secret_key.len() < 8 {
+        return Err(McError::invalid_argument())
+            .context(format!("Invalid secret key `{secret_key}`."));
+    }
+    let api = args.api.as_deref().map(normalize_api).transpose()?;
+    let path = normalize_path(&args.path)?;
+    const INIT_FAILED: &str = "Unable to initialize new alias from the provided credentials.";
+    // mc offers to trust an unknown self-signed certificate on a terminal (not with
+    // `--insecure` or `--json`).
+    if !crate::globals::insecure() && !json && io::stdout().is_terminal() {
+        prompt_trust_self_signed_cert(&url, &alias).context(INIT_FAILED)?;
+    }
+    // Without `--api`, mc probes the server for the signature version: S3v4, then S3v2 (the
+    // S3v2 error is reported when both fail).
+    let api = match api {
+        Some(api) => api,
+        None => {
+            let probe = |api: &str| AliasConfig {
+                url: url.clone(),
+                access_key: access_key.clone(),
+                secret_key: secret_key.clone(),
+                api: api.to_string(),
+                path: path.clone(),
+                ..Default::default()
+            };
+            let rt = crate::commands::runtime()?;
+            match rt.block_on(crate::s3::probe_signature(&probe("S3v4"))) {
+                Ok(()) => "s3v4".to_string(),
+                Err(_) => {
+                    rt.block_on(crate::s3::probe_signature(&probe("S3v2")))
+                        .context(INIT_FAILED)?;
+                    "s3v2".to_string()
+                }
+            }
+        }
+    };
 
     let mut store = ConfigStore::load_or_create()?;
     store.config_mut().aliases.insert(
@@ -52,7 +148,7 @@ fn set(args: AliasSetArgs, json: bool) -> Result<()> {
         &AliasMessage {
             status: "success",
             alias: &alias,
-            url: Some(url.as_str()),
+            url: &url,
             access_key: Some(access_key.as_str()),
             secret_key: Some(secret_key.as_str()),
             api: Some(api.as_str()),
@@ -69,12 +165,17 @@ fn list(args: AliasListArgs, json: bool) -> Result<()> {
     let store = ConfigStore::load_or_create()?;
     let src = store.path().display().to_string();
 
+    // Includes `MC_HOST_*` / `MC_CONFIG_ENV_FILE` aliases (src `env` / the env file).
     let mut rows = Vec::new();
     for (alias, cfg) in &store.config().aliases {
+        if store.is_invalid_env_alias(alias) {
+            continue;
+        }
+        let row_src = cfg.src.clone().unwrap_or_else(|| src.clone());
         rows.push(DisplayAlias::from_parts(
             alias.clone(),
             cfg.clone(),
-            src.clone(),
+            row_src,
         ));
     }
 
@@ -83,7 +184,10 @@ fn list(args: AliasListArgs, json: bool) -> Result<()> {
         let row = rows
             .into_iter()
             .find(|row| row.alias == alias)
-            .ok_or_else(|| anyhow::anyhow!("No such alias `{alias}` found."))?;
+            .ok_or_else(|| {
+                anyhow::Error::new(McError::invalid_aliased_url(&alias))
+                    .context(format!("No such alias `{alias}` found."))
+            })?;
         print_rows(&[row], json)?;
         return Ok(());
     }
@@ -96,7 +200,8 @@ fn remove(args: AliasRemoveArgs, json: bool) -> Result<()> {
     let mut store = ConfigStore::load_or_create()?;
 
     if store.config_mut().aliases.remove(&alias).is_none() {
-        bail!("No such alias `{alias}` found.");
+        return Err(McError::invalid_aliased_url(&alias))
+            .context(format!("No such alias `{alias}` found."));
     }
 
     store.save()?;
@@ -104,7 +209,7 @@ fn remove(args: AliasRemoveArgs, json: bool) -> Result<()> {
         &AliasMessage {
             status: "success",
             alias: &alias,
-            url: None,
+            url: "",
             access_key: None,
             secret_key: None,
             api: None,
@@ -117,51 +222,93 @@ fn remove(args: AliasRemoveArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// mc `alias import`: stores the JSON document as-is (no normalization or server probe).
 fn import(args: AliasImportArgs, json: bool) -> Result<()> {
-    let mut raw = String::new();
-    io::stdin().read_to_string(&mut raw)?;
-    let document: AliasExportDocument = serde_json::from_str(&raw)?;
-    set(
-        AliasSetArgs {
-            alias: args.alias,
-            url: document.url,
-            access_key: Some(document.access_key),
-            secret_key: Some(document.secret_key),
-            api: document.api,
-            path: document.path,
+    let alias = args.alias.trim_end_matches(['/', '\\']).to_string();
+    if !is_valid_alias(&alias) {
+        return Err(McError::new(format!(
+            "Alias `{alias}` should have alphanumeric characters such as [helloWorld0, hello_World0, ...] and begin with a letter"
+        )))
+        .context("Invalid alias.");
+    }
+    let raw = match args
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+    {
+        Some(file) => std::fs::read(file).context("Unable to parse credentials file")?,
+        None => {
+            let mut raw = Vec::new();
+            io::stdin()
+                .read_to_end(&mut raw)
+                .context("Unable to parse credentials file")?;
+            raw
+        }
+    };
+    let mut cfg: AliasConfig = serde_json::from_slice(&raw).map_err(|err| {
+        anyhow::Error::new(McError::new(go_json_error(&err)))
+            .context("Unable to parse input credentials")
+    })?;
+    normalize_url(&cfg.url)?;
+    if !cfg.access_key.is_empty() && cfg.access_key.len() < 3 {
+        return Err(McError::invalid_argument())
+            .context(format!("Invalid access key `{}`.", cfg.access_key));
+    }
+    if !cfg.secret_key.is_empty() && cfg.secret_key.len() < 8 {
+        return Err(McError::invalid_argument()).context("Invalid secret key.");
+    }
+    if !cfg.api.is_empty() {
+        normalize_api(&cfg.api)?;
+    }
+    normalize_path(&cfg.path)?;
+    cfg.src = None;
+
+    let mut store = ConfigStore::load_or_create()?;
+    store
+        .config_mut()
+        .aliases
+        .insert(alias.clone(), cfg.clone());
+    store.save()?;
+    print_message(
+        &AliasMessage {
+            status: "success",
+            alias: &alias,
+            url: &cfg.url,
+            access_key: Some(cfg.access_key.as_str()),
+            secret_key: Some(cfg.secret_key.as_str()),
+            api: Some(cfg.api.as_str()),
+            path: Some(cfg.path.as_str()),
+            src: None,
         },
+        &format!("Imported `{alias}` successfully."),
         json,
     )
+}
+
+/// Go `encoding/json` wording for the common "no input" case.
+fn go_json_error(err: &serde_json::Error) -> String {
+    if err.is_eof() {
+        "unexpected end of JSON input".to_string()
+    } else {
+        err.to_string()
+    }
 }
 
 fn export(args: AliasExportArgs) -> Result<()> {
     let alias = normalize_alias(&args.alias)?;
     let store = ConfigStore::load_or_create()?;
-    let config = store
-        .config()
-        .aliases
-        .get(&alias)
-        .ok_or_else(|| anyhow::anyhow!("No such alias `{alias}` found."))?;
-    let document = AliasExportDocument {
-        url: config.url.clone(),
-        access_key: config.access_key.clone(),
-        secret_key: config.secret_key.clone(),
-        api: config.api.clone(),
-        path: config.path.clone(),
+    let config = store.config().aliases.get(&alias).ok_or_else(|| {
+        anyhow::Error::new(McError::invalid_argument()).context("Unable to export credentials")
+    })?;
+    // mc marshals the stored alias config (known fields only), compact, regardless of TTY.
+    let document = AliasConfig {
+        src: None,
+        extra: Default::default(),
+        ..config.clone()
     };
     println!("{}", serde_json::to_string(&document)?);
     Ok(())
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AliasExportDocument {
-    url: String,
-    #[serde(rename = "accessKey")]
-    access_key: String,
-    #[serde(rename = "secretKey")]
-    secret_key: String,
-    api: String,
-    path: String,
 }
 
 fn print_rows(rows: &[DisplayAlias], json: bool) -> Result<()> {
@@ -172,22 +319,29 @@ fn print_rows(rows: &[DisplayAlias], json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut writer = TabWriter::new(io::stdout()).padding(2);
-    writeln!(writer, "Alias\tURL\tAccessKey\tSecretKey\tAPI\tPath\tSrc")?;
+    // mc: one block per alias, names padded to the longest alias.
+    let width = rows.iter().map(|row| row.alias.len()).max().unwrap_or(0);
+    let mut out = io::stdout().lock();
     for row in rows {
-        writeln!(
-            writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            row.alias, row.url, row.access_key, row.secret_key, row.api, row.path, row.src
-        )?;
+        writeln!(out, "{:<width$}", row.alias)?;
+        for (label, value) in [
+            ("URL", &row.url),
+            ("AccessKey", &row.access_key),
+            ("SecretKey", &row.secret_key),
+            ("API", &row.api),
+            ("Path", &row.path),
+            ("Src", &row.src),
+        ] {
+            writeln!(out, "  {label:<9} : {value}")?;
+        }
     }
-    writer.flush()?;
+    out.flush()?;
     Ok(())
 }
 
 fn print_message(message: &AliasMessage<'_>, plain: &str, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(message)?);
+        output::print_json(message)?;
     } else if !plain.is_empty() {
         output::print_plain(plain);
     }
@@ -224,6 +378,52 @@ fn collect_credentials(
     Ok((access_key.trim().to_string(), secret_key.trim().to_string()))
 }
 
+/// mc `promptTrustSelfSignedCert`: when an `https` server's certificate is self-signed and
+/// not trusted yet, shows its public key fingerprint and, on `y`/`yes`, saves it as
+/// `<config dir>/certs/CAs/<alias>.crt`. Any other verification failure, a certificate issued
+/// by an unknown CA, or another answer is an error.
+fn prompt_trust_self_signed_cert(url: &str, alias: &str) -> Result<()> {
+    use crate::net::tls::{PeerTrust, probe_peer};
+    let parsed = Url::parse(url)?;
+    let PeerTrust::UnknownAuthority { error, cert } = probe_peer(&parsed)? else {
+        return Ok(());
+    };
+    let untrusted = || anyhow::Error::new(McError::new(error.clone()));
+    let info = crate::net::x509::parse(cert.as_ref()).map_err(|_| untrusted())?;
+    if !info.is_self_signed() {
+        return Err(untrusted());
+    }
+    let color = |code: &str, text: &str| {
+        if crate::globals::no_color() {
+            text.to_string()
+        } else {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        }
+    };
+    print!(
+        "Fingerprint of {} public key: {}\nConfirm public key y/N: ",
+        color("32", alias),
+        color("33", &info.fingerprint())
+    );
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if !answer.ends_with('\n') {
+        return Err(McError::new("EOF").into());
+    }
+    let answer = answer.to_lowercase();
+    if answer != "y\n" && answer != "yes\n" {
+        return Err(untrusted());
+    }
+    let dir = crate::net::tls::cas_dir().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(
+        dir.join(format!("{alias}.crt")),
+        crate::net::x509::to_pem(cert.as_ref()),
+    )?;
+    Ok(())
+}
+
 fn prompt_line(prompt: &str) -> Result<String> {
     print!("{prompt}");
     io::stdout().flush()?;
@@ -238,14 +438,10 @@ fn read_line(reader: &mut dyn BufRead) -> Result<String> {
     Ok(value.trim_end_matches(['\r', '\n']).to_string())
 }
 
+/// Alias name for `alias remove` / `list` (mc `cleanAlias` + `isValidAlias`).
 fn normalize_alias(input: &str) -> Result<String> {
     let alias = input.trim_end_matches(['/', '\\']).to_string();
-    let valid = !alias.is_empty()
-        && alias.chars().enumerate().all(|(idx, ch)| match idx {
-            0 => ch.is_ascii_alphabetic(),
-            _ => ch.is_ascii_alphanumeric() || ch == '-' || ch == '_',
-        });
-    if !valid {
+    if !is_valid_alias(&alias) {
         bail!("Invalid alias `{alias}`.");
     }
     Ok(alias)
@@ -253,15 +449,18 @@ fn normalize_alias(input: &str) -> Result<String> {
 
 fn normalize_url(input: &str) -> Result<String> {
     let trimmed = input.trim_end_matches('/');
-    let parsed = Url::parse(trimmed)?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        bail!("Invalid URL.");
-    }
-    if parsed.host_str().is_none() || parsed.query().is_some() || parsed.fragment().is_some() {
-        bail!("Invalid URL.");
-    }
-    if parsed.path() != "/" && !parsed.path().is_empty() {
-        bail!("Invalid URL.");
+    let valid = Url::parse(trimmed).is_ok_and(|parsed| {
+        matches!(parsed.scheme(), "http" | "https")
+            && parsed.host_str().is_some()
+            && parsed.query().is_none()
+            && parsed.fragment().is_none()
+            && (parsed.path() == "/" || parsed.path().is_empty())
+    });
+    if !valid {
+        return Err(McError::new(format!(
+            "URL `{input}` for MinIO Client should be of the form scheme://host[:port]/ without resource component."
+        )))
+        .context("Invalid URL.");
     }
     Ok(trimmed.to_string())
 }
@@ -270,7 +469,8 @@ fn normalize_api(input: &str) -> Result<String> {
     match input.trim().to_ascii_lowercase().as_str() {
         "s3v4" => Ok("S3v4".to_string()),
         "s3v2" => Ok("S3v2".to_string()),
-        _ => bail!("Unrecognized API signature. Valid options are `[S3v4, S3v2]`."),
+        _ => Err(McError::invalid_argument())
+            .context("Unrecognized API signature. Valid options are `[S3v4, S3v2]`."),
     }
 }
 
@@ -279,7 +479,8 @@ fn normalize_path(input: &str) -> Result<String> {
         "auto" => Ok("auto".to_string()),
         "on" => Ok("on".to_string()),
         "off" => Ok("off".to_string()),
-        _ => bail!("Unrecognized path value. Valid options are `[auto, on, off]`."),
+        _ => Err(McError::invalid_argument())
+            .context("Unrecognized path value. Valid options are `[auto, on, off]`."),
     }
 }
 
@@ -320,7 +521,7 @@ impl DisplayAlias {
         AliasMessage {
             status: "success",
             alias: &self.alias,
-            url: Some(self.url.as_str()),
+            url: &self.url,
             access_key: Some(self.access_key.as_str()),
             secret_key: Some(self.secret_key.as_str()),
             api: Some(self.api.as_str()),
@@ -334,8 +535,8 @@ impl DisplayAlias {
 struct AliasMessage<'a> {
     status: &'static str,
     alias: &'a str,
-    #[serde(rename = "URL", skip_serializing_if = "Option::is_none")]
-    url: Option<&'a str>,
+    #[serde(rename = "URL")]
+    url: &'a str,
     #[serde(rename = "accessKey", skip_serializing_if = "Option::is_none")]
     access_key: Option<&'a str>,
     #[serde(rename = "secretKey", skip_serializing_if = "Option::is_none")]

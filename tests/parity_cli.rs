@@ -95,6 +95,8 @@ fn alias_export_and_import_round_trip() {
         .args([
             "alias",
             "set",
+            "--api",
+            "S3v4",
             "demo",
             "http://localhost:9000",
             "minio",
@@ -140,6 +142,8 @@ fn config_dir_flag_writes_alias_outside_home() {
             config_dir.path().to_str().expect("utf8"),
             "alias",
             "set",
+            "--api",
+            "S3v4",
             "demo",
             "http://localhost:9000",
             "minio",

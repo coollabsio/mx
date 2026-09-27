@@ -11,11 +11,14 @@ fn mx() -> Command {
 fn ls_fails_for_unknown_alias() {
     let home = tempfile::tempdir().expect("tempdir");
     let mut cmd = mx();
-    cmd.env("HOME", home.path()).args(["ls", "missing"]);
+    // Like mc, an unknown alias is a local path.
+    cmd.env("HOME", home.path())
+        .current_dir(home.path())
+        .args(["ls", "missing/bucket"]);
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("No such alias `missing` found."));
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "Unable to list folder. Requested path `",
+    ));
 }
 
 #[test]
@@ -26,5 +29,5 @@ fn ls_help_mentions_buckets_and_objects() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("list buckets and objects"))
-        .stdout(predicate::str::contains("Usage: mx ls"));
+        .stdout(predicate::str::contains("USAGE:\n  mx ls"));
 }

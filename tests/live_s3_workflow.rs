@@ -33,7 +33,7 @@ fn live_workflow_covers_core_s3_commands() {
         .args(["stat", &bucket_target])
         .assert()
         .success()
-        .stdout(predicate::str::contains("bucket"));
+        .stdout(predicate::str::contains(format!("Name      : {bucket}")));
 
     let source = live::local_file(home.path(), "hello.txt", "hello from mx\n");
     let source_str = source.to_string_lossy().to_string();
@@ -155,9 +155,9 @@ fn live_put_and_out_alias_work() {
 }
 
 #[test]
-fn live_coolify_pipe_json_and_ignore_existing_work() {
+fn live_pipe_stat_json_and_ignore_existing_work() {
     if !live::enabled() {
-        eprintln!("skipping live Coolify compatibility test; set MX_LIVE_TESTS=1");
+        eprintln!("skipping live pipe/stat workflow test; set MX_LIVE_TESTS=1");
         return;
     }
 
@@ -184,7 +184,8 @@ fn live_coolify_pipe_json_and_ignore_existing_work() {
         .write_stdin("streamed archive")
         .assert()
         .success()
-        .stdout("");
+        // Like mc, --quiet keeps the result line (it only drops the progress residue).
+        .stdout(format!("16 bytes -> `{object}`\n"));
     live::mx()
         .env("HOME", home.path())
         .args(["stat", "--json", &object])
@@ -241,7 +242,7 @@ fn live_parity_commands_work_against_s3() {
         .args(["du", "-r", &bucket_target])
         .assert()
         .success()
-        .stdout(predicate::str::contains("objects"));
+        .stdout(predicate::str::contains(format!("\t1 object\t{bucket}\n")));
     live::mx()
         .env("HOME", home.path())
         .args(["find", &bucket_target, "--name", "*.txt"])
@@ -273,7 +274,7 @@ fn live_parity_commands_work_against_s3() {
         .args(["ping", "-c", "1", &alias])
         .assert()
         .success()
-        .stdout(predicate::str::contains("pong"));
+        .stdout(predicate::str::contains("status=ok"));
     live::mx()
         .env("HOME", home.path())
         .args(["share", "download", "--expire", "1h", &nested])
@@ -290,7 +291,7 @@ fn live_parity_commands_work_against_s3() {
         .args(["tag", "list", &nested])
         .assert()
         .success()
-        .stdout(predicate::str::contains("env=test"));
+        .stdout(predicate::str::is_match(r"env\s+: test").expect("regex"));
     live::mx()
         .env("HOME", home.path())
         .args(["version", "enable", &bucket_target])
@@ -301,7 +302,7 @@ fn live_parity_commands_work_against_s3() {
         .args(["version", "info", &bucket_target])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Enabled"));
+        .stdout(predicate::str::contains("versioning is enabled"));
     live::mx()
         .env("HOME", home.path())
         .args(["ls", "-r", &bucket_target])

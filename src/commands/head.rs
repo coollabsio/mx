@@ -1,36 +1,285 @@
-use crate::cli::HeadArgs;
+use crate::commands::cat::{EncCFlag, ReadSelect, ignore_broken_pipe, open_s3, reject_s3_only};
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
+use crate::flags::{RewindFlag, VersionIdFlag};
 use crate::location::{Location, parse_location};
-use anyhow::{Result, bail};
-use std::io::{self, BufRead, Write};
+use crate::s3::get_object;
+use anyhow::{Context, Result, bail};
+use aws_sdk_s3::primitives::ByteStream;
+use bytes::Bytes;
+use clap::Args;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::time::SystemTime;
 
-pub fn run(args: HeadArgs, json: bool) -> Result<()> {
-    if json {
-        bail!("`head` does not support `--json` yet.");
-    }
-    let store = ConfigStore::load_or_create()?;
-    let bytes = match parse_location(&args.target, store.config()) {
-        Location::S3(target) => {
-            let alias = alias_config(&store, &target.alias)?;
-            let bucket = target.require_bucket()?.to_string();
-            let key = target.require_object_key()?;
-            runtime()?.block_on(crate::s3::get_object_bytes(&alias, &bucket, &key))?
-        }
-        Location::Local(path) => std::fs::read(path)?,
-    };
-    write_lines(&bytes, args.lines)
+#[derive(Debug, Args)]
+#[command(mut_args(|a| match a.get_id().as_str() {
+    "rewind" => a.help("select an object version at specified time"),
+    "version_id" => a.help("select an object version to display"),
+    _ => a,
+}))]
+pub struct HeadArgs {
+    /// print the first 'n' lines
+    #[arg(short = 'n', long, default_value_t = 10, allow_negative_numbers = true)]
+    pub lines: i64,
+    #[command(flatten)]
+    pub rewind: RewindFlag,
+    #[command(flatten)]
+    pub version: VersionIdFlag,
+    /// extract from remote zip file (MinIO server source only)
+    #[arg(long)]
+    pub zip: bool,
+    #[command(flatten)]
+    pub enc: EncCFlag,
+    /// objects or files to read; `-` or no target reads standard input
+    pub targets: Vec<String>,
 }
 
-fn write_lines(bytes: &[u8], lines: usize) -> Result<()> {
-    let mut remaining = lines;
-    let mut stdout = io::stdout().lock();
-    for line in bytes.lines() {
-        if remaining == 0 {
-            break;
-        }
-        writeln!(stdout, "{}", line?)?;
-        remaining -= 1;
+pub fn run(args: HeadArgs, json: bool) -> Result<()> {
+    // mc writes the raw contents with `--json` too; only errors are JSON.
+    let _ = json;
+    if args.version.version_id.is_some() && args.rewind.rewind.is_some() {
+        bail!("You cannot specify --version-id and --rewind at the same time");
+    }
+    if args.version.version_id.is_some() && args.targets.len() != 1 {
+        bail!("You need to pass exactly one argument if --version-id is specified");
+    }
+    // mc: negative line counts fall back to the default.
+    let lines = if args.lines < 0 {
+        10
+    } else {
+        args.lines as u64
+    };
+    let select = ReadSelect {
+        version_id: args.version.version_id.clone(),
+        rewind: args.rewind.at(SystemTime::now())?,
+        zip: args.zip,
+        enc: args.enc.entries()?,
+    };
+    let rt = runtime()?;
+    let mut out = io::stdout().lock();
+    if args.targets.is_empty() {
+        return ignore_broken_pipe(write_lines(io::stdin().lock(), lines, &mut out));
+    }
+    let store = ConfigStore::load_or_create()?;
+    for input in &args.targets {
+        let result = (|| {
+            if input == "-" {
+                return write_lines(io::stdin().lock(), lines, &mut out);
+            }
+            let (reader, content_type): (Box<dyn Read>, String) =
+                match parse_location(input, store.config()) {
+                    Location::S3(target) => {
+                        let alias = alias_config(&store, &target.alias)?;
+                        let response = rt.block_on(async {
+                            let object = open_s3(&alias, &target, &select).await?;
+                            get_object(&object.client, &object.bucket, &object.key, &object.get)
+                                .await
+                        })?;
+                        let content_type = response.content_type().unwrap_or_default().to_string();
+                        let body = BodyReader {
+                            rt: &rt,
+                            body: response.body,
+                            chunk: Bytes::new(),
+                        };
+                        (Box::new(body), content_type)
+                    }
+                    Location::Local(path) => {
+                        reject_s3_only(select.is_set(), "head")?;
+                        let file = std::fs::File::open(&path).map_err(|error| {
+                            crate::error::io_error(&error, &path.to_string_lossy())
+                        })?;
+                        (Box::new(file), crate::s3::guess_content_type(&path))
+                    }
+                };
+            write_lines(
+                BufReader::new(decompress(reader, &content_type)),
+                lines,
+                &mut out,
+            )
+        })();
+        ignore_broken_pipe(result.with_context(|| format!("Unable to read from `{input}`.")))?;
     }
     Ok(())
+}
+
+/// mc `head` transparently decompresses objects whose Content-Type mentions `gzip` or `bzip`
+/// (for local files the type is guessed from the extension).
+fn decompress<'a>(reader: Box<dyn Read + 'a>, content_type: &str) -> Box<dyn Read + 'a> {
+    if content_type.contains("gzip") {
+        Box::new(flate2::read::MultiGzDecoder::new(reader))
+    } else if content_type.contains("bzip") {
+        Box::new(bzip2::read::MultiBzDecoder::new(reader))
+    } else {
+        reader
+    }
+}
+
+/// Blocking reader over an S3 response body (driven by the command's runtime).
+struct BodyReader<'a> {
+    rt: &'a tokio::runtime::Runtime,
+    body: ByteStream,
+    chunk: Bytes,
+}
+
+impl Read for BodyReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while self.chunk.is_empty() {
+            match self.rt.block_on(self.body.try_next()) {
+                Ok(Some(chunk)) => self.chunk = chunk,
+                Ok(None) => return Ok(0),
+                Err(error) => return Err(io::Error::other(error)),
+            }
+        }
+        let n = buf.len().min(self.chunk.len());
+        buf[..n].copy_from_slice(&self.chunk.split_to(n));
+        Ok(n)
+    }
+}
+
+/// Size of Go's default `bufio.Reader` buffer: mc's `ReadLine` never returns more than this.
+const MAX_LINE: usize = 4096;
+
+/// Go `bufio.Reader.ReadLine` semantics: a line longer than [`MAX_LINE`] bytes is returned in
+/// `MAX_LINE`-byte chunks, and a `\r` ending a full chunk is held back for the next call.
+struct LineReader<R> {
+    reader: R,
+    pending_cr: bool,
+}
+
+impl<R: BufRead> LineReader<R> {
+    /// Reads the next line (without `\n`/`\r\n`) into `line`; `false` at end of input.
+    fn next_line(&mut self, line: &mut Vec<u8>) -> io::Result<bool> {
+        line.clear();
+        if std::mem::take(&mut self.pending_cr) {
+            line.push(b'\r');
+        }
+        loop {
+            let buf = self.reader.fill_buf()?;
+            if buf.is_empty() {
+                return Ok(!line.is_empty());
+            }
+            let take = buf.len().min(MAX_LINE - line.len());
+            if let Some(i) = buf[..take].iter().position(|&b| b == b'\n') {
+                line.extend_from_slice(&buf[..i]);
+                self.reader.consume(i + 1);
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                return Ok(true);
+            }
+            line.extend_from_slice(&buf[..take]);
+            self.reader.consume(take);
+            if line.len() == MAX_LINE {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                    self.pending_cr = true;
+                }
+                return Ok(true);
+            }
+        }
+    }
+}
+
+/// Writes the first `lines` lines of `reader`, normalizing `\r\n` to `\n` and terminating the
+/// last line with `\n` (like mc's `bufio.ReadLine` loop, including its 4096-byte line cap).
+fn write_lines(reader: impl BufRead, lines: u64, out: &mut impl Write) -> Result<()> {
+    let mut reader = LineReader {
+        reader,
+        pending_cr: false,
+    };
+    let mut line = Vec::new();
+    for _ in 0..lines {
+        if !reader.next_line(&mut line)? {
+            break;
+        }
+        out.write_all(&line)?;
+        out.write_all(b"\n")?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decompress, write_lines};
+    use std::io::{BufReader, Write};
+
+    fn head(input: &[u8], lines: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_lines(input, lines, &mut out).unwrap();
+        out
+    }
+
+    fn head_compressed(input: Vec<u8>, content_type: &str) -> Vec<u8> {
+        let reader = BufReader::new(decompress(
+            Box::new(std::io::Cursor::new(input)),
+            content_type,
+        ));
+        let mut out = Vec::new();
+        write_lines(reader, 2, &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn decompresses_gzip_and_bzip2() {
+        let text = b"one\ntwo\nthree\n";
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(text).unwrap();
+        let gz = gz.finish().unwrap();
+        assert_eq!(
+            head_compressed(gz.clone(), "application/gzip"),
+            b"one\ntwo\n"
+        );
+        assert_eq!(
+            head_compressed(gz.clone(), "application/x-gzip"),
+            b"one\ntwo\n"
+        );
+        let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        bz.write_all(text).unwrap();
+        let bz = bz.finish().unwrap();
+        assert_eq!(head_compressed(bz, "application/x-bzip2"), b"one\ntwo\n");
+        // Other types are passed through untouched.
+        assert_eq!(head_compressed(text.to_vec(), "text/plain"), b"one\ntwo\n");
+        assert_ne!(
+            head_compressed(gz, "application/octet-stream"),
+            b"one\ntwo\n"
+        );
+    }
+
+    #[test]
+    fn prints_first_lines() {
+        assert_eq!(head(b"a\nb\r\nc\n", 2), b"a\nb\n");
+        assert_eq!(head(b"a\nb", 5), b"a\nb\n");
+        assert_eq!(head(b"a\nb\n", 0), b"");
+        assert_eq!(head(b"", 3), b"");
+    }
+
+    #[test]
+    fn caps_lines_at_bufio_buffer_size() {
+        // Like Go's bufio.ReadLine: over-long lines come back in 4096-byte chunks.
+        let long = vec![b'x'; 10_000];
+        let mut expected = vec![b'x'; 4096];
+        expected.push(b'\n');
+        assert_eq!(head(&long, 1), expected);
+        let mut expected2 = expected.clone();
+        expected2.extend_from_slice(&expected);
+        assert_eq!(head(&long, 2), expected2);
+        // A line of exactly 4096 bytes is followed by an empty "line".
+        let mut exact = vec![b'y'; 4096];
+        exact.extend_from_slice(b"\nz\n");
+        let mut want = vec![b'y'; 4096];
+        want.extend_from_slice(b"\n\nz\n");
+        assert_eq!(head(&exact, 3), want);
+        // A `\r` ending a full chunk is held back so a straddling `\r\n` is still stripped.
+        let mut crlf = vec![b'a'; 4095];
+        crlf.extend_from_slice(b"\r\nb\n");
+        let mut want = vec![b'a'; 4095];
+        want.extend_from_slice(b"\n\nb\n");
+        assert_eq!(head(&crlf, 3), want);
+        // Works through a small BufReader buffer too.
+        let reader = BufReader::with_capacity(7, &long[..]);
+        let mut out = Vec::new();
+        write_lines(reader, 1, &mut out).unwrap();
+        assert_eq!(out.len(), 4097);
+    }
 }

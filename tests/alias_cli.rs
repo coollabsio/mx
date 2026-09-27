@@ -20,7 +20,9 @@ fn list_creates_default_mx_config() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("play"))
-        .stdout(predicate::str::contains("Alias"));
+        .stdout(predicate::str::contains(
+            "  URL       : https://play.min.io",
+        ));
 
     let config_path = home.path().join(".mx/config.json");
     assert!(
@@ -37,6 +39,8 @@ fn set_writes_alias_to_mx_config() {
     cmd.env("HOME", home.path()).args([
         "alias",
         "set",
+        "--api",
+        "S3v4",
         "demo",
         "http://localhost:9000",
         "minio",
@@ -159,6 +163,8 @@ fn set_supports_json_output() {
         "--json",
         "alias",
         "set",
+        "--api",
+        "S3v4",
         "demo",
         "http://localhost:9000",
         "minio",
@@ -167,13 +173,13 @@ fn set_supports_json_output() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"success\""))
-        .stdout(predicate::str::contains("\"alias\": \"demo\""))
+        .stdout(predicate::str::contains("\"status\":\"success\""))
+        .stdout(predicate::str::contains("\"alias\":\"demo\""))
         .stdout(predicate::str::contains(
-            "\"URL\": \"http://localhost:9000\"",
+            "\"URL\":\"http://localhost:9000\"",
         ))
-        .stdout(predicate::str::contains("\"accessKey\": \"minio\""))
-        .stdout(predicate::str::contains("\"secretKey\": \"minio123\""));
+        .stdout(predicate::str::contains("\"accessKey\":\"minio\""))
+        .stdout(predicate::str::contains("\"secretKey\":\"minio123\""));
 }
 
 #[test]
@@ -183,6 +189,8 @@ fn list_supports_json_output() {
     cmd.env("HOME", home.path()).args([
         "alias",
         "set",
+        "--api",
+        "S3v4",
         "demo",
         "http://localhost:9000",
         "minio",
@@ -195,10 +203,10 @@ fn list_supports_json_output() {
         .args(["--json", "alias", "list", "demo"]);
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"success\""))
-        .stdout(predicate::str::contains("\"alias\": \"demo\""))
-        .stdout(predicate::str::contains("\"src\": "))
-        .stdout(predicate::str::contains("\"path\": \"auto\""));
+        .stdout(predicate::str::contains("\"status\":\"success\""))
+        .stdout(predicate::str::contains("\"alias\":\"demo\""))
+        .stdout(predicate::str::contains("\"src\":"))
+        .stdout(predicate::str::contains("\"path\":\"auto\""));
 }
 
 #[test]
@@ -208,6 +216,8 @@ fn remove_supports_json_output() {
     cmd.env("HOME", home.path()).args([
         "alias",
         "set",
+        "--api",
+        "S3v4",
         "demo",
         "http://localhost:9000",
         "minio",
@@ -220,7 +230,8 @@ fn remove_supports_json_output() {
         .args(["--json", "alias", "remove", "demo"]);
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"success\""))
-        .stdout(predicate::str::contains("\"alias\": \"demo\""))
-        .stdout(predicate::str::contains("\"URL\"").not());
+        .stdout(predicate::str::contains("\"status\":\"success\""))
+        .stdout(predicate::str::contains("\"alias\":\"demo\""))
+        // mc keeps an empty `URL` in remove messages.
+        .stdout(predicate::str::contains("\"URL\":\"\""));
 }
