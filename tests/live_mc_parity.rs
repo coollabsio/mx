@@ -2589,6 +2589,12 @@ fn replicated_with(extra: &[&str]) -> Option<Parity> {
             r#""(uptime|curr|avg|max|avgRate|peakRate|currRate|totalDowntime|currentBandwidth)":-?[0-9][0-9.e+-]*"#,
             r#""$1":0"#,
         )
+        // Per-node transfer stats appear once the server's metrics tick after a transfer,
+        // which may happen between the mc and mx runs.
+        .rule(
+            r#""transferSummary":(?:null|\{(?:[^{}]|\{[^{}]*\})*\})"#,
+            r#""transferSummary":{}"#,
+        )
         .rule(r"(?m) +$", "");
     Some(p)
 }
