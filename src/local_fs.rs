@@ -121,6 +121,10 @@ pub fn errno_text(error: &io::Error) -> String {
         let text = text
             .rfind(" (os error ")
             .map_or(text.as_str(), |index| &text[..index]);
+        // Go's unix errno texts are lowercase; its Windows texts match Rust's as is.
+        if cfg!(windows) {
+            return text.to_string();
+        }
         let mut chars = text.chars();
         return match chars.next() {
             Some(first) => first.to_lowercase().chain(chars).collect(),
@@ -415,7 +419,12 @@ mod tests {
     #[test]
     fn errno_text_is_go_style() {
         let error = io::Error::from_raw_os_error(2);
-        assert_eq!(errno_text(&error), "no such file or directory");
+        let expected = if cfg!(windows) {
+            "The system cannot find the file specified."
+        } else {
+            "no such file or directory"
+        };
+        assert_eq!(errno_text(&error), expected);
     }
 
     fn keys(items: &[Listed], root: &str) -> Vec<String> {

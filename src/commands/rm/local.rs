@@ -199,6 +199,7 @@ mod tests {
         assert!(is_namespace("."));
         assert!(is_namespace("/"));
         assert!(!is_namespace("dir/sub"));
+        #[cfg(unix)]
         assert!(!is_namespace("/tmp"));
         assert!(!is_namespace("../dir"));
     }
