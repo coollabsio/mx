@@ -24,10 +24,10 @@
 use regex::{Captures, Regex};
 use serde_json::Value;
 use std::fmt::Write as _;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::live;
 
@@ -862,16 +862,60 @@ fn run_program(
     let mut child = command
         .spawn()
         .unwrap_or_else(|err| panic!("spawn {}: {err}", program.display()));
-    if let Some(input) = stdin {
+    let writer = stdin.map(|input| {
         let mut pipe = child.stdin.take().expect("stdin");
-        pipe.write_all(input).expect("write stdin");
+        let input = input.to_vec();
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(&input);
+        })
+    });
+    let reader = |mut pipe: Box<dyn std::io::Read + Send>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+    };
+    let stdout = reader(Box::new(child.stdout.take().expect("stdout")));
+    let stderr = reader(Box::new(child.stderr.take().expect("stderr")));
+    // A hung process (the reference mc occasionally hangs in `sql`) must not block the suite.
+    let deadline = Instant::now() + command_timeout();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if let Some(writer) = writer {
+        let _ = writer.join();
     }
-    let output = child.wait_with_output().expect("wait");
+    let stdout = stdout.join().expect("stdout reader");
+    let mut stderr = stderr.join().expect("stderr reader");
+    if status.is_none() {
+        stderr.push_str(TIMED_OUT);
+    }
     Outcome {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        code: output.status.code(),
+        stdout,
+        stderr,
+        code: status.and_then(|status| status.code()),
     }
+}
+
+/// Appended to stderr when [`run_program`] killed a command that did not finish in time.
+pub const TIMED_OUT: &str = "\n<parity: command timed out>\n";
+
+/// Per-command limit for [`run_program`]: `MX_PARITY_TIMEOUT` seconds, default 120.
+fn command_timeout() -> Duration {
+    let secs = std::env::var("MX_PARITY_TIMEOUT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(120);
+    Duration::from_secs(secs)
 }
 
 fn compare_code(mc: &Outcome, mx: &Outcome, report: &mut String) {
