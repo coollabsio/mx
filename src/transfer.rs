@@ -15,6 +15,28 @@ pub fn local_inventory(root: &Path) -> Result<Vec<LocalEntry>> {
     Ok(entries)
 }
 
+/// Buffer for local file reads/writes in transfers: tokio runs one blocking thread handoff per
+/// file read/write, so moving 1 MiB per call (like mc's large writes) instead of 8 KiB keeps
+/// big downloads from being dominated by thread wakeups.
+pub const FILE_IO_BUFFER: usize = 1024 * 1024;
+
+/// Copies `reader` into `file` in 1 MiB writes and flushes it. Returns the bytes copied.
+pub async fn copy_to_file<R: tokio::io::AsyncRead + Unpin + ?Sized>(
+    reader: &mut R,
+    file: &mut tokio::fs::File,
+) -> std::io::Result<u64> {
+    let mut writer = tokio::io::BufWriter::with_capacity(FILE_IO_BUFFER, file);
+    let copied = tokio::io::copy(reader, &mut writer).await?;
+    tokio::io::AsyncWriteExt::flush(&mut writer).await?;
+    Ok(copied)
+}
+
+/// Opens a local file for reading through a 1 MiB buffer (see [`FILE_IO_BUFFER`]).
+pub async fn open_buffered(path: &Path) -> std::io::Result<tokio::io::BufReader<tokio::fs::File>> {
+    let file = tokio::fs::File::open(path).await?;
+    Ok(tokio::io::BufReader::with_capacity(FILE_IO_BUFFER, file))
+}
+
 pub fn join_key(prefix: Option<&str>, relative: &str) -> String {
     let prefix = prefix.unwrap_or_default().trim_matches('/');
     if prefix.is_empty() {

@@ -13,7 +13,7 @@ use clap::Args;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 
 #[derive(Debug, Args)]
 pub struct OdArgs {
@@ -391,9 +391,8 @@ async fn download(ops: &Operands, source: &Endpoint, path: &Path) -> Result<OdMe
         };
         let output = crate::s3::get_object(&client, bucket, key, &options).await?;
         let mut body = output.body.into_async_read();
-        total += tokio::io::copy(&mut body, &mut file).await? as i64;
+        total += crate::transfer::copy_to_file(&mut body, &mut file).await? as i64;
     }
-    file.flush().await?;
     Ok(OdMessage {
         status: "success",
         kind: "S3toFS",
@@ -411,8 +410,7 @@ async fn write_file(path: &Path, mut reader: impl AsyncRead + Unpin) -> Result<i
     let mut file = tokio::fs::File::create(path)
         .await
         .with_context(|| format!("Unable to create `{}`", path.display()))?;
-    let total = tokio::io::copy(&mut reader, &mut file).await?;
-    file.flush().await?;
+    let total = crate::transfer::copy_to_file(&mut reader, &mut file).await?;
     Ok(total as i64)
 }
 

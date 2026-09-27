@@ -717,11 +717,9 @@ impl Job {
                     put.metadata
                         .push((diff::ATTRS_KEY.to_string(), local_attrs(&meta).encode()));
                 }
-                let file = tokio::fs::File::open(&path)
-                    .await
-                    .with_context(|| format!("Unable to read local file `{}`.", path.display()))?;
-                let size = u64::try_from(entry.size).ok();
-                crate::s3::upload_stream(&target.client, &bucket, &key, file, size, &put).await?;
+                let size = u64::try_from(entry.size).unwrap_or_default();
+                crate::s3::upload_file(&target.client, &bucket, &key, &path, size, &put, None)
+                    .await?;
             }
             (Endpoint::S3(source), Endpoint::Local(root)) => {
                 let (bucket, key) = source.locate(rel)?;
@@ -740,7 +738,7 @@ impl Job {
                     .flatten();
                 let mut reader = response.body.into_async_read();
                 write_atomically(&dest, async |file| {
-                    tokio::io::copy(&mut reader, file).await?;
+                    crate::transfer::copy_to_file(&mut reader, file).await?;
                     Ok(())
                 })
                 .await?;
@@ -755,11 +753,11 @@ impl Job {
             (Endpoint::Local(src_root), Endpoint::Local(dst_root)) => {
                 let src = src_root.join(rel);
                 let dest = safe_join(dst_root, rel)?;
-                let mut input = tokio::fs::File::open(&src)
+                let mut input = crate::transfer::open_buffered(&src)
                     .await
                     .with_context(|| format!("Unable to read local file `{}`.", src.display()))?;
                 write_atomically(&dest, async |file| {
-                    tokio::io::copy(&mut input, file).await?;
+                    crate::transfer::copy_to_file(&mut input, file).await?;
                     Ok(())
                 })
                 .await?;

@@ -322,8 +322,9 @@ fn live_cp_metadata_flags() {
     assert_eq!(metadata.get("team").map(String::as_str), Some("storage"));
     assert_eq!(merged.content_type(), Some("text/x-mx"));
 
-    // --disable-multipart uploads a 9 MiB file with a single PUT (no `-N` ETag suffix).
-    let big: Vec<u8> = (0..9 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    // --disable-multipart uploads a 17 MiB file (above the 16 MiB multipart threshold) with a
+    // single PUT (no `-N` ETag suffix).
+    let big: Vec<u8> = (0..17 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
     let big_path = live.home.path().join("big.bin");
     std::fs::write(&big_path, &big).unwrap();
     live.cmd()

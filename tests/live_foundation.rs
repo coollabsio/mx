@@ -34,9 +34,9 @@ fn live_put_paths_and_cli_roundtrip() {
         .success()
         .stdout("small body\n");
 
-    // > 8 MiB forces the multipart path through `cp`.
+    // > 16 MiB forces the multipart path through `cp` (3 file-range parts).
     let big_path = live.home.path().join("big.bin");
-    let big = pattern(9 * MIB + 17);
+    let big = pattern(33 * MIB + 17);
     std::fs::write(&big_path, &big).unwrap();
     live.cmd()
         .args(["cp", big_path.to_str().unwrap(), &live.url("big.bin")])
@@ -191,6 +191,8 @@ fn live_put_options_metadata_tags_checksum() {
                 None,
                 &PutOptions {
                     checksum: Some(algo),
+                    // 5 MiB parts keep the 11 MiB case multipart.
+                    part_size: Some(5 * MIB as u64),
                     ..Default::default()
                 },
             ))
@@ -270,6 +272,8 @@ fn live_server_side_encryption() {
                 None,
                 &PutOptions {
                     sse: Some(sse.clone()),
+                    // 5 MiB parts keep the 11 MiB case multipart.
+                    part_size: Some(5 * MIB as u64),
                     ..Default::default()
                 },
             ))
@@ -527,6 +531,8 @@ fn live_object_lock_put_options() {
                 &PutOptions {
                     legal_hold: Some(true),
                     retention: Some(("governance".into(), until)),
+                    // 5 MiB parts keep the 11 MiB case multipart.
+                    part_size: Some(5 * MIB as u64),
                     ..Default::default()
                 },
             ))
