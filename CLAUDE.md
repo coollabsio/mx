@@ -1,8 +1,9 @@
 # mx notes
 
 Rust clone of MinIO `mc` (binary runs as `mx` or `mc`); goal is full mc parity
-(pinned release `tests/mc.version`). Per-command status, intentional differences and
-remaining gaps live in `COMPATIBILITY.md`; keep it in sync with code changes.
+(pinned release `tests/mc.version`). `MC_COMPATIBILITY.md` is the short per-command
+status table; `COMPATIBILITY.md` holds details, intentional differences and remaining
+gaps. Keep both in sync with code changes.
 
 Current implemented scope (every mc command except the out-of-scope ones):
 
