@@ -8,6 +8,58 @@
   `mx-musl` = static musl build (the shipped Linux binary)
 - Data: 2 GiB large file, 1 GiB pipe/cat object, 5,000 × 16 KiB tree (10 dirs), 20,000 × 1 KiB objects
 
+## After the performance fixes
+
+mx at `954c7b1` (static musl build with mimalloc `c38a09d`; minio-go multipart defaults,
+file-range parts, 1 MiB file writes `954c7b1`), same machine and data:
+
+| scenario | tool | wall s (median) | MB/s | CPU s (median) | max RSS MiB | vs mc |
+|---|---|---:|---:|---:|---:|---:|
+| put_large (`cp` 2 GiB up) | mc | 1.41 | 1452 | 2.63 | 39 | 1.00x |
+|  | mx | 0.93 | 2202 | 1.04 | 46 | 0.66x |
+|  | mx-musl | 0.94 | 2179 | 1.03 | 47 | 0.67x |
+| get_large (`cp` 2 GiB down) | mc | 0.87 | 2354 | 0.88 | 31 | 1.00x |
+|  | mx | 0.80 | 2560 | 1.39 | 24 | 0.92x |
+|  | mx-musl | 0.81 | 2528 | 1.41 | 60 | 0.93x |
+| pipe (1 GiB stdin) | mc | 2.52 | 406 | 1.20 | 619 | 1.00x |
+|  | mx | 2.85 | 359 | 0.98 | 547 | 1.13x |
+|  | mx-musl | 2.80 | 366 | 0.93 | 556 | 1.11x |
+| cat (1 GiB) | mc | 0.36 | 2844 | 0.19 | 32 | 1.00x |
+|  | mx | 0.38 | 2695 | 0.29 | 22 | 1.06x |
+|  | mx-musl | 0.36 | 2844 | 0.28 | 57 | 1.00x |
+| cp_small_up (`cp -r` 5k × 16 KiB) | mc | 1.57 | 50 | 3.51 | 50 | 1.00x |
+|  | mx | 1.21 | 65 | 1.71 | 23 | 0.77x |
+|  | mx-musl | 1.12 | 70 | 1.56 | 57 | 0.71x |
+| cp_small_down | mc | 1.57 | 50 | 3.07 | 50 | 1.00x |
+|  | mx | 1.14 | 69 | 2.09 | 25 | 0.73x |
+|  | mx-musl | 0.89 | 88 | 1.61 | 85 | 0.57x |
+| mirror_up | mc | 1.67 | 47 | 4.09 | 44 | 1.00x |
+|  | mx | 0.53 | 147 | 1.40 | 29 | 0.32x |
+|  | mx-musl | 0.52 | 150 | 1.38 | 82 | 0.31x |
+| mirror_noop | mc | 0.18 | - | 0.18 | 39 | 1.00x |
+|  | mx | 0.12 | - | 0.02 | 20 | 0.67x |
+|  | mx-musl | 0.16 | - | 0.04 | 54 | 0.89x |
+| ls | mc | 0.62 | - | 0.47 | 37 | 1.00x |
+|  | mx | 0.32 | - | 0.08 | 26 | 0.52x |
+|  | mx-musl | 0.30 | - | 0.10 | 57 | 0.48x |
+| find | mc | 0.62 | - | 0.41 | 39 | 1.00x |
+|  | mx | 0.30 | - | 0.08 | 27 | 0.48x |
+|  | mx-musl | 0.29 | - | 0.08 | 66 | 0.47x |
+| du | mc | 0.59 | - | 0.41 | 38 | 1.00x |
+|  | mx | 0.33 | - | 0.08 | 29 | 0.56x |
+|  | mx-musl | 0.30 | - | 0.08 | 70 | 0.51x |
+| rm | mc | 1.34 | - | 0.51 | 41 | 1.00x |
+|  | mx | 1.40 | - | 0.09 | 26 | 1.04x |
+|  | mx-musl | 1.47 | - | 0.11 | 57 | 1.10x |
+
+Large uploads are now faster than mc (4 parallel 16 MiB parts, read straight from the file),
+large downloads match mc, and the musl build matches the glibc build on parallel work
+(mimalloc). mimalloc raises the musl build's base RSS (about 45-85 MiB on these runs, 20-27
+MiB for a small `ls`); `MIMALLOC_ARENA_EAGER_COMMIT=0` saved only a few MiB, so the defaults
+stay. `pipe` now uses mc's 528 MiB part size for unknown lengths, so its memory matches mc.
+
+## Before the performance fixes
+
 | scenario | tool | wall s (median) | MB/s | CPU s (median) | max RSS MiB | vs mc |
 |---|---|---:|---:|---:|---:|---:|
 | put_large (`cp` 2 GiB up) | mc | 1.41 | 1452 | 2.64 | 41 | 1.00x |
@@ -85,6 +137,9 @@ All uploads and downloads were verified by object count and total bytes.
    are faster than mc and use less memory.
 
 ## Suggested fixes (by expected impact)
+
+Fixes 1-4 are done (see "After the performance fixes"); 5 is partly done (`pipe` uses mc's
+part size for unknown lengths, concurrency stays 1 like mc).
 
 1. `cp`/`mirror`/`mv` uploads: default `parallel` to 4 and the minimum part size to 16 MiB (minio-go
    defaults). Expected about 4x on large uploads.

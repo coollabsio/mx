@@ -11,7 +11,11 @@ ARG SOURCE_DATE_EPOCH=
 ARG MX_RELEASE=
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --locked --release \
+    # An empty SOURCE_DATE_EPOCH breaks C builds that use __DATE__ (GCC), so drop unset ARGs.
+    for var in MX_COMMIT_ID SOURCE_DATE_EPOCH MX_RELEASE; do \
+        eval "[ -n \"\$$var\" ]" || unset "$var"; \
+    done \
+    && cargo build --locked --release \
     && cp /src/target/release/mx /mx \
     && file /mx | grep -E 'static(-pie)? linked|statically linked'
 
