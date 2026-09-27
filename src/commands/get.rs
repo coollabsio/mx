@@ -4,6 +4,7 @@ use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::error::{McError, nonfatal};
 use crate::flags::{VersionIdFlag, resolve_sse};
+use crate::local_fs::clean_path;
 use crate::location::{Location, parse_location};
 use crate::output;
 use crate::progress::{CopyMessage, Progress, ProgressReader};
@@ -91,41 +92,4 @@ pub fn run(args: GetArgs, json: bool) -> Result<()> {
     }
     progress.finish(true);
     progress.print_summary(json)
-}
-
-/// Go `filepath.Clean` for display (mc prints the cleaned target path).
-fn clean_path(path: &str) -> String {
-    let absolute = path.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." if parts.last().is_some_and(|last| *last != "..") => {
-                parts.pop();
-            }
-            ".." if absolute => {}
-            other => parts.push(other),
-        }
-    }
-    let joined = parts.join("/");
-    match (absolute, joined.is_empty()) {
-        (true, _) => format!("/{joined}"),
-        (false, true) => ".".to_string(),
-        (false, false) => joined,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::clean_path;
-
-    #[test]
-    fn cleans_paths_like_go() {
-        assert_eq!(clean_path("./a.txt"), "a.txt");
-        assert_eq!(clean_path("sub//b/../c"), "sub/c");
-        assert_eq!(clean_path("/tmp/x/../y/./z"), "/tmp/y/z");
-        assert_eq!(clean_path("../a"), "../a");
-        assert_eq!(clean_path("./"), ".");
-        assert_eq!(clean_path("/.."), "/");
-    }
 }

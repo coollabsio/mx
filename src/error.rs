@@ -133,6 +133,14 @@ impl McError {
         )
     }
 
+    /// mc `TooManyLevelsSymlink`.
+    pub fn too_many_symlinks(path: &str) -> Self {
+        Self::with_detail(
+            format!("Requested path `{path}` has too many levels of symlinks"),
+            crate::detail![("Path", path)],
+        )
+    }
+
     /// mc `PathInsufficientPermission`.
     pub fn path_insufficient_permission(path: &str) -> Self {
         Self::with_detail(

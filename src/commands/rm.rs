@@ -1,4 +1,4 @@
-use crate::commands::stat::{print_date, rfc3339};
+use crate::commands::stat::print_date;
 use crate::commands::{alias_config, runtime};
 use crate::config::ConfigStore;
 use crate::error::nonfatal;
@@ -12,6 +12,8 @@ use aws_sdk_s3::Client;
 use clap::Args;
 use std::io::BufRead;
 use std::time::SystemTime;
+
+mod local;
 
 const FORCE_REQUIRED: &str = "Removal requires --force flag. This operation is *IRREVERSIBLE*. Please review carefully before performing this *DANGEROUS* operation.";
 const RECURSIVE_REQUIRED: &str = "Removal requires --recursive flag. This operation is *IRREVERSIBLE*. Please review carefully before performing this *DANGEROUS* operation.";
@@ -92,6 +94,47 @@ pub fn validate(args: &RemoveArgs) -> Result<()> {
     {
         bail!("You cannot specify --purge flag with any flag(s) other than --force.");
     }
+    if (args.versions || args.recursive || args.stdin) && !args.force {
+        bail!(FORCE_REQUIRED);
+    }
+    args.time.parsed()?;
+    Ok(())
+}
+
+/// mc's target rules. S3: alias-wide removal needs `--dangerous --force`, buckets need `-r`.
+/// Local (mc stops at the first folder target): a top-level folder needs `--dangerous --force`.
+pub fn check_targets(args: &RemoveArgs, config: &crate::config::model::ConfigV10) -> Result<()> {
+    let s3 = args.stdin
+        || args
+            .targets
+            .iter()
+            .any(|target| matches!(parse_location(target, config), Location::S3(_)));
+    if s3 {
+        check_s3_flags(args)?;
+    }
+    let mut namespace = false;
+    let mut local_dir_seen = false;
+    for target in &args.targets {
+        match parse_location(target, config) {
+            Location::Local(_) => {
+                if !args.purge && !local_dir_seen && local::is_dir(target) {
+                    local_dir_seen = true;
+                    namespace = local::is_namespace(target);
+                }
+            }
+            Location::S3(_) => check_target(args, &TargetRef::parse(target)?)?,
+        }
+    }
+    if namespace && (!args.dangerous || !args.force) {
+        bail!(DANGEROUS_REQUIRED);
+    }
+    Ok(())
+}
+
+/// Flag rules mx enforces for S3 targets only (mc ignores these flags where they do not apply;
+/// local targets follow mc).
+fn check_s3_flags(args: &RemoveArgs) -> Result<()> {
+    let has_rewind = args.rewind.rewind.is_some();
     if args.incomplete
         && (args.versions
             || has_rewind
@@ -105,13 +148,6 @@ pub fn validate(args: &RemoveArgs) -> Result<()> {
     }
     if has_rewind && !args.recursive && !args.versions {
         bail!("You cannot specify --rewind without --recursive or --versions.");
-    }
-    if (args.versions || args.recursive || args.stdin) && !args.force {
-        bail!(FORCE_REQUIRED);
-    }
-    args.time.parsed()?;
-    for target in &args.targets {
-        check_target(args, &TargetRef::parse(target)?)?;
     }
     Ok(())
 }
@@ -133,21 +169,34 @@ fn check_target(args: &RemoveArgs, target: &TargetRef) -> Result<()> {
 
 pub fn run(args: RemoveArgs, json: bool) -> Result<()> {
     validate(&args)?;
+    let store = ConfigStore::load_or_create()?;
+    check_targets(&args, store.config())?;
     let now = SystemTime::now();
     let remover = Remover {
         rewind: args.rewind.at(now)?,
         now,
         json,
-        store: ConfigStore::load_or_create()?,
+        store,
         rt: runtime()?,
         args: &args,
     };
 
+    // mc reports each failure (`errorIf`) as it happens and exits 1 at the end.
+    let mut failed = false;
     let mut errors = Vec::new();
-    for target in &args.targets {
-        if let Err(error) = remover.remove(target) {
+    let mut handle = |result: Result<()>| {
+        let Err(error) = result else { return };
+        if error.downcast_ref::<crate::output::Exit>().is_some() {
+            failed = true;
+        } else if error.downcast_ref::<crate::error::NonFatal>().is_some() {
+            report(&error);
+            failed = true;
+        } else {
             errors.push(error);
         }
+    };
+    for target in &args.targets {
+        handle(remover.remove(target));
     }
     if args.stdin {
         for line in std::io::stdin().lock().lines() {
@@ -156,18 +205,19 @@ pub fn run(args: RemoveArgs, json: bool) -> Result<()> {
             if target.is_empty() {
                 continue;
             }
-            if let Err(error) = remover.remove(target) {
-                errors.push(error);
-            }
+            handle(remover.remove(target));
         }
     }
-    let Some(last) = errors.pop() else {
-        return Ok(());
-    };
-    for error in errors {
-        report(&error);
+    if let Some(last) = errors.pop() {
+        for error in errors {
+            report(&error);
+        }
+        return Err(last);
     }
-    Err(last)
+    if failed {
+        return Err(crate::output::Exit(1).into());
+    }
+    Ok(())
 }
 
 /// Reports a failure that does not stop the command (mc `errorIf`).
@@ -186,20 +236,9 @@ struct Remover<'a> {
 
 impl Remover<'_> {
     fn remove(&self, input: &str) -> Result<()> {
-        if let Location::Local(path) = parse_location(input, self.store.config())
-            && !path.exists()
-        {
-            // mc treats unknown aliases as local paths.
-            let message = if self.args.recursive {
-                format!("Failed to remove `{input}` recursively.")
-            } else {
-                format!("Failed to remove `{input}`.")
-            };
-            let path = path.to_string_lossy();
-            return Err(anyhow::Error::new(crate::error::local_not_found(
-                path.trim_end_matches('/'),
-            ))
-            .context(nonfatal(message)));
+        // mc treats unknown aliases as local paths.
+        if let Location::Local(_) = parse_location(input, self.store.config()) {
+            return self.remove_local(input);
         }
         let target = TargetRef::parse(input)?;
         check_target(self.args, &target)?;
@@ -557,7 +596,7 @@ impl RemoveMessage {
             key: &self.key,
             delete_marker: self.delete_marker,
             version_id: self.version_id.as_deref().unwrap_or_default(),
-            mod_time: self.mod_time.map(rfc3339),
+            mod_time: self.mod_time.map(crate::commands::ls::go_time),
             dry_run: self.dry_run,
         })
         .unwrap_or_default()
@@ -582,7 +621,12 @@ mod tests {
     }
 
     fn check(args: &[&str]) -> std::result::Result<(), String> {
-        validate(&parse(args)).map_err(|error| error.to_string())
+        let mut config = crate::config::model::ConfigV10::new_with_defaults();
+        config.aliases.insert("a".into(), Default::default());
+        let args = parse(args);
+        validate(&args)
+            .and_then(|()| check_targets(&args, &config))
+            .map_err(|error| error.to_string())
     }
 
     #[test]

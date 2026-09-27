@@ -19,6 +19,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod local;
+
 #[derive(Debug, Args)]
 #[command(mut_args(|a| match a.get_id().as_str() {
     "rewind" => a.help("stat on older version(s)"),
@@ -64,36 +66,23 @@ pub fn validate(args: &StatArgs) -> Result<()> {
     if (args.recursive || args.versions) && args.no_list {
         bail!("You cannot specify --no-list with either --versions or --recursive.");
     }
-    if args.no_list && has_rewind {
-        bail!("You cannot specify --no-list with --rewind.");
-    }
     Ok(())
 }
 
 pub fn run(args: StatArgs, json: bool) -> Result<()> {
     validate(&args)?;
+    // mc parses the encryption keys before looking at any target.
+    args.enc
+        .entries()
+        .context("Unable to parse encryption keys.")?;
     let rewind = args.rewind.at(SystemTime::now())?;
     let store = ConfigStore::load_or_create()?;
     let rt = runtime()?;
     for input in &args.targets {
-        if let Location::Local(path) = parse_location(input, store.config())
-            && !path.exists()
-        {
-            // mc treats unknown aliases as local paths and lists the parent folder.
-            let path = path.to_string_lossy();
-            let parent = match path.trim_end_matches('/').rfind('/') {
-                Some(0) => "/".to_string(),
-                Some(index) => path[..index].to_string(),
-                None => ".".to_string(),
-            };
-            if !std::path::Path::new(&parent).is_dir() {
-                crate::output::print_error(
-                    &anyhow::Error::new(crate::error::local_not_found(&parent))
-                        .context(nonfatal("Unable to list folder.")),
-                );
-            }
-            return Err(anyhow::Error::new(McError::object_missing()))
-                .with_context(|| format!("Unable to stat `{input}`."));
+        // mc treats unknown aliases as local paths.
+        if let Location::Local(_) = parse_location(input, store.config()) {
+            local::stat(input, &args, json)?;
+            continue;
         }
         let target = TargetRef::parse(input)?;
         let alias = alias_config(&store, &target.alias)?;
@@ -223,7 +212,8 @@ async fn collect(
         };
     };
 
-    if args.no_list || args.version_id.version_id.is_some() {
+    // mc skips the HEAD request when rewinding.
+    if (args.no_list && rewind.is_none()) || args.version_id.version_id.is_some() {
         let stat = crate::s3::stat_object_sse_c(
             &client,
             &bucket,
@@ -375,11 +365,6 @@ pub(crate) fn print_date(time: SystemTime) -> String {
         .fmt(DateTimeFormat::DateTime)
         .unwrap_or_default();
     format!("{} UTC", text.trim_end_matches('Z').replacen('T', " ", 1))
-}
-
-/// RFC3339 timestamp in the format `mx` uses for JSON (`2024-01-02T03:04:05.123Z`).
-pub(crate) fn rfc3339(time: SystemTime) -> String {
-    crate::s3::debug_timestamp(&crate::s3::from_system_time(time))
 }
 
 /// go-humanize `IBytes` (e.g. `0 B`, `17 B`, `1.0 KiB`, `12 MiB`).
@@ -1036,7 +1021,7 @@ mod tests {
         assert!(validate(&parse(&["-vid", "v1", "-r", "a/b/c"])).is_err());
         assert!(validate(&parse(&["--version-id", "v1", "--rewind", "1d", "a/b/c"])).is_err());
         assert!(validate(&parse(&["--no-list", "--versions", "a/b/c"])).is_err());
-        assert!(validate(&parse(&["--no-list", "--rewind", "1d", "a/b/c"])).is_err());
+        assert!(validate(&parse(&["--no-list", "--rewind", "1d", "a/b/c"])).is_ok());
         assert!(validate(&parse(&["--no-list", "a/b/c"])).is_ok());
     }
 

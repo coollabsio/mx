@@ -3,6 +3,7 @@
 //! `ALIAS-iam-info.zip`; an existing file is moved aside with a timestamp suffix).
 //!
 //! Owner: SERVER.
+use crate::local_fs::clean_path;
 
 use crate::commands::runtime;
 use crate::s3::admin_server::{self as api, BucketStatus, IamEntities, IamErrEntity};
@@ -102,34 +103,6 @@ pub fn run(args: ClusterArgs, json: bool) -> Result<()> {
 }
 
 const CLIENT_ERROR: &str = "Unable to initialize admin client.";
-
-/// Go `filepath.Clean` (lexical).
-fn clean_path(path: &str) -> String {
-    if path.is_empty() {
-        return ".".to_string();
-    }
-    let rooted = path.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                if parts.last().is_some_and(|p| *p != "..") {
-                    parts.pop();
-                } else if !rooted {
-                    parts.push("..");
-                }
-            }
-            other => parts.push(other),
-        }
-    }
-    let joined = parts.join("/");
-    match (rooted, joined.is_empty()) {
-        (true, _) => format!("/{joined}"),
-        (false, true) => ".".to_string(),
-        (false, false) => joined,
-    }
-}
 
 /// mc `url2Alias`: the path after the alias.
 fn bucket_of(aliased_url: &str) -> &str {

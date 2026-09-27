@@ -5,6 +5,7 @@ pub mod error;
 pub mod flags;
 pub mod globals;
 pub mod help;
+pub mod local_fs;
 pub mod location;
 pub mod mirror;
 pub mod net;

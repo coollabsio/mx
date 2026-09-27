@@ -244,6 +244,100 @@ case!(
 case!(stat_object_text, text, seeded(), ["stat", "{target}/a.txt"]);
 case!(stat_object_json, json, seeded(), ["stat", "{target}/a.txt"]);
 
+// Local paths (mc `fsClient`).
+
+/// No buckets; local `src/one.txt`, `src/nested/two.txt`, `src/nested/deep/three.md`,
+/// `src/empty/`. File attribute times differ per side; mc prints the metadata map in random
+/// order, so text output drops the `X-Amz-Meta-Mc-Attrs` line.
+fn local_tree() -> Option<Parity> {
+    let mut p = Parity::bare()?;
+    p.file("src/one.txt", "one\n");
+    p.file("src/nested/two.txt", "two two\n");
+    p.file("src/nested/deep/three.md", "three\n");
+    for side in [&p.mc, &p.mx] {
+        std::fs::create_dir_all(side.path("src/empty")).expect("mkdir");
+    }
+    p.normalizer
+        .rule(r"(?m)^  X-Amz-Meta-Mc-Attrs: .*\n", "")
+        .rule(r"([am]time):\d+#\d+", "$1:<T>");
+    Some(p)
+}
+
+case!(
+    stat_local_file_text,
+    text,
+    local_tree(),
+    ["stat", "src/one.txt"]
+);
+case!(
+    stat_local_file_json,
+    json,
+    local_tree(),
+    ["stat", "src/one.txt"]
+);
+case!(stat_local_dir_text, text, local_tree(), ["stat", "src/"]);
+case!(stat_local_dir_json, json, local_tree(), ["stat", "src/"]);
+case!(
+    stat_local_prefix_text,
+    text,
+    local_tree(),
+    ["stat", "src/nest"]
+);
+case!(
+    stat_local_recursive_text,
+    text,
+    local_tree(),
+    ["stat", "-r", "src"]
+);
+case!(
+    stat_local_recursive_json,
+    json,
+    local_tree(),
+    ["stat", "-r", "src/nested/"]
+);
+case!(
+    stat_local_no_list_text,
+    text,
+    local_tree(),
+    ["stat", "--no-list", "src/nested"]
+);
+case!(
+    stat_local_absolute_json,
+    json,
+    local_tree(),
+    ["stat", "{work}/src/one.txt"]
+);
+case!(
+    stat_local_missing_text,
+    text,
+    local_tree(),
+    ["stat", "src/nope"]
+);
+case!(
+    stat_local_missing_parent_text,
+    text,
+    local_tree(),
+    ["stat", "nope/x"]
+);
+case!(
+    stat_local_missing_parent_json,
+    json,
+    local_tree(),
+    ["stat", "nope/x"]
+);
+case!(
+    stat_local_no_list_missing_json,
+    json,
+    local_tree(),
+    ["stat", "--no-list", "src/nope"]
+);
+case!(
+    stat_local_not_dir_text,
+    text,
+    local_tree(),
+    ["stat", "src/one.txt/"]
+);
+
 // ---------------------------------------------------------------------------
 // mb / rb
 // ---------------------------------------------------------------------------
@@ -305,6 +399,159 @@ case!(
     versioned(),
     ["rm", "-r", "--force", "--versions", "{target}"]
 );
+
+// Local paths (mc `fsClient`; fixture `local_tree`).
+
+case!(
+    rm_local_file_text,
+    text,
+    local_tree(),
+    ["rm", "src/one.txt"]
+);
+case!(
+    rm_local_file_json,
+    json,
+    local_tree(),
+    ["rm", "./src/one.txt"]
+);
+case!(
+    rm_local_missing_text,
+    text,
+    local_tree(),
+    ["rm", "src/nope", "src/one.txt"]
+);
+case!(
+    rm_local_missing_json,
+    json,
+    local_tree(),
+    ["rm", "src/nope", "src/one.txt"]
+);
+case!(
+    rm_local_recursive_text,
+    text,
+    local_tree(),
+    ["rm", "-r", "--force", "src/nested"]
+);
+case!(
+    rm_local_recursive_json,
+    json,
+    local_tree(),
+    ["rm", "-r", "--force", "src/"]
+);
+case!(
+    rm_local_dry_run_text,
+    text,
+    local_tree(),
+    ["rm", "-r", "--force", "--dry-run", "src/"]
+);
+case!(
+    rm_local_versions_dry_run_json,
+    json,
+    local_tree(),
+    [
+        "rm",
+        "-r",
+        "--force",
+        "--versions",
+        "--dry-run",
+        "src/nested"
+    ]
+);
+case!(
+    rm_local_newer_than_text,
+    text,
+    local_tree(),
+    ["rm", "-r", "--force", "--newer-than", "1d", "src/nested/"]
+);
+case!(
+    rm_local_older_than_text,
+    text,
+    local_tree(),
+    ["rm", "-r", "--force", "--older-than", "1d", "src/"]
+);
+case!(
+    rm_local_single_dry_run_text,
+    text,
+    local_tree(),
+    ["rm", "--dry-run", "src/nested", "src/one.txt"]
+);
+case!(
+    rm_local_dir_text,
+    text,
+    local_tree(),
+    ["rm", "src/nested", "src/empty"]
+);
+case!(
+    rm_local_requires_force_text,
+    text,
+    local_tree(),
+    ["rm", "-r", "src/nested"]
+);
+case!(
+    rm_local_top_level_text,
+    text,
+    local_tree(),
+    ["rm", "-r", "--force", "src"]
+);
+case!(rm_local_top_level_json, json, local_tree(), ["rm", "src/"]);
+case!(
+    rm_local_recursive_missing_text,
+    text,
+    local_tree(),
+    ["rm", "-r", "--force", "nope/x"]
+);
+case!(
+    rm_local_recursive_file_text,
+    text,
+    local_tree(),
+    ["rm", "-r", "--force", "src/one.txt"]
+);
+case!(
+    rm_local_ignored_flags_text,
+    text,
+    local_tree(),
+    ["rm", "--version-id", "v1", "--bypass", "src/one.txt"]
+);
+case!(
+    rm_local_stdin_text,
+    text,
+    local_tree(),
+    ["rm", "--force", "--stdin"],
+    b"src/one.txt\nsrc/nope\n"
+);
+
+/// Both tools leave the same local tree behind (empty folders removed up to the target).
+#[test]
+fn rm_local_recursive_tree() {
+    let Some(p) = local_tree() else { return };
+    for args in [
+        &["rm", "-r", "--force", "src/nested/deep"][..],
+        &["rm", "-r", "--force", "src/empty/"][..],
+        &["rm", "src/one.txt"][..],
+    ] {
+        p.assert_parity(args, None);
+    }
+    let tree = |side: &common::parity::Side| {
+        let mut out = Vec::new();
+        let mut stack = vec![side.path("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir") {
+                let path = entry.expect("entry").path();
+                out.push(path.strip_prefix(&side.work).unwrap().display().to_string());
+                if path.is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        out.sort();
+        out
+    };
+    assert_eq!(tree(&p.mc), tree(&p.mx));
+    assert_eq!(
+        tree(&p.mx),
+        ["src/empty", "src/nested", "src/nested/two.txt"]
+    );
+}
 
 // ---------------------------------------------------------------------------
 // cp / mv / put / pipe

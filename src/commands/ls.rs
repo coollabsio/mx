@@ -441,7 +441,7 @@ fn list_local(input: &str, opts: &ListOpts) -> Result<Listing> {
     })
 }
 
-type DirEntries = Vec<(String, std::fs::Metadata)>;
+pub(crate) type DirEntries = Vec<(String, std::fs::Metadata)>;
 
 /// [`read_dir_entries`] with mc's errors for a plain (non-recursive) folder listing.
 fn read_dir_sorted(dir: &str) -> Result<DirEntries> {
@@ -456,7 +456,7 @@ fn read_dir_sorted(dir: &str) -> Result<DirEntries> {
 
 /// Regular files and folders of `dir` (symlinks followed, broken ones skipped) as absolute
 /// paths, in mc's lexical order (folders compare with a trailing `/`).
-fn read_dir_entries(dir: &str) -> std::io::Result<DirEntries> {
+pub(crate) fn read_dir_entries(dir: &str) -> std::io::Result<DirEntries> {
     let entries = std::fs::read_dir(dir)?;
     let mut out = Vec::new();
     for entry in entries.flatten() {
@@ -489,7 +489,7 @@ fn read_dir_entries(dir: &str) -> std::io::Result<DirEntries> {
 /// mc `listRecursiveInRoutine`: regular files below `dir` whose path starts with
 /// `file_prefix` (when set). Symlinked folders are not followed. Unreadable folders are
 /// collected in `denied` and skipped, like mc (which keeps walking); other errors abort.
-fn walk(
+pub(crate) fn walk(
     dir: &str,
     file_prefix: &str,
     root: bool,

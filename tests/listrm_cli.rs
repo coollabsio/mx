@@ -392,3 +392,122 @@ fn rb_requires_force_and_dangerous_for_alias_root() {
     fails_with(&["rb", "--force", "local"], "‘--force’ and ‘--dangerous’");
     fails_with(&["rb", "local/b/key"], "`rb` requires a bucket target");
 }
+
+/// Runs `mx ARGS` in `work` and returns (success, stdout, stderr).
+fn run_in(home: &std::path::Path, work: &std::path::Path, args: &[&str]) -> (bool, String, String) {
+    let out = mx(home).current_dir(work).args(args).output().expect("run");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn stat_and_rm_handle_local_paths_like_mc() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let work = tempfile::tempdir().expect("tempdir");
+    let w = work.path();
+    std::fs::create_dir_all(w.join("sub/d")).unwrap();
+    std::fs::write(w.join("top.txt"), "t\n").unwrap();
+    std::fs::write(w.join("sub/a.txt"), "a\n").unwrap();
+    std::fs::write(w.join("sub/d/b.txt"), "b\n").unwrap();
+
+    let (ok, out, _) = run_in(home.path(), w, &["stat", "top.txt"]);
+    assert!(ok);
+    assert!(
+        out.starts_with("Name      : top.txt\nDate      : "),
+        "{out}"
+    );
+    assert!(
+        out.contains("\nSize      : 2 B    \nType      : file \nMetadata  :\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("  Content-Type       : text/plain \n"),
+        "{out}"
+    );
+
+    let (ok, out, _) = run_in(home.path(), w, &["--json", "stat", "sub/"]);
+    assert!(ok);
+    let docs: Vec<serde_json::Value> = out
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(docs.len(), 2, "{out}");
+    assert_eq!(docs[0]["name"], "a.txt");
+    assert_eq!(docs[0]["type"], "file");
+    assert_eq!(docs[1]["name"], "d/");
+    assert_eq!(docs[1]["type"], "folder");
+    assert_eq!(
+        docs[1]["metadata"]["Content-Type"],
+        "application/octet-stream"
+    );
+
+    let (ok, _, err) = run_in(home.path(), w, &["stat", "nope"]);
+    assert!(!ok);
+    assert!(
+        err.contains("Unable to stat `nope`. Object does not exist."),
+        "{err}"
+    );
+
+    let (ok, _, err) = run_in(home.path(), w, &["rm", "-r", "sub/d"]);
+    assert!(!ok);
+    assert!(err.contains("Removal requires --force flag."), "{err}");
+    let (ok, _, err) = run_in(home.path(), w, &["rm", "-r", "--force", "sub"]);
+    assert!(!ok);
+    assert!(err.contains("‘--dangerous’"), "{err}");
+
+    let (ok, out, _) = run_in(
+        home.path(),
+        w,
+        &["rm", "-r", "--force", "--dry-run", "sub/d"],
+    );
+    assert!(ok);
+    assert!(out.starts_with("DRYRUN: Removing `"), "{out}");
+    assert!(out.trim_end().ends_with("/sub/d/b.txt`."), "{out}");
+    assert!(w.join("sub/d/b.txt").exists());
+
+    let (ok, out, _) = run_in(home.path(), w, &["rm", "-r", "--force", "sub/d"]);
+    assert!(ok);
+    assert!(out.trim_end().ends_with("/sub/d/b.txt`."), "{out}");
+    assert!(!w.join("sub/d").exists());
+    assert!(w.join("sub/a.txt").exists());
+
+    let (ok, out, _) = run_in(home.path(), w, &["rm", "top.txt"]);
+    assert!(ok);
+    assert_eq!(out, "Removed `top.txt`.\n");
+    assert!(!w.join("top.txt").exists());
+
+    let (ok, out, err) = run_in(home.path(), w, &["rm", "nope", "sub/a.txt"]);
+    assert!(!ok);
+    assert_eq!(out, "Removed `sub/a.txt`.\n");
+    assert!(
+        err.contains("Failed to remove `nope`. Requested path `"),
+        "{err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rm_never_follows_local_symlinks() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let work = tempfile::tempdir().expect("tempdir");
+    let w = work.path();
+    std::fs::create_dir_all(w.join("keep")).unwrap();
+    std::fs::create_dir_all(w.join("x/d")).unwrap();
+    std::fs::write(w.join("keep/k"), "k").unwrap();
+    std::os::unix::fs::symlink(w.join("keep"), w.join("x/d/link")).unwrap();
+    std::os::unix::fs::symlink(w.join("keep"), w.join("x/top")).unwrap();
+
+    let (ok, out, _) = run_in(home.path(), w, &["rm", "-r", "--force", "x/d"]);
+    assert!(ok);
+    assert!(out.trim_end().ends_with("/x/d/link`."), "{out}");
+    assert!(!w.join("x/d").exists());
+    // A symlinked target is removed as a link (mc would walk into it).
+    let (ok, out, _) = run_in(home.path(), w, &["rm", "-r", "--force", "x/top/"]);
+    assert!(ok);
+    assert!(out.trim_end().ends_with("/x/top`."), "{out}");
+    assert!(std::fs::symlink_metadata(w.join("x/top")).is_err());
+    assert!(w.join("keep/k").exists());
+}

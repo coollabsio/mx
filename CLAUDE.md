@@ -39,6 +39,7 @@ Module layout:
 - `src/mirror/` mirror engine (`mod.rs`) + pure diff/plan logic (`diff.rs`)
 - `src/progress.rs` cp/mv progress bar and mc-style summary
 - `src/commands/*.rs` one module per command (`util.rs` shared helpers); `src/commands/admin/` and `src/commands/idp/` one module per subcommand group (`admin/deprecated.rs` hidden mc commands)
+- `src/local_fs.rs` mc `fsClient` behavior for local `stat`/`rm` (listings, typed errors, `deleteFile`); `src/commands/rm/local.rs`, `src/commands/stat/local.rs`
 - `src/config/` config model + load/save; `src/target.rs` / `src/location.rs` target parsing (S3 vs local); `src/resolve.rs` `--resolve` DNS; `src/transfer.rs` local inventory
 
 Conventions:
