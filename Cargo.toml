@@ -64,3 +64,10 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# Smaller release binaries (about half the size of the default profile) without
+# giving up speed: keep opt-level 3 and unwinding panics.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
