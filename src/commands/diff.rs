@@ -108,7 +108,8 @@ pub fn run(args: DiffArgs, json: bool) -> Result<()> {
     })
 }
 
-#[cfg(test)]
+// Local paths use `\` on Windows, like mc.
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
     use std::path::PathBuf;

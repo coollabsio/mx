@@ -416,10 +416,6 @@ fn validate(sources: &[Endpoint], target: &Endpoint, options: &CopyOptions) -> R
     options.time.parsed()?;
     options.metadata.attr_pairs()?;
     options.metadata.tag_pairs()?;
-    #[cfg(not(unix))]
-    if options.preserve {
-        bail!("Permissions are not preserved on this platform.");
-    }
     Ok(())
 }
 
@@ -885,10 +881,10 @@ impl Session {
         if self.options.preserve {
             // mc: source xattrs and `mc-attrs` first; `--attr` entries override them.
             let mut preserved = crate::transfer::file_xattrs(path);
-            preserved.push((
-                crate::transfer::ATTRS_METADATA_KEY.to_string(),
-                crate::transfer::file_attrs(path)?,
-            ));
+            let attrs = crate::transfer::file_attrs(path)?;
+            if !attrs.is_empty() {
+                preserved.push((crate::transfer::ATTRS_METADATA_KEY.to_string(), attrs));
+            }
             put.metadata.splice(0..0, preserved);
         }
         put.local_source(path);

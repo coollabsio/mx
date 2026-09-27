@@ -194,7 +194,10 @@ impl Parity {
         };
         let bin_dir = tempfile::tempdir().expect("tempdir");
         let mx_as_mc = bin_dir.path().join("mc");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(mx_bin(), &mx_as_mc).expect("symlink mx as mc");
+        #[cfg(not(unix))]
+        std::fs::copy(mx_bin(), &mx_as_mc).expect("copy mx as mc");
 
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -669,6 +669,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[cfg(not(windows))] // Windows paths (`C:\`)
     #[test]
     fn walk_skips_unreadable_folders() {
         let dir = tempfile::tempdir().unwrap();
@@ -834,6 +835,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))] // Windows file times have 100 ns resolution
     #[test]
     fn go_time_trims_fraction() {
         assert_eq!(go_time(UNIX_EPOCH), "1970-01-01T00:00:00Z");
@@ -847,6 +849,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))] // Windows paths (`C:\`, trailing-dot cleanup)
     #[test]
     fn lists_local_folders_like_mc() {
         let dir = tempfile::tempdir().unwrap();

@@ -390,6 +390,8 @@ fn live_cp_preserve_roundtrip() {
     assert_eq!(meta.modified().unwrap(), old);
 }
 
+// xattrs are uploaded on Linux only, like mc.
+#[cfg(target_os = "linux")]
 #[test]
 fn live_cp_preserve_xattrs_and_stream_copy_tags() {
     let Some(live) = Live::new() else { return };

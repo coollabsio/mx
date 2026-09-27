@@ -85,16 +85,17 @@ pub fn file_attrs(path: &Path) -> Result<String> {
     Ok(out)
 }
 
+/// mc's Windows `GetFileSystemAttrs` returns no attributes (callers skip empty values).
 #[cfg(not(unix))]
 pub fn file_attrs(_path: &Path) -> Result<String> {
-    anyhow::bail!("`--preserve` is not supported on this platform.")
+    Ok(String::new())
 }
 
 /// Extended attributes mc uploads with `--preserve` (`getAllXattrs`): every attribute except
 /// `system.*`, sent as user metadata named after the attribute (`user.a` -> `X-Amz-Meta-User.a`).
 /// Best effort like mc: unsupported filesystems or read errors yield none. mc never restores
-/// xattrs on download.
-#[cfg(unix)]
+/// xattrs on download. Linux only, like mc (`getAllXattrs` is a no-op on other OSes).
+#[cfg(target_os = "linux")]
 pub fn file_xattrs(path: &Path) -> Vec<(String, String)> {
     let Ok(names) = xattr::list(path) else {
         return Vec::new();
@@ -114,7 +115,7 @@ pub fn file_xattrs(path: &Path) -> Vec<(String, String)> {
 }
 
 /// mc `getXAttr`: valid UTF-8 values are sent as-is, anything else hex-encoded.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn xattr_value(value: Vec<u8>) -> String {
     String::from_utf8(value).unwrap_or_else(|error| {
         error
@@ -125,17 +126,19 @@ fn xattr_value(value: Vec<u8>) -> String {
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 pub fn file_xattrs(_path: &Path) -> Vec<(String, String)> {
     Vec::new()
 }
 
 /// Name for a numeric id from an `/etc/passwd`-style file (`name:x:id:...`).
+#[cfg(unix)]
 fn lookup_id_name(file: &str, id: u32) -> Option<String> {
     let text = std::fs::read_to_string(file).ok()?;
     parse_id_name(&text, id)
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn parse_id_name(text: &str, id: u32) -> Option<String> {
     text.lines().find_map(|line| {
         let mut fields = line.split(':');
@@ -170,6 +173,7 @@ fn parse_attr_time(value: &str) -> Option<std::time::SystemTime> {
 }
 
 /// Go `strconv.ParseUint(s, 0, 32)`: decimal, `0x` hex, or leading-`0` octal.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn parse_mode(value: &str) -> Option<u32> {
     if let Some(hex) = value.strip_prefix("0x") {
         u32::from_str_radix(hex, 16).ok()
@@ -220,12 +224,25 @@ pub fn apply_attrs(path: &Path, attrs: &std::collections::BTreeMap<String, Strin
     Ok(())
 }
 
+/// Windows has no uid/gid/mode bits; only the timestamps are restored.
 #[cfg(not(unix))]
-pub fn apply_attrs(
-    _path: &Path,
-    _attrs: &std::collections::BTreeMap<String, String>,
-) -> Result<()> {
-    anyhow::bail!("`--preserve` is not supported on this platform.")
+pub fn apply_attrs(path: &Path, attrs: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    let atime = attrs.get("atime").and_then(|v| parse_attr_time(v));
+    let mtime = attrs.get("mtime").and_then(|v| parse_attr_time(v));
+    if let (Some(atime), Some(mtime)) = (atime, mtime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| {
+                file.set_times(
+                    std::fs::FileTimes::new()
+                        .set_accessed(atime)
+                        .set_modified(mtime),
+                )
+            })
+            .with_context(|| format!("Unable to set times on `{}`.", path.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

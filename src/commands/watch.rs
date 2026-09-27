@@ -1,6 +1,6 @@
 //! `mx watch` (mc `watch`): print object notification events of a bucket / all buckets
-//! (MinIO listen API, `crate::s3::listen`) or of a local directory (inotify, like mc's
-//! `rjeczalik/notify` backend on Linux).
+//! (MinIO listen API, `crate::s3::listen`) or of a local directory (inotify on Linux, the
+//! `notify` crate elsewhere, like mc's `rjeczalik/notify` backends).
 
 use crate::commands::admin::trace::{emit, help_exit, interrupted, path_error, quiet_pipe};
 use crate::config::ConfigStore;
@@ -298,18 +298,23 @@ fn watch_s3(
 // ---------------------------------------------------------------------------
 
 /// mc's fs `Watch` needs the path to exist: notify `lstat`s it component by component.
+/// Unix paths are `/a/b`; Windows paths `C:/a/b` (see `abs_path`), where the volume is the root.
 fn check_local(path: &str) -> Result<String> {
     let abs = crate::error::abs_path(path);
-    let mut current = String::new();
-    for part in abs.split('/').filter(|p| !p.is_empty()) {
+    let (root, rest) = match abs.find('/') {
+        Some(0) | None => ("", abs.as_str()),
+        Some(index) => abs.split_at(index),
+    };
+    let mut current = root.to_string();
+    for part in rest.split('/').filter(|p| !p.is_empty()) {
         current.push('/');
         current.push_str(part);
         if let Err(err) = std::fs::symlink_metadata(&current) {
             return Err(watch_error(path_error("lstat", &current, &err)));
         }
     }
-    Ok(if current.is_empty() {
-        "/".into()
+    Ok(if current == root {
+        format!("{root}/")
     } else {
         current
     })
@@ -535,12 +540,95 @@ fn watch_local(target: &str, events: &[&str], recursive: bool, json: bool) -> Re
     })
 }
 
+/// Non-Linux local watch through the `notify` crate, like mc's `client-fs_other.go`
+/// (rjeczalik/notify: put = create/write/rename, delete = remove, no get events).
 #[cfg(not(target_os = "linux"))]
-fn watch_local(target: &str, _events: &[&str], _recursive: bool, _json: bool) -> Result<()> {
-    check_local(target)?;
-    Err(watch_error(McError::new(
-        "watching local directories is only supported on Linux",
-    )))
+fn watch_local(target: &str, events: &[&str], recursive: bool, json: bool) -> Result<()> {
+    use notify::event::{EventKind, ModifyKind};
+    use notify::{RecursiveMode, Watcher};
+    let path = check_local(target)?;
+    let want_put = events.contains(&"put");
+    let want_delete = events.contains(&"delete");
+    let os_error = |err: notify::Error| {
+        let text = match err.kind {
+            notify::ErrorKind::Io(io) => crate::commands::admin::trace::go_os_error(&io),
+            _ => err.to_string(),
+        };
+        watch_error(McError::new(text))
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let _ = tx.send(event);
+    })
+    .map_err(os_error)?;
+    let mode = if recursive {
+        RecursiveMode::Recursive
+    } else {
+        RecursiveMode::NonRecursive
+    };
+    watcher
+        .watch(std::path::Path::new(&path), mode)
+        .map_err(os_error)?;
+    crate::commands::runtime()?.block_on(async {
+        let signal = interrupted();
+        tokio::pin!(signal);
+        loop {
+            let event = tokio::select! {
+                code = &mut signal => return Err(Exit(code).into()),
+                event = rx.recv() => event,
+            };
+            let Some(event) = event else {
+                return Ok(());
+            };
+            let Ok(event) = event else {
+                continue;
+            };
+            let put = matches!(
+                event.kind,
+                EventKind::Create(_)
+                    | EventKind::Modify(
+                        ModifyKind::Data(_)
+                            | ModifyKind::Name(_)
+                            | ModifyKind::Any
+                            | ModifyKind::Other
+                    )
+            );
+            let delete = matches!(event.kind, EventKind::Remove(_));
+            for path in event.paths {
+                let path = path.to_string_lossy().replace('\\', "/");
+                let info = if put && want_put {
+                    match std::fs::metadata(&path) {
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(err) => {
+                            output::print_error(
+                                &anyhow::Error::new(path_error("stat", &path, &err))
+                                    .context(crate::error::nonfatal("Unable to watch for events.")),
+                            );
+                            return Ok(());
+                        }
+                        Ok(meta) if meta.is_dir() => continue,
+                        Ok(meta) => EventInfo {
+                            time: now_fs(),
+                            size: meta.len() as i64,
+                            path,
+                            event_type: "s3:ObjectCreated:Put".into(),
+                            ..Default::default()
+                        },
+                    }
+                } else if delete && want_delete {
+                    EventInfo {
+                        time: now_fs(),
+                        path,
+                        event_type: "s3:ObjectRemoved:Delete".into(),
+                        ..Default::default()
+                    }
+                } else {
+                    continue;
+                };
+                info.print(json)?;
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -609,6 +697,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))] // Windows OS error texts and `C:/` paths
     #[test]
     fn local_path_errors_name_the_first_missing_component() {
         let dir = tempfile::tempdir().unwrap();

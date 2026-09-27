@@ -208,6 +208,7 @@ pub fn is_not_found(err: &anyhow::Error) -> bool {
 }
 
 /// Absolute form of a local path the way mc prints it (`filepath.Abs`, no symlink resolution).
+#[cfg(not(windows))]
 pub fn abs_path(path: &str) -> String {
     let path = std::path::Path::new(path);
     let joined = if path.is_absolute() {
@@ -230,6 +231,21 @@ pub fn abs_path(path: &str) -> String {
         }
     }
     format!("/{}", parts.join("/"))
+}
+
+/// Windows: `C:/dir/file` (volume root, `/` separators so the `/`-based local path logic
+/// works unchanged); `std::path::absolute` cleans `.`/`..` like `filepath.Abs`.
+#[cfg(windows)]
+pub fn abs_path(path: &str) -> String {
+    let path = std::path::Path::new(path);
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = abs.to_string_lossy().replace('\\', "/");
+    let trimmed = text.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        format!("{trimmed}/")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// mc `PathNotFound` for a local path (made absolute like mc).
@@ -285,7 +301,10 @@ mod tests {
 
     #[test]
     fn abs_path_cleans_lexically() {
+        #[cfg(not(windows))]
         assert_eq!(abs_path("/a/./b/../c"), "/a/c");
+        #[cfg(windows)]
+        assert_eq!(abs_path("C:\\a\\.\\b\\..\\c"), "C:/a/c");
         assert!(abs_path("rel").ends_with("/rel"));
     }
 }

@@ -97,7 +97,7 @@ fn expand(text: &str, flags: Option<&str>) -> String {
             None => out.push_str(line),
         }
     }
-    out.replace("@PROG@", &crate::output::prog_name())
+    out.replace("@PROG@", &crate::output::app_name())
         .replace(
             "@CONFIG_DIR@",
             &crate::config::default_dir().display().to_string(),
@@ -390,7 +390,7 @@ mod tests {
             "NAME:\n  @PROG@ ls\nFLAGS:\n@FLAGS:2@\n  \n",
             Some("--a  x\n--b  y"),
         );
-        let prog = crate::output::prog_name();
+        let prog = crate::output::app_name();
         assert_eq!(
             text,
             format!("NAME:\n  {prog} ls\nFLAGS:\n  --a  x\n  --b  y\n  \n")

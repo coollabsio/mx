@@ -35,7 +35,7 @@ Details, intentional differences and known gaps are in [COMPATIBILITY.md](COMPAT
 | `undo` | ✅ | |
 | `share` | ✅ | `download`, `upload`, `list`. |
 | `sql` | ✅ | |
-| `watch` | ✅ | Local folders need Linux (inotify). |
+| `watch` | ✅ | Local folders: inotify on Linux, FSEvents/ReadDirectoryChangesW on macOS/Windows (no `get` events there, like mc). |
 | `tag` | ✅ | |
 | `version` | ✅ | Bucket versioning. |
 | `anonymous` | ✅ | |

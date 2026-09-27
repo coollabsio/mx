@@ -1064,6 +1064,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))] // Windows OS error texts differ
     #[test]
     fn path_errors_look_like_go() {
         let err = read_file("/nonexistent-mx-test").unwrap_err();

@@ -55,7 +55,10 @@ impl Side {
         let bin_dir = dir.join(name);
         std::fs::create_dir_all(&bin_dir).expect("bin dir");
         let program = bin_dir.join(PROG);
+        #[cfg(unix)]
         std::os::unix::fs::symlink(bin, &program).expect("symlink");
+        #[cfg(not(unix))]
+        std::fs::copy(bin, &program).expect("copy");
         Side {
             program,
             home: tempfile::tempdir().expect("home"),

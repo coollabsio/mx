@@ -10,11 +10,48 @@ It is not a MinIO product.
 
 ## Install
 
+Binaries from [GitHub Releases](https://github.com/coollabsio/mx/releases/latest):
+
+| OS | File |
+| --- | --- |
+| Linux x86_64 (static) | `mx-linux-amd64` |
+| Linux arm64 (static) | `mx-linux-arm64` |
+| macOS Apple silicon | `mx-darwin-arm64` |
+| macOS Intel | `mx-darwin-amd64` |
+| Windows x86_64 | `mx-windows-amd64.exe` |
+
+```bash
+# Linux / macOS (pick the file for your OS and CPU)
+curl -fLO https://github.com/coollabsio/mx/releases/latest/download/mx-linux-amd64
+curl -fLO https://github.com/coollabsio/mx/releases/latest/download/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+gh attestation verify mx-linux-amd64 --repo coollabsio/mx   # optional: build provenance
+install -m 0755 mx-linux-amd64 /usr/local/bin/mx
+```
+
+```powershell
+# Windows (PowerShell)
+Invoke-WebRequest -OutFile mx.exe https://github.com/coollabsio/mx/releases/latest/download/mx-windows-amd64.exe
+.\mx.exe --version
+```
+
+Downloads from a browser on macOS may need `xattr -d com.apple.quarantine mx`
+(the binaries are not notarized).
+
+The binary works under the name `mx` or `mc`: install it as `mc` (`mc.exe`) to use it as
+a drop-in replacement, e.g. `install -m 0755 mx-linux-amd64 /usr/local/bin/mc`.
+
 Container (Alpine, static binary at `/usr/bin/mc`, symlink `/usr/bin/mx`,
-`linux/amd64` and `linux/arm64`):
+`linux/amd64` and `linux/arm64`, non-root):
 
 ```bash
 docker run --rm ghcr.io/coollabsio/mx:<version> --help
+```
+
+Copy the static binary into your own image:
+
+```dockerfile
+COPY --from=ghcr.io/coollabsio/mx:<version> /usr/bin/mc /usr/bin/mc
 ```
 
 From source:
@@ -23,8 +60,6 @@ From source:
 cargo build --locked --release
 ./target/release/mx --help
 ```
-
-The binary works under the name `mx` or `mc`.
 
 ## Usage
 

@@ -837,6 +837,7 @@ mod tests {
         assert_eq!(trim_at_max_depth("/w/o", "/w/o", 2), "/w/o");
     }
 
+    #[cfg(not(windows))] // Windows file times have 100 ns resolution
     #[test]
     fn formats_rfc3339_nano() {
         let at = SystemTime::UNIX_EPOCH + Duration::new(1_704_164_645, 868_000_000);

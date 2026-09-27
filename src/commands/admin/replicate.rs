@@ -1672,6 +1672,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")] // Linux errno numbers and texts
     #[test]
     fn errno_texts_follow_go() {
         let err = std::io::Error::from_raw_os_error(6);

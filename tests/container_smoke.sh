@@ -30,7 +30,7 @@ do
     sleep 1
 done
 
-docker run --rm "$image" --help | grep 'Usage: mc'
+docker run --rm "$image" --help | grep -q '^  mc \[FLAGS\] COMMAND'
 docker run --rm --entrypoint /bin/sh "$image" -c 'test -x /usr/bin/mc && test -x /usr/bin/mx && test -f /etc/alpine-release'
 container="$(docker create "$image")"
 binary="$(mktemp)"

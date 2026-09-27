@@ -934,6 +934,7 @@ mod tests {
     }
 
     /// madmin-go `NewTierGCS`: creds are `base64.URLEncoding` of the file contents.
+    #[cfg(not(windows))] // Windows OS error texts differ
     #[test]
     fn builds_gcs_tier_config_like_madmin() {
         let dir = tempfile::tempdir().unwrap();

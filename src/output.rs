@@ -37,6 +37,17 @@ pub fn prog_name() -> String {
     .clone()
 }
 
+/// mc's app name (help, usage, `--version`): the program name with `.exe` trimmed on Windows.
+/// Error/info prefixes keep [`prog_name`] (mc `console.ProgramName`).
+pub fn app_name() -> String {
+    let name = prog_name();
+    if cfg!(windows) && name.len() > 4 && name.to_ascii_lowercase().ends_with(".exe") {
+        name[..name.len() - 4].to_string()
+    } else {
+        name
+    }
+}
+
 /// True when stdout is a terminal. mc prints indented JSON on a terminal and one compact
 /// JSON document per line otherwise (`globalJSONLine`).
 pub fn stdout_is_terminal() -> bool {

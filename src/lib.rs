@@ -85,12 +85,17 @@ pub fn version_text() -> String {
         "x86" => "386",
         other => other,
     };
+    // Go's GOOS names (`darwin`, not Rust's `macos`).
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
     format!(
         "{} version {release} (commit-id={})\nRuntime: {} {}/{arch}\nCopyright (c) {year} mx contributors (mx {})\nLicense Apache-2.0 <https://www.apache.org/licenses/LICENSE-2.0>\n",
-        output::prog_name(),
+        output::app_name(),
         option_env!("MX_COMMIT_ID").unwrap_or("unknown"),
         option_env!("MX_RUSTC_VERSION").unwrap_or("rustc"),
-        std::env::consts::OS,
+        os,
         env!("CARGO_PKG_VERSION"),
     )
 }

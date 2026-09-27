@@ -173,14 +173,16 @@ pub(crate) fn relabel(err: anyhow::Error, message: &'static str) -> anyhow::Erro
 
 /// Resolves with mc's exit status for SIGINT (130) or SIGTERM (143).
 pub(crate) async fn interrupted() -> i32 {
+    #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
     let terminate = async {
-        match term.as_mut() {
-            Some(term) => {
-                term.recv().await;
-            }
-            None => std::future::pending::<()>().await,
+        #[cfg(unix)]
+        if let Some(term) = term.as_mut() {
+            term.recv().await;
+            return;
         }
+        // Windows has no SIGTERM; only Ctrl-C (os.Interrupt in Go) ends the stream.
+        std::future::pending::<()>().await
     };
     tokio::select! {
         _ = tokio::signal::ctrl_c() => 130,
@@ -208,6 +210,10 @@ pub(crate) fn quiet_pipe(result: Result<()>) -> Result<()> {
 pub(crate) fn go_os_error(err: &std::io::Error) -> String {
     let text = err.to_string();
     let text = text.split(" (os error").next().unwrap_or(&text);
+    // Go's Windows `Errno.Error()` keeps FormatMessage's text as is.
+    if cfg!(windows) {
+        return text.to_string();
+    }
     let mut chars = text.chars();
     chars
         .next()

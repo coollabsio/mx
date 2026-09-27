@@ -28,7 +28,7 @@ other name mc does not have.
 | `get` | Supported | `--version-id`, `--enc-c`. mc `cp`-style output: `` `SRC` -> `TGT` `` and the summary (JSON: copy message with `size` 0 and summary; mc never stats the source, so `total` is 0). Setup errors (`Source is not s3.` ...) exit 0 like mc. The target may be omitted (current folder). |
 | `put` / `out` | Supported | `-P`, `-s`, `--storage-class`, `--disable-multipart`, `--checksum`, `--enc-c/--enc-s3/--enc-kms`, `--if-not-exists`. mc `cp`-style output (absolute source path, summary table; JSON `totalCount`/`totalSize` are 0 like mc). Content-Type is guessed from the file extension. Setup errors (missing file, folder source) are reported and exit 0 like mc. Multiple sources and stdin (`-`) are mx extensions. |
 | `pipe` | Supported | Bounded-memory multipart upload. `--storage-class`, `--attr`, `--tags`, `--concurrent`, `--part-size`, `--checksum`, SSE flags. Like mc it writes the progress residue `\r 0 B / ? ` to stdout (refreshed on a TTY) before the `N bytes -> TARGET` line unless `-q`/`--json`; the result line is printed with `-q` too. Content-Type is guessed from the target name. |
-| `cp`, `mv` | Supported | Follow mc rules for multiple sources and `-r` in every direction: local↔S3, S3→S3 (also across servers), and local→local. Flags: `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--tags`, `--checksum`, `--disable-multipart`, `-a/--preserve` (mc-attrs, xattrs uploaded as user metadata, source tags kept on a streamed copy between servers), `--enc-c/--enc-s3/--enc-kms`, `--rewind`, `--version-id`, `--legal-hold`, `--retention-mode/--retention-duration`, `--zip`, `--max-workers` (`--rewind`, `--version-id`, `--legal-hold`, `--retention-*`, `--zip`, and `--max-workers` are `cp` only). Objects larger than 5 GiB use server-side multipart copy. They show a progress bar on a TTY. Otherwise they print mc's `` `SRC` -> `TGT` `` lines (local sources as absolute paths) and a summary; JSON `totalSize` is always 0 like mc. Uploads from local files send the Content-Type guessed from the extension. |
+| `cp`, `mv` | Supported | Follow mc rules for multiple sources and `-r` in every direction: local↔S3, S3→S3 (also across servers), and local→local. Flags: `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--tags`, `--checksum`, `--disable-multipart`, `-a/--preserve` (mc-attrs on Linux/macOS, xattrs on Linux only like mc, uploaded as user metadata; on Windows no attributes are sent and downloads restore timestamps only, source tags kept on a streamed copy between servers), `--enc-c/--enc-s3/--enc-kms`, `--rewind`, `--version-id`, `--legal-hold`, `--retention-mode/--retention-duration`, `--zip`, `--max-workers` (`--rewind`, `--version-id`, `--legal-hold`, `--retention-*`, `--zip`, and `--max-workers` are `cp` only). Objects larger than 5 GiB use server-side multipart copy. They show a progress bar on a TTY. Otherwise they print mc's `` `SRC` -> `TGT` `` lines (local sources as absolute paths) and a summary; JSON `totalSize` is always 0 like mc. Uploads from local files send the Content-Type guessed from the extension. |
 | `rm` | Supported | Takes multiple targets. `-r --force`, `--versions`, `--version-id`, `--non-current`, `--rewind`, `--dangerous`, `-I`, `--dry-run`, `--stdin`, `--older-than`, `--newer-than`, `--bypass`, `--purge`. Output lines and JSON match mc. |
 | `mirror` | Supported | Works in every direction, including from or to an alias root. Uses mc's change detection. `--overwrite`, `--remove`, `--dry-run`, `-w/--watch` (polling rescan), `--region`, `-a`, `--active-active`, `--disable-multipart`, `--exclude`, `--exclude-bucket`, `--exclude-storageclass`, `--older-than`, `--newer-than`, `--storage-class`, `--attr`, `--retry`, `--summary`, `--skip-errors`, `--max-workers`, `--checksum`, SSE flags, `--monitoring-address` (Prometheus `/metrics` with mc's `mc_mirror_*` metrics; no Go runtime metrics). Output matches mc: `SRC -> TGT` lines (initial-pass removals print `` `` -> `TGT` ``), no per-object lines with `--dry-run`, and the `Total/Transferred/Duration/Speed` summary (table or JSON document) at the end of every non-watch run; errors use endpoint URLs like mc. Local uploads send the Content-Type guessed from the extension. |
 | `du` | Supported | `-r`, `-d`, `--versions`, `--rewind`. Multiple targets. S3 aliases and local paths. mc lines `SIZE<TAB>N objects<TAB>PREFIX`, deepest folders first. Local paths ignore `--versions`/`--rewind` like mc. |
@@ -38,7 +38,7 @@ other name mc does not have.
 | `share download`, `upload`, `list` | Supported | `-r`, `--version-id`, `-E/--expire` (default `168h`), `-T`. Presigned URLs carry the same query parameters as mc (no SDK `x-id`); JSON keeps `&` unescaped like mc. `upload` prints a `curl` command with a POST policy; its `-F` fields are sorted (mc's order is random). `list` uses mc's share database in `<config dir>/share/`. |
 | `od` | Supported | Single-stream upload and download measurement. mc output and errors (local sources shown as absolute paths). |
 | `undo` | Supported | `-r --force`, `--last`, `--action`, `--dry-run`. mc output and errors. |
-| `watch` | Supported | Bucket (`ALIAS/BUCKET[/PREFIX]`), all buckets (`ALIAS`) through the MinIO listen API, and local directories through inotify (Linux) with mc's event masks. `--events` (`put,delete,get,replica,ilm,bucket-creation,bucket-removal,scanner`), `--prefix`, `--suffix`, `--recursive`. mc lines `[TIME]   SIZE EVENT URL` and JSON (`events`, `source`); reconnects when the server closes the stream. A failed listen request is reported like mc (`errorIf`, exit 0). Runs until interrupted (SIGINT 130, SIGTERM 143 like mc). Local recursive watches may report a different number of directory `Get` events at startup than mc's notify library. |
+| `watch` | Supported | Bucket (`ALIAS/BUCKET[/PREFIX]`), all buckets (`ALIAS`) through the MinIO listen API, and local directories with mc's event masks: inotify on Linux, the `notify` crate (FSEvents, ReadDirectoryChangesW) on macOS and Windows like mc's `rjeczalik/notify` (`put` = create/write/rename, `delete` = remove, no `get` events). `--events` (`put,delete,get,replica,ilm,bucket-creation,bucket-removal,scanner`), `--prefix`, `--suffix`, `--recursive`. mc lines `[TIME]   SIZE EVENT URL` and JSON (`events`, `source`); reconnects when the server closes the stream. A failed listen request is reported like mc (`errorIf`, exit 0). Runs until interrupted (SIGINT 130, SIGTERM 143 like mc; Ctrl-C only on Windows). Local recursive watches may report a different number of directory `Get` events at startup than mc's notify library. |
 | `sql` | Supported | S3 Select (`SelectObjectContent`) via the AWS SDK event stream. `-e/--query`, `-r`, `--csv-input`, `--json-input`, `--compression`, `--csv-output`, `--csv-output-header` (`""` reads the object's first line), `--json-output`, `--enc-c`. mc's option parsing (abbreviations, `\n` escapes), serialization defaults (by extension, gzip/bzip2 by MIME type) and errors; per-object failures are reported and exit 0 like mc. Differences: the list of valid option keys in errors has a fixed order (mc prints a Go map in random order); folder listings pick objects by extension only (mc also reads the listed `content-type` user metadata). |
 
 ### Bucket configuration
@@ -253,15 +253,35 @@ Terminal-only views approximate mc's bubbletea/lipgloss rendering (no colors, bo
 may differ; content and keys match): `replicate backlog`, `admin heal`, `admin service
 restart`, `admin replicate resync status`, `admin trace --stats`, `admin scanner
 status`, `batch status`. Their non-terminal behavior and `--json` match mc.
-`admin trace --in` / `admin scanner status --in` do not read `.zst` files. Local `watch`
-uses inotify (Linux only).
+`admin trace --in` / `admin scanner status --in` do not read `.zst` files.
+
+## Platforms
+
+mx builds for Linux, macOS and Windows (CI builds and unit-tests all three; the CLI and
+live suites run on Linux).
+
+- Windows: local paths in messages are absolute with `/` separators (`C:/dir/file`; mc
+  prints `C:\dir\file`). Local files map to object keys with `/` like mc. The program name
+  in help and `--version` drops `.exe` (mc too); error prefixes keep it (`mx.exe: <ERROR>`,
+  like mc's `mc.exe:`). OS error texts are Windows' own, like Go. There is no SIGTERM;
+  streaming commands stop on Ctrl-C (exit 130).
+- macOS: `--version` prints Go's OS name (`darwin/arm64`).
 
 ## Container and release binaries
 
-- The container provides a static Linux binary at `/usr/bin/mc` and supports
-  amd64 and arm64 builds.
-- Version tags `v*.*.*` publish `ghcr.io/<owner>/mx:<version>` and GitHub
-  Release binaries `mx-linux-amd64`, `mx-linux-arm64`, `mc-linux-amd64`, and
-  `mc-linux-arm64`. See `.github/workflows/release.yml`.
+- The container (`ghcr.io/coollabsio/mx`, Alpine, `linux/amd64` + `linux/arm64`, non-root)
+  provides the static Linux binary at `/usr/bin/mc` with an `mx` symlink.
+- A version tag `vX.Y.Z` (must equal the `Cargo.toml` version) publishes, after the CI
+  test job passed for that commit:
+  - GitHub Release files `mx-linux-amd64`, `mx-linux-arm64` (static musl),
+    `mx-darwin-arm64`, `mx-darwin-amd64`, `mx-windows-amd64.exe` (static CRT) and
+    `SHA256SUMS`. There are no separate `mc-*` files; install or rename a binary to `mc`
+    (`mc.exe`) to get mc's program name.
+  - Image tags `X.Y.Z`, `X.Y`, `latest` and `sha-<commit>`.
+  - GitHub build provenance attestations for every binary and the image
+    (`gh attestation verify`).
+- `mx -v` of a release build shows `RELEASE.<commit time UTC>`, the tagged commit and
+  `(mx X.Y.Z)`; the release workflow checks this for every binary.
+  See `.github/workflows/release.yml` and `CONTRIBUTIONS.md`.
 
 Unsupported options fail. The client does not silently ignore them.

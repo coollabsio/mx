@@ -281,6 +281,7 @@ fn watch_argument_errors_match_mc() {
 }
 
 /// Spawns `mx ARGS`, runs `action` once it is listening, then stops it with SIGTERM.
+#[cfg(target_os = "linux")]
 fn stream_output(args: &[&str], action: impl FnOnce()) -> (String, Option<i32>) {
     let h = home();
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("mx"))

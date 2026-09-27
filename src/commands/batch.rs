@@ -926,6 +926,7 @@ mod tests {
         assert_eq!(job_state(&metric), "failed");
     }
 
+    #[cfg(not(windows))] // Windows OS error texts differ
     #[test]
     fn path_errors_look_like_go() {
         let err = read_file("/nonexistent/job.yaml").unwrap_err();

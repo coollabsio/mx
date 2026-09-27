@@ -47,12 +47,15 @@ Conventions:
 - Dates in output are UTC
 - Errors: raise `McError` causes, attach mc's message with `.context("Unable to ...")` (fatal) or `.context(nonfatal("..."))` (mc `errorIf` + exit 1); map SDK errors with `.s3(bucket, key)` (server message) or `.s3_object(...)` (HEAD/GET/PUT/COPY object, mc translations); unknown aliases are local paths
 - mc's bubbletea views: without a TTY fail like mc (`could not open a new TTY`); on a TTY mx draws a simplified view
+- Portable: mx ships for Linux (static musl), macOS (arm64/amd64) and Windows (MSVC). Gate OS-specific code with `cfg` and give a fallback that matches mc on that OS (mc's `*_windows.go`/`*_other.go`); tests that assume Linux paths/errno texts get `#[cfg(not(windows))]`/`#[cfg(target_os = "linux")]`. CI's `build` job builds and unit-tests macOS/Windows. Local Windows check: `cargo clippy/test --no-run --target x86_64-pc-windows-gnu` in a `rust` container with `mingw-w64`
 
 Known gaps vs full `mc` (details in COMPATIBILITY.md "Remaining gaps"):
 
 - S3 transport errors lack mc's `Get "URL": ` prefix; JSON errors do not embed Go's `*url.Error`
 - TTY-only views approximate bubbletea/lipgloss (no colors); `--in` does not read `.zst`
 - untestable live: `admin user sts info` success, azure/gcs tiers beyond validation, SSE-C `ilm restore` end to end (best effort)
+
+Release: bump `Cargo.toml` version, tag `vX.Y.Z` (must match); `.github/workflows/release.yml` gates on `ci.yml` (`workflow_call`), builds all binaries with `MX_COMMIT_ID`/`SOURCE_DATE_EPOCH`, checks `mx -v`, attests and publishes (steps in CONTRIBUTIONS.md).
 
 Testing requirements:
 

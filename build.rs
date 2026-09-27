@@ -18,14 +18,16 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=MX_COMMIT_ID={commit}");
 
-    // mc-style release tag `RELEASE.2026-09-26T16-30-04Z` from the commit time (or
-    // SOURCE_DATE_EPOCH / build time); MX_RELEASE overrides it.
+    // mc-style release tag `RELEASE.2026-09-26T16-30-04Z` from SOURCE_DATE_EPOCH (release
+    // builds pass the commit time), else the git commit time, else the build time. MX_RELEASE
+    // overrides it. Builds without .git (Docker) get MX_COMMIT_ID/SOURCE_DATE_EPOCH as env.
     let release = std::env::var("MX_RELEASE")
         .ok()
         .filter(|tag| !tag.is_empty())
         .unwrap_or_else(|| {
             let epoch = std::env::var("SOURCE_DATE_EPOCH")
                 .ok()
+                .filter(|value| !value.trim().is_empty())
                 .or_else(|| command_output("git", &["log", "-1", "--format=%ct"]))
                 .and_then(|value| value.trim().parse::<i64>().ok())
                 .unwrap_or_else(|| {
