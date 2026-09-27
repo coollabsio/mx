@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::parity::{Parity, Tool, line_diff};
+use common::parity::{Parity, TIMED_OUT, Tool, line_diff};
 
 fn batch_fixture() -> Option<Parity> {
     let mut p = Parity::bare()?;
@@ -130,11 +130,11 @@ fn sql_fixture() -> Option<Parity> {
 }
 
 /// Like [`Parity::assert_parity`] (normalized stdout, stderr, exit code), retrying while the
-/// reference mc panics.
+/// reference mc panics or hangs.
 fn assert_sql(p: &Parity, args: &[&str]) {
     for _ in 0..8 {
         let (mc, mx) = p.run(args, None);
-        if mc.stderr.contains("panic: ") {
+        if mc.stderr.contains("panic: ") || mc.stderr.contains(TIMED_OUT) {
             continue;
         }
         let mut report = String::new();
@@ -160,7 +160,10 @@ fn assert_sql(p: &Parity, args: &[&str]) {
         );
         return;
     }
-    panic!("reference mc kept panicking for `mc {}`", args.join(" "));
+    panic!(
+        "reference mc kept panicking or hanging for `mc {}`",
+        args.join(" ")
+    );
 }
 
 #[test]

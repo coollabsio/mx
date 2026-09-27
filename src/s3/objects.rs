@@ -39,10 +39,11 @@ pub struct PutOptions {
     pub checksum: Option<ChecksumAlgo>,
     /// Always use a single PutObject (max 5 GiB).
     pub disable_multipart: bool,
-    /// Fixed multipart part size in bytes (5 MiB..=5 GiB). Default: 8 MiB, growing for huge
-    /// unknown-size streams, or `ceil(size / 10000)` when the size is known.
+    /// Fixed multipart part size in bytes (5 MiB..=5 GiB); also the single-PUT threshold.
+    /// Default: minio-go's `OptimalPartInfo` (16 MiB, larger for huge objects, 528 MiB for
+    /// unknown sizes).
     pub part_size: Option<u64>,
-    /// Number of parts uploaded concurrently (default 1).
+    /// Number of parts uploaded concurrently (default 4, minio-go `totalWorkers`).
     pub parallel: Option<usize>,
     /// Object lock legal hold ON/OFF.
     pub legal_hold: Option<bool>,
@@ -405,12 +406,12 @@ pub async fn put_local_file_with(
     path: &Path,
     options: &PutOptions,
 ) -> Result<PutOutcome> {
-    let file = tokio::fs::File::open(path)
+    let size = tokio::fs::metadata(path)
         .await
-        .with_context(|| format!("Unable to read local file `{}`.", path.display()))?;
-    let size = file.metadata().await.ok().map(|meta| meta.len());
+        .with_context(|| format!("Unable to read local file `{}`.", path.display()))?
+        .len();
     let client = build_client(alias).await?;
-    upload_stream(&client, bucket, key, file, size, options).await
+    super::upload_file(&client, bucket, key, path, size, options, None).await
 }
 
 pub async fn put_local_file(
@@ -498,7 +499,7 @@ pub async fn download_object_to_path_with(
     let mut destination = tokio::fs::File::create(path)
         .await
         .with_context(|| format!("Unable to write local file `{}`.", path.display()))?;
-    let bytes = tokio::io::copy(&mut source, &mut destination).await?;
+    let bytes = crate::transfer::copy_to_file(&mut source, &mut destination).await?;
     Ok(bytes as i64)
 }
 

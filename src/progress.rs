@@ -318,6 +318,52 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
     }
 }
 
+/// Wraps a request body so the bytes it yields are added to `progress` (like
+/// [`ProgressReader`] for bodies that are not read through this process's buffers).
+pub fn count_body(
+    body: aws_smithy_types::body::SdkBody,
+    progress: Arc<Progress>,
+) -> aws_smithy_types::body::SdkBody {
+    body.map(move |inner| {
+        aws_smithy_types::body::SdkBody::from_body_1_x(CountingBody {
+            inner,
+            progress: progress.clone(),
+        })
+    })
+}
+
+struct CountingBody {
+    inner: aws_smithy_types::body::SdkBody,
+    progress: Arc<Progress>,
+}
+
+impl http_body::Body for CountingBody {
+    type Data = bytes::Bytes;
+    type Error = aws_smithy_types::body::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_frame(cx);
+        if let Poll::Ready(Some(Ok(frame))) = &result
+            && let Some(data) = frame.data_ref()
+        {
+            this.progress.add(data.len() as u64);
+        }
+        result
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::Body::size_hint(&self.inner)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +400,23 @@ mod tests {
         let table = stat.table();
         assert!(table.contains("│ Total │ Transferred │ Duration │ Speed │"));
         assert!(table.contains("│ 6 B   │ 6 B         │ 00m01s   │ 6 B/s │"));
+    }
+
+    #[test]
+    fn body_counts_bytes_and_keeps_length() {
+        let progress = Progress::new(5, false);
+        let body = count_body(
+            aws_smithy_types::body::SdkBody::from("hello"),
+            progress.clone(),
+        );
+        assert_eq!(body.content_length(), Some(5));
+        let data = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(aws_smithy_types::byte_stream::ByteStream::new(body).collect())
+            .unwrap()
+            .into_bytes();
+        assert_eq!(&data[..], b"hello");
+        assert_eq!(progress.transferred(), 5);
     }
 
     #[test]

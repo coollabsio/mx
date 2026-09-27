@@ -54,6 +54,10 @@ libc = "0.2"
 [target."cfg(target_os = \"linux\")".dependencies]
 xattr = "1.6"
 
+# musl's malloc serializes on one lock; the static Linux build uses mimalloc instead.
+[target."cfg(target_env = \"musl\")".dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 # mc watches local folders with rjeczalik/notify on non-Linux OSes (FSEvents, ReadDirectoryChangesW).
 [target."cfg(not(target_os = \"linux\"))".dependencies]
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
@@ -64,3 +68,10 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# Smaller release binaries (about half the size of the default profile) without
+# giving up speed: keep opt-level 3 and unwinding panics.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

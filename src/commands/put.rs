@@ -5,7 +5,7 @@ use crate::error::{McError, abs_path, nonfatal};
 use crate::flags::{ChecksumFlag, EncFlags, parse_size};
 use crate::location::{Location, parse_location};
 use crate::progress::{CopyMessage, Progress, ProgressReader};
-use crate::s3::{BlockingReader, PutOptions, upload_stream};
+use crate::s3::{BlockingReader, PutOptions, upload_file, upload_stream};
 use anyhow::{Context, Result, bail};
 use clap::Args;
 
@@ -133,11 +133,8 @@ pub fn run(args: PutArgs, json: bool) -> Result<()> {
             match &path {
                 Some(path) => {
                     options.local_source(path);
-                    let file = tokio::fs::File::open(path).await.with_context(|| {
-                        format!("Unable to read local file `{}`.", path.display())
-                    })?;
-                    let reader = ProgressReader::new(file, progress.clone());
-                    upload_stream(&client, &bucket, &key, reader, Some(size), &options).await
+                    let progress = Some(progress.clone());
+                    upload_file(&client, &bucket, &key, path, size, &options, progress).await
                 }
                 None => {
                     let stdin = BlockingReader::new(std::io::stdin().lock());

@@ -888,17 +888,14 @@ impl Session {
             put.metadata.splice(0..0, preserved);
         }
         put.local_source(path);
-        let file = tokio::fs::File::open(path)
-            .await
-            .with_context(|| format!("Unable to read local file `{}`.", path.display()))?;
-        let reader = ProgressReader::new(file, self.progress.clone());
-        crate::s3::upload_stream(
+        crate::s3::upload_file(
             self.clients.client(alias),
             bucket,
             key,
-            reader,
-            Some(task.size),
+            path,
+            task.size,
             &put,
+            Some(self.progress.clone()),
         )
         .await?;
         Ok(())
@@ -938,7 +935,7 @@ impl Session {
     }
 
     async fn copy_local(&self, source: &Path, target: &Path) -> Result<()> {
-        let file = tokio::fs::File::open(source)
+        let file = crate::transfer::open_buffered(source)
             .await
             .with_context(|| format!("Unable to read local file `{}`.", source.display()))?;
         write_local(ProgressReader::new(file, self.progress.clone()), target).await?;
@@ -1060,8 +1057,7 @@ pub(crate) async fn write_local<R: tokio::io::AsyncRead + Unpin>(
         let mut file = tokio::fs::File::create(&part)
             .await
             .with_context(|| format!("Unable to write local file `{}`.", path.display()))?;
-        tokio::io::copy(&mut reader, &mut file).await?;
-        tokio::io::AsyncWriteExt::flush(&mut file).await?;
+        crate::transfer::copy_to_file(&mut reader, &mut file).await?;
         drop(file);
         tokio::fs::rename(&part, path)
             .await
